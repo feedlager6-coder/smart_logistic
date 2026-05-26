@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "SmartRoute"
+version = "1.0.0"
+id = "artifacts/smartroute"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 24853
+
+[services.development]
+run = "pnpm --filter @workspace/smartroute run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/smartroute", "run", "build" ]
+publicDir = "artifacts/smartroute/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "24853"
+BASE_PATH = "/"

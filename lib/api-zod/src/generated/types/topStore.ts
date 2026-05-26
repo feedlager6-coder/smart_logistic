@@ -6,6 +6,8 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface HealthStatus {
-  status: string;
+export interface TopStore {
+  store_id: number;
+  store_name: string;
+  visit_count: number;
 }

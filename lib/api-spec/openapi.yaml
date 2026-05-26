@@ -3,13 +3,19 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: SmartRoute API - Delivery route optimization
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: stores
+    description: Store management
+  - name: routes
+    description: Route optimization
+  - name: analytics
+    description: Analytics and statistics
 paths:
   /healthz:
     get:
@@ -24,6 +30,192 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /stores:
+    get:
+      operationId: listStores
+      tags: [stores]
+      summary: List all stores
+      responses:
+        "200":
+          description: List of stores
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Store"
+    post:
+      operationId: createStore
+      tags: [stores]
+      summary: Create a store
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StoreInput"
+      responses:
+        "201":
+          description: Created store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Store"
+
+  /stores/{id}:
+    get:
+      operationId: getStore
+      tags: [stores]
+      summary: Get a store by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Store"
+        "404":
+          description: Not found
+    put:
+      operationId: updateStore
+      tags: [stores]
+      summary: Update a store
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StoreUpdate"
+      responses:
+        "200":
+          description: Updated store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Store"
+    delete:
+      operationId: deleteStore
+      tags: [stores]
+      summary: Delete a store
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /stores/{id}/geocode:
+    post:
+      operationId: geocodeStore
+      tags: [stores]
+      summary: Geocode a store address
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Geocoded store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Store"
+
+  /route/build:
+    post:
+      operationId: buildRoute
+      tags: [routes]
+      summary: Build optimized delivery routes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RouteRequest"
+      responses:
+        "200":
+          description: Optimized routes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteResult"
+
+  /analytics/summary:
+    get:
+      operationId: getAnalyticsSummary
+      tags: [analytics]
+      summary: Monthly analytics summary
+      responses:
+        "200":
+          description: Analytics summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyticsSummary"
+
+  /analytics/daily:
+    get:
+      operationId: getAnalyticsDaily
+      tags: [analytics]
+      summary: Daily analytics (last 30 days)
+      responses:
+        "200":
+          description: Daily stats
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DailyStat"
+
+  /analytics/monthly:
+    get:
+      operationId: getAnalyticsMonthly
+      tags: [analytics]
+      summary: Monthly analytics (last 12 months)
+      responses:
+        "200":
+          description: Monthly stats
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/MonthlyStat"
+
+  /analytics/top-stores:
+    get:
+      operationId: getTopStores
+      tags: [analytics]
+      summary: Top 10 most frequently visited stores
+      responses:
+        "200":
+          description: Top stores
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TopStore"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +226,277 @@ components:
       required:
         - status
 
+    Store:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        address:
+          type: string
+        lat:
+          type: ["number", "null"]
+        lon:
+          type: ["number", "null"]
+        geocode_status:
+          type: string
+          enum: [found, pending, not_found]
+        time_window_from:
+          type: string
+        time_window_to:
+          type: string
+        unload_minutes:
+          type: integer
+        created_at:
+          type: string
+      required:
+        - id
+        - name
+        - address
+        - geocode_status
+        - time_window_from
+        - time_window_to
+        - unload_minutes
+
+    StoreInput:
+      type: object
+      properties:
+        name:
+          type: string
+        address:
+          type: string
+        time_window_from:
+          type: string
+        time_window_to:
+          type: string
+        unload_minutes:
+          type: integer
+      required:
+        - name
+        - address
+
+    StoreUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        address:
+          type: string
+        lat:
+          type: ["number", "null"]
+        lon:
+          type: ["number", "null"]
+        time_window_from:
+          type: string
+        time_window_to:
+          type: string
+        unload_minutes:
+          type: integer
+
+    ImportResult:
+      type: object
+      properties:
+        total:
+          type: integer
+        imported:
+          type: integer
+        failed:
+          type: integer
+        stores:
+          type: array
+          items:
+            $ref: "#/components/schemas/Store"
+      required:
+        - total
+        - imported
+        - failed
+        - stores
+
+    RouteRequest:
+      type: object
+      properties:
+        store_ids:
+          type: array
+          items:
+            type: integer
+        vehicles:
+          type: array
+          items:
+            $ref: "#/components/schemas/VehicleInput"
+        depot_lat:
+          type: ["number", "null"]
+        depot_lon:
+          type: ["number", "null"]
+        use_time_windows:
+          type: boolean
+        use_unload_time:
+          type: boolean
+      required:
+        - store_ids
+        - vehicles
+
+    VehicleInput:
+      type: object
+      properties:
+        name:
+          type: string
+        capacity_kg:
+          type: ["integer", "null"]
+      required:
+        - name
+
+    RouteResult:
+      type: object
+      properties:
+        routes:
+          type: array
+          items:
+            $ref: "#/components/schemas/VehicleRoute"
+        savings:
+          $ref: "#/components/schemas/Savings"
+        total_km:
+          type: number
+      required:
+        - routes
+        - savings
+        - total_km
+
+    VehicleRoute:
+      type: object
+      properties:
+        vehicle_name:
+          type: string
+        stores:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteStop"
+        total_km:
+          type: number
+        estimated_minutes:
+          type: integer
+        yandex_url:
+          type: string
+        whatsapp_url:
+          type: string
+      required:
+        - vehicle_name
+        - stores
+        - total_km
+        - estimated_minutes
+        - yandex_url
+        - whatsapp_url
+
+    RouteStop:
+      type: object
+      properties:
+        order:
+          type: integer
+        store_id:
+          type: integer
+        store_name:
+          type: string
+        address:
+          type: string
+        lat:
+          type: ["number", "null"]
+        lon:
+          type: ["number", "null"]
+        arrive_by:
+          type: ["string", "null"]
+      required:
+        - order
+        - store_id
+        - store_name
+        - address
+
+    Savings:
+      type: object
+      properties:
+        optimized_km:
+          type: number
+        unoptimized_km:
+          type: number
+        saved_km:
+          type: number
+        saved_rub_day:
+          type: integer
+        saved_rub_month:
+          type: integer
+      required:
+        - optimized_km
+        - unoptimized_km
+        - saved_km
+        - saved_rub_day
+        - saved_rub_month
+
+    AnalyticsSummary:
+      type: object
+      properties:
+        total_routes:
+          type: integer
+        total_km:
+          type: number
+        saved_km:
+          type: number
+        saved_rub:
+          type: integer
+        avg_points_per_route:
+          type: number
+      required:
+        - total_routes
+        - total_km
+        - saved_km
+        - saved_rub
+        - avg_points_per_route
+
+    DailyStat:
+      type: object
+      properties:
+        date:
+          type: string
+        routes:
+          type: integer
+        total_km:
+          type: number
+        saved_km:
+          type: number
+        saved_rub:
+          type: integer
+      required:
+        - date
+        - routes
+        - total_km
+        - saved_km
+        - saved_rub
+
+    MonthlyStat:
+      type: object
+      properties:
+        month:
+          type: string
+        routes:
+          type: integer
+        total_km:
+          type: number
+        saved_rub:
+          type: integer
+      required:
+        - month
+        - routes
+        - total_km
+        - saved_rub
+
+    TopStore:
+      type: object
+      properties:
+        store_id:
+          type: integer
+        store_name:
+          type: string
+        visit_count:
+          type: integer
+      required:
+        - store_id
+        - store_name
+        - visit_count

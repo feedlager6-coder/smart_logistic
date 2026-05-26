@@ -5,7 +5,11 @@
  * SmartRoute API - Delivery route optimization
  * OpenAPI spec version: 0.1.0
  */
+import type { Store } from './store';
 
-export interface HealthStatus {
-  status: string;
+export interface ImportResult {
+  total: number;
+  imported: number;
+  failed: number;
+  stores: Store[];
 }

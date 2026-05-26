@@ -6,6 +6,9 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface HealthStatus {
-  status: string;
+export interface MonthlyStat {
+  month: string;
+  routes: number;
+  total_km: number;
+  saved_rub: number;
 }

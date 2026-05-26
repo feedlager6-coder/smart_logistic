@@ -6,6 +6,10 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface HealthStatus {
-  status: string;
+export interface Savings {
+  optimized_km: number;
+  unoptimized_km: number;
+  saved_km: number;
+  saved_rub_day: number;
+  saved_rub_month: number;
 }

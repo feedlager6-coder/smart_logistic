@@ -6,6 +6,10 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface HealthStatus {
-  status: string;
+export interface StoreInput {
+  name: string;
+  address: string;
+  time_window_from?: string;
+  time_window_to?: string;
+  unload_minutes?: number;
 }
