@@ -48,6 +48,32 @@ export const CreateStoreBody = zod.object({
 
 
 /**
+ * @summary Import stores from Excel file
+ */
+export const ImportStoresBody = zod.object({
+  "file": zod.instanceof(File)
+})
+
+export const ImportStoresResponse = zod.object({
+  "total": zod.number(),
+  "imported": zod.number(),
+  "failed": zod.number(),
+  "stores": zod.array(zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "address": zod.string(),
+  "lat": zod.number().nullish(),
+  "lon": zod.number().nullish(),
+  "geocode_status": zod.enum(['found', 'pending', 'not_found']),
+  "time_window_from": zod.string(),
+  "time_window_to": zod.string(),
+  "unload_minutes": zod.number(),
+  "created_at": zod.string().optional()
+}))
+})
+
+
+/**
  * @summary Get a store by ID
  */
 export const GetStoreParams = zod.object({
@@ -135,7 +161,8 @@ export const BuildRouteBody = zod.object({
   "store_ids": zod.array(zod.number()),
   "vehicles": zod.array(zod.object({
   "name": zod.string(),
-  "capacity_kg": zod.number().nullish()
+  "capacity_kg": zod.number().nullish(),
+  "average_speed": zod.number().nullish().describe('Average speed in km\/h for this vehicle (overrides global default)')
 })),
   "depot_lat": zod.number().nullish(),
   "depot_lon": zod.number().nullish(),
@@ -144,6 +171,45 @@ export const BuildRouteBody = zod.object({
 })
 
 export const BuildRouteResponse = zod.object({
+  "session_id": zod.number().nullish(),
+  "routes": zod.array(zod.object({
+  "vehicle_name": zod.string(),
+  "stores": zod.array(zod.object({
+  "order": zod.number(),
+  "store_id": zod.number(),
+  "store_name": zod.string(),
+  "address": zod.string(),
+  "lat": zod.number().nullish(),
+  "lon": zod.number().nullish(),
+  "arrive_by": zod.string().nullish()
+})),
+  "total_km": zod.number(),
+  "estimated_minutes": zod.number(),
+  "yandex_url": zod.string(),
+  "whatsapp_url": zod.string()
+})),
+  "savings": zod.object({
+  "optimized_km": zod.number(),
+  "unoptimized_km": zod.number(),
+  "saved_km": zod.number(),
+  "saved_rub_day": zod.number(),
+  "saved_rub_month": zod.number()
+}),
+  "total_km": zod.number(),
+  "matrix_source": zod.enum(['graphhopper', 'haversine']).optional().describe('Distance matrix source used for optimization'),
+  "geocoder_used": zod.enum(['yandex', 'nominatim']).optional().describe('Geocoding service used for address resolution')
+})
+
+
+/**
+ * @summary Get a saved route session by ID
+ */
+export const GetRouteSessionParams = zod.object({
+  "id": zod.coerce.number()
+})
+
+export const GetRouteSessionResponse = zod.object({
+  "session_id": zod.number().nullish(),
   "routes": zod.array(zod.object({
   "vehicle_name": zod.string(),
   "stores": zod.array(zod.object({

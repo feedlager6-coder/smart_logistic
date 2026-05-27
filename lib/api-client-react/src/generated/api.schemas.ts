@@ -64,6 +64,11 @@ export interface VehicleInput {
   name: string;
   /** @nullable */
   capacity_kg?: number | null;
+  /**
+     * Average speed in km/h for this vehicle (overrides global default)
+     * @nullable
+     */
+  average_speed?: number | null;
 }
 
 export interface RouteRequest {
@@ -130,6 +135,8 @@ export interface Savings {
 }
 
 export interface RouteResult {
+  /** @nullable */
+  session_id?: number | null;
   routes: VehicleRoute[];
   savings: Savings;
   total_km: number;
@@ -167,4 +174,8 @@ export interface TopStore {
   store_name: string;
   visit_count: number;
 }
+
+export type ImportStoresBody = {
+  file: Blob;
+};
 

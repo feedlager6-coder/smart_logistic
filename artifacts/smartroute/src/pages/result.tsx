@@ -1,12 +1,16 @@
 import { useEffect, useState, Fragment } from "react";
-import { Link, useLocation } from "wouter";
+import { Link, useLocation, useParams } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { MapPin, Navigation, Share2, Download, RefreshCw, Car, ArrowRight, Clock } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check } from "lucide-react";
 import { MapContainer, TileLayer, Polyline, Marker, Popup } from "react-leaflet";
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
+import { useGetRouteSession } from "@workspace/api-client-react";
+import { useIsMobile } from "@/hooks/use-mobile";
+import { useToast } from "@/hooks/use-toast";
 
 // Fix leaflet default icon
 delete (L.Icon.Default.prototype as any)._getIconUrl;
@@ -22,28 +26,146 @@ const COLORS = ["#0ea5e9", "#f43f5e", "#8b5cf6", "#10b981", "#f59e0b"];
 
 export function ResultPage() {
   const [, setLocation] = useLocation();
-  const [result, setResult] = useState<RouteResult | null>(null);
+  const params = useParams<{ id?: string }>();
+  const sessionId = params?.id ? parseInt(params.id) : null;
+  const isMobile = useIsMobile();
+  const { toast } = useToast();
+  const [copied, setCopied] = useState(false);
+  const [localResult, setLocalResult] = useState<RouteResult | null>(null);
+  const [activeVehicleIndex, setActiveVehicleIndex] = useState(0);
 
+  const { data: serverResult, isLoading: sessionLoading } = useGetRouteSession(
+    sessionId ?? 0,
+    { query: { enabled: !!sessionId } }
+  );
+
+  // Fallback: load from localStorage (legacy, no session_id in URL)
   useEffect(() => {
-    const data = localStorage.getItem("smartroute_result");
-    if (data) {
-      try {
-        setResult(JSON.parse(data));
-      } catch (e) {
-        console.error("Failed to parse route result");
+    if (!sessionId) {
+      const data = localStorage.getItem("smartroute_result");
+      if (data) {
+        try {
+          setLocalResult(JSON.parse(data));
+        } catch (e) {
+          console.error("Failed to parse route result");
+          setLocation("/route");
+        }
+      } else {
+        setLocation("/route");
       }
-    } else {
-      setLocation("/route");
     }
-  }, [setLocation]);
+  }, [sessionId, setLocation]);
+
+  const result = (sessionId ? serverResult : localResult) as RouteResult | null | undefined;
+
+  const handleCopyLink = () => {
+    if (!sessionId) return;
+    const url = `${window.location.origin}${window.location.pathname}`;
+    navigator.clipboard.writeText(url).then(() => {
+      setCopied(true);
+      toast({ title: "Ссылка скопирована", description: "Поделитесь ею с водителем." });
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  if (sessionId && sessionLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-[60vh]">
+        <div className="text-center space-y-3">
+          <div className="w-10 h-10 border-4 border-primary border-t-transparent rounded-full animate-spin mx-auto" />
+          <p className="text-muted-foreground">Загружаю маршрут...</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!result) return null;
 
-  // Calculate center of map from all stops
+  // ── Driver Mode (mobile) ─────────────────────────────────────────────────
+  if (isMobile) {
+    const activeRoute = result.routes[activeVehicleIndex];
+    return (
+      <div className="min-h-screen bg-background flex flex-col">
+        {/* Header */}
+        <div className="bg-primary text-primary-foreground px-4 py-3 flex items-center justify-between">
+          <div>
+            <p className="text-xs opacity-80">Режим водителя</p>
+            <h1 className="font-bold text-lg leading-tight">
+              {activeRoute?.vehicle_name ?? "Маршрут"}
+            </h1>
+          </div>
+          <div className="text-right">
+            <p className="text-xs opacity-80">Пробег</p>
+            <p className="font-bold">{Math.round(activeRoute?.total_km ?? 0)} км</p>
+          </div>
+        </div>
+
+        {/* Vehicle switcher */}
+        {result.routes.length > 1 && (
+          <div className="flex gap-2 px-4 py-2 overflow-x-auto bg-muted/30 border-b">
+            {result.routes.map((r, i) => (
+              <button
+                key={r.vehicle_name}
+                onClick={() => setActiveVehicleIndex(i)}
+                className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
+                  i === activeVehicleIndex
+                    ? "bg-primary text-primary-foreground border-primary"
+                    : "bg-background border-border text-muted-foreground"
+                }`}
+              >
+                {r.vehicle_name}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Stop list */}
+        <div className="flex-1 overflow-y-auto divide-y">
+          {activeRoute?.stores.map((stop, idx) => (
+            <div key={stop.store_id} className="px-4 py-4 flex gap-4 items-start">
+              <div
+                className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0 mt-0.5"
+                style={{ backgroundColor: COLORS[activeVehicleIndex % COLORS.length] }}
+              >
+                {stop.order}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="font-semibold text-base leading-tight truncate">{stop.store_name}</p>
+                <p className="text-sm text-muted-foreground mt-0.5 truncate">{stop.address}</p>
+                {stop.arrive_by && (
+                  <p className="text-sm text-primary font-medium mt-1">⏱ {stop.arrive_by}</p>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Footer actions */}
+        <div className="sticky bottom-0 border-t bg-background p-4 flex gap-3">
+          <Button
+            className="flex-1 h-12 gap-2"
+            onClick={() => window.open(activeRoute?.yandex_url, "_blank")}
+          >
+            <Navigation className="w-5 h-5" />
+            Я.Навигатор
+          </Button>
+          <Button
+            variant="outline"
+            className="flex-1 h-12 gap-2 text-emerald-600 border-emerald-200"
+            onClick={() => window.open(activeRoute?.whatsapp_url, "_blank")}
+          >
+            <Share2 className="w-5 h-5" />
+            WhatsApp
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Desktop view ─────────────────────────────────────────────────────────
   let allLats = 0;
   let allLons = 0;
   let pointCount = 0;
-  
   result.routes.forEach(route => {
     route.stores.forEach(stop => {
       if (stop.lat && stop.lon) {
@@ -53,10 +175,9 @@ export function ResultPage() {
       }
     });
   });
-
-  const center: [number, number] = pointCount > 0 
+  const center: [number, number] = pointCount > 0
     ? [allLats / pointCount, allLons / pointCount]
-    : [55.7558, 37.6173]; // Moscow default
+    : [55.7558, 37.6173];
 
   return (
     <div className="space-y-6 pb-20">
@@ -65,7 +186,13 @@ export function ResultPage() {
           <h1 className="text-3xl font-bold tracking-tight">Результат оптимизации</h1>
           <p className="text-muted-foreground">Маршруты успешно построены</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
+          {sessionId && (
+            <Button variant="outline" onClick={handleCopyLink} className="gap-2">
+              {copied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
+              <span className="hidden sm:inline">Копировать ссылку</span>
+            </Button>
+          )}
           <Button variant="outline" onClick={() => window.print()} className="gap-2">
             <Download className="w-4 h-4" />
             <span className="hidden sm:inline">Скачать PDF</span>
@@ -86,7 +213,6 @@ export function ResultPage() {
             <div className="text-3xl font-bold">{Math.round(result.total_km)} км</div>
           </CardContent>
         </Card>
-        
         <Card className="bg-emerald-500 text-white border-transparent">
           <CardContent className="pt-6">
             <div className="text-sm font-medium opacity-90 mb-1">Сэкономлено (км)</div>
@@ -94,7 +220,6 @@ export function ResultPage() {
             <div className="text-sm opacity-90 mt-1">Было {Math.round(result.savings.unoptimized_km)} км</div>
           </CardContent>
         </Card>
-
         <Card className="bg-emerald-600 text-white border-transparent">
           <CardContent className="pt-6">
             <div className="text-sm font-medium opacity-90 mb-1">Экономия (день/месяц)</div>
@@ -116,7 +241,6 @@ export function ResultPage() {
               const positions = route.stores
                 .filter(s => s.lat != null && s.lon != null)
                 .map(s => [s.lat, s.lon] as [number, number]);
-              
               return (
                 <Fragment key={route.vehicle_name}>
                   {positions.length > 1 && (
@@ -127,9 +251,9 @@ export function ResultPage() {
                     return (
                       <Marker key={`${route.vehicle_name}-${stop.order}`} position={[stop.lat, stop.lon]}>
                         <Popup>
-                          <strong>{stop.store_name}</strong><br/>
-                          {stop.address}<br/>
-                          Порядок: {stop.order}<br/>
+                          <strong>{stop.store_name}</strong><br />
+                          {stop.address}<br />
+                          Порядок: {stop.order}<br />
                           Авто: {route.vehicle_name}
                         </Popup>
                       </Marker>
@@ -203,14 +327,4 @@ export function ResultPage() {
       </div>
     </div>
   );
-}
-
-function Badge({ children, variant = "default", className = "" }: { children: React.ReactNode, variant?: "default" | "secondary" | "destructive", className?: string }) {
-  const base = "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2";
-  const variants = {
-    default: "border-transparent bg-primary text-primary-foreground hover:bg-primary/80",
-    secondary: "border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80",
-    destructive: "border-transparent bg-destructive text-destructive-foreground hover:bg-destructive/80",
-  };
-  return <div className={`${base} ${variants[variant]} ${className}`}>{children}</div>;
 }

@@ -1,13 +1,13 @@
 import { useState } from "react";
-import { useListStores, useCreateStore, useDeleteStore, useGeocodeStore, getListStoresQueryKey } from "@workspace/api-client-react";
+import { useListStores, useCreateStore, useDeleteStore, useGeocodeStore, useImportStores, getListStoresQueryKey } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Badge } from "@/components/ui/badge";
 import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store } from "lucide-react";
+import { StatusBadge } from "@/components/ui/status-badge";
 import { useToast } from "@/hooks/use-toast";
 
 export function StoresPage() {
@@ -31,6 +31,7 @@ export function StoresPage() {
   const createStore = useCreateStore();
   const deleteStore = useDeleteStore();
   const geocodeStore = useGeocodeStore();
+  const importStores = useImportStores();
 
   const handleAddStore = (e: React.FormEvent) => {
     e.preventDefault();
@@ -85,46 +86,39 @@ export function StoresPage() {
     );
   };
 
-  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    // Reset the input so the same file can be picked again
     e.target.value = "";
 
-    const formData = new FormData();
-    formData.append("file", file);
-
     setImportLoading(true);
-    setImportStatus("Загружаю файл...");
+    setImportStatus("Геокодирую адреса (это займёт ~1 сек на строку)...");
 
-    try {
-      setImportStatus("Геокодирую адреса (это займёт ~1 сек на строку)...");
-      const res = await fetch("/api/stores/import", {
-        method: "POST",
-        body: formData,
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || "Import failed");
+    importStores.mutate(
+      { data: { file } },
+      {
+        onSuccess: (data) => {
+          const { imported, failed, total } = data;
+          setImportStatus(null);
+          toast({
+            title: "Импорт завершён",
+            description: `Загружено ${imported} из ${total} строк${failed > 0 ? `, ошибок: ${failed}` : ""}.`,
+          });
+          queryClient.invalidateQueries({ queryKey: getListStoresQueryKey() });
+        },
+        onError: (err: any) => {
+          setImportStatus(null);
+          toast({
+            title: "Ошибка импорта",
+            description: err?.message || "Не удалось загрузить файл.",
+            variant: "destructive",
+          });
+        },
+        onSettled: () => {
+          setImportLoading(false);
+        },
       }
-      const data = await res.json();
-      const { imported, failed, total } = data;
-      setImportStatus(null);
-      toast({
-        title: "Импорт завершён",
-        description: `Загружено ${imported} из ${total} строк${failed > 0 ? `, ошибок: ${failed}` : ""}.`,
-      });
-      queryClient.invalidateQueries({ queryKey: getListStoresQueryKey() });
-    } catch (err: any) {
-      setImportStatus(null);
-      toast({
-        title: "Ошибка импорта",
-        description: err.message || "Не удалось загрузить файл.",
-        variant: "destructive",
-      });
-    } finally {
-      setImportLoading(false);
-    }
+    );
   };
 
   const handleDownloadTemplate = () => {
@@ -260,19 +254,7 @@ export function StoresPage() {
                       <TableCell className="font-medium">{store.name}</TableCell>
                       <TableCell className="text-muted-foreground text-sm">{store.address}</TableCell>
                       <TableCell>
-                        {store.geocode_status === "found" ? (
-                          <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 border-emerald-200">
-                            ✅ Найден
-                          </Badge>
-                        ) : store.geocode_status === "pending" ? (
-                          <Badge variant="secondary" className="bg-yellow-500/10 text-yellow-600 border-yellow-200">
-                            ⏳ Ожидает
-                          </Badge>
-                        ) : (
-                          <Badge variant="secondary" className="bg-red-500/10 text-red-600 border-red-200">
-                            ❌ Не найден
-                          </Badge>
-                        )}
+                        <StatusBadge status={store.geocode_status as "found" | "pending" | "not_found"} />
                       </TableCell>
                       <TableCell className="text-sm">
                         {store.time_window_from} — {store.time_window_to}

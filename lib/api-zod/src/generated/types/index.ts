@@ -10,6 +10,7 @@ export * from './analyticsSummary';
 export * from './dailyStat';
 export * from './healthStatus';
 export * from './importResult';
+export * from './importStoresBody';
 export * from './monthlyStat';
 export * from './routeRequest';
 export * from './routeResult';

@@ -11,6 +11,8 @@ import type { Savings } from './savings';
 import type { VehicleRoute } from './vehicleRoute';
 
 export interface RouteResult {
+  /** @nullable */
+  session_id?: number | null;
   routes: VehicleRoute[];
   savings: Savings;
   total_km: number;

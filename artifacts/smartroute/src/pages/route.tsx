@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useListStores, useBuildRoute } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -15,6 +16,7 @@ interface Vehicle {
   id: string;
   name: string;
   capacity_kg: string;
+  average_speed: string;
 }
 
 export function RoutePage() {
@@ -27,7 +29,7 @@ export function RoutePage() {
   const [search, setSearch] = useState("");
   const [selectedStores, setSelectedStores] = useState<Set<number>>(new Set());
   
-  const [vehicles, setVehicles] = useState<Vehicle[]>([{ id: "1", name: "Газель 1", capacity_kg: "1500" }]);
+  const [vehicles, setVehicles] = useState<Vehicle[]>([{ id: "1", name: "Газель 1", capacity_kg: "1500", average_speed: "" }]);
   const [useTimeWindows, setUseTimeWindows] = useState(true);
   const [useUnloadTime, setUseUnloadTime] = useState(true);
 
@@ -52,7 +54,7 @@ export function RoutePage() {
   };
 
   const handleAddVehicle = () => {
-    setVehicles([...vehicles, { id: Math.random().toString(), name: `Авто ${vehicles.length + 1}`, capacity_kg: "1500" }]);
+    setVehicles([...vehicles, { id: Math.random().toString(), name: `Авто ${vehicles.length + 1}`, capacity_kg: "1500", average_speed: "" }]);
   };
 
   const handleRemoveVehicle = (id: string) => {
@@ -76,17 +78,22 @@ export function RoutePage() {
     buildRoute.mutate({
       data: {
         store_ids: Array.from(selectedStores),
-        vehicles: vehicles.map(v => ({ 
-          name: v.name, 
-          capacity_kg: v.capacity_kg ? parseInt(v.capacity_kg) : null 
+        vehicles: vehicles.map(v => ({
+          name: v.name,
+          capacity_kg: v.capacity_kg ? parseInt(v.capacity_kg) : null,
+          average_speed: v.average_speed ? parseFloat(v.average_speed) : null,
         })),
         use_time_windows: useTimeWindows,
         use_unload_time: useUnloadTime,
       }
     }, {
       onSuccess: (result) => {
-        localStorage.setItem("smartroute_result", JSON.stringify(result));
-        setLocation("/result");
+        if (result.session_id) {
+          setLocation(`/result/${result.session_id}`);
+        } else {
+          localStorage.setItem("smartroute_result", JSON.stringify(result));
+          setLocation("/result");
+        }
       },
       onError: () => {
         toast({ title: "Ошибка", description: "Не удалось построить маршрут", variant: "destructive" });
@@ -179,21 +186,31 @@ export function RoutePage() {
                       <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center text-primary shrink-0">
                         <Truck className="w-4 h-4" />
                       </div>
-                      <div className="flex-1 grid grid-cols-2 gap-3">
+                      <div className="flex-1 grid grid-cols-3 gap-3">
                         <div className="space-y-1.5">
                           <Label className="text-xs">Название / Водитель</Label>
-                          <Input 
-                            value={vehicle.name} 
-                            onChange={e => handleVehicleChange(vehicle.id, 'name', e.target.value)} 
+                          <Input
+                            value={vehicle.name}
+                            onChange={e => handleVehicleChange(vehicle.id, 'name', e.target.value)}
                             className="h-8 text-sm"
                           />
                         </div>
                         <div className="space-y-1.5">
                           <Label className="text-xs">Вместимость (кг)</Label>
-                          <Input 
+                          <Input
                             type="number"
-                            value={vehicle.capacity_kg} 
-                            onChange={e => handleVehicleChange(vehicle.id, 'capacity_kg', e.target.value)} 
+                            value={vehicle.capacity_kg}
+                            onChange={e => handleVehicleChange(vehicle.id, 'capacity_kg', e.target.value)}
+                            className="h-8 text-sm"
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label className="text-xs">Скорость (км/ч)</Label>
+                          <Input
+                            type="number"
+                            placeholder="авто"
+                            value={vehicle.average_speed}
+                            onChange={e => handleVehicleChange(vehicle.id, 'average_speed', e.target.value)}
                             className="h-8 text-sm"
                           />
                         </div>
@@ -262,13 +279,3 @@ export function RoutePage() {
   );
 }
 
-// Inline badge component for simple usage
-function Badge({ children, variant = "default", className = "" }: { children: React.ReactNode, variant?: "default" | "secondary" | "destructive", className?: string }) {
-  const base = "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2";
-  const variants = {
-    default: "border-transparent bg-primary text-primary-foreground hover:bg-primary/80",
-    secondary: "border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80",
-    destructive: "border-transparent bg-destructive text-destructive-foreground hover:bg-destructive/80",
-  };
-  return <div className={`${base} ${variants[variant]} ${className}`}>{children}</div>;
-}

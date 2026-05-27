@@ -26,6 +26,7 @@ function Router() {
       <Route path="/" component={HomePage} />
       <Route path="/stores" component={StoresPage} />
       <Route path="/route" component={RoutePage} />
+      <Route path="/result/:id" component={ResultPage} />
       <Route path="/result" component={ResultPage} />
       <Route path="/analytics" component={AnalyticsPage} />
       <Route component={NotFound} />

@@ -23,6 +23,8 @@ import type {
   AnalyticsSummary,
   DailyStat,
   HealthStatus,
+  ImportResult,
+  ImportStoresBody,
   MonthlyStat,
   RouteRequest,
   RouteResult,
@@ -268,6 +270,156 @@ export const useCreateStore = <TError = ErrorType<unknown>,
         TContext
       > => {
       return useMutation(getCreateStoreMutationOptions(options));
+    }
+
+export const getGetStoresTemplateUrl = () => {
+
+
+
+
+  return `/api/stores/template`
+}
+
+/**
+ * @summary Download Excel template for store import
+ */
+export const getStoresTemplate = async ( options?: RequestInit): Promise<Blob> => {
+
+  return customFetch<Blob>(getGetStoresTemplateUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetStoresTemplateQueryKey = () => {
+    return [
+    `/api/stores/template`
+    ] as const;
+    }
+
+
+export const getGetStoresTemplateQueryOptions = <TData = Awaited<ReturnType<typeof getStoresTemplate>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getStoresTemplate>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetStoresTemplateQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getStoresTemplate>>> = ({ signal }) => getStoresTemplate({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getStoresTemplate>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetStoresTemplateQueryResult = NonNullable<Awaited<ReturnType<typeof getStoresTemplate>>>
+export type GetStoresTemplateQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Download Excel template for store import
+ */
+
+export function useGetStoresTemplate<TData = Awaited<ReturnType<typeof getStoresTemplate>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getStoresTemplate>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetStoresTemplateQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+
+
+export const getImportStoresUrl = () => {
+
+
+
+
+  return `/api/stores/import`
+}
+
+/**
+ * @summary Import stores from Excel file
+ */
+export const importStores = async (importStoresBody: ImportStoresBody, options?: RequestInit): Promise<ImportResult> => {
+    const formData = new FormData();
+formData.append(`file`, importStoresBody.file);
+
+  return customFetch<ImportResult>(getImportStoresUrl(),
+  {
+    ...options,
+    method: 'POST'
+    ,
+    body:
+      formData,
+  }
+);}
+
+
+
+
+export const getImportStoresMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof importStores>>, TError,{data: BodyType<ImportStoresBody>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof importStores>>, TError,{data: BodyType<ImportStoresBody>}, TContext> => {
+
+const mutationKey = ['importStores'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof importStores>>, {data: BodyType<ImportStoresBody>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  importStores(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ImportStoresMutationResult = NonNullable<Awaited<ReturnType<typeof importStores>>>
+    export type ImportStoresMutationBody = BodyType<ImportStoresBody>
+    export type ImportStoresMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Import stores from Excel file
+ */
+export const useImportStores = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof importStores>>, TError,{data: BodyType<ImportStoresBody>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof importStores>>,
+        TError,
+        {data: BodyType<ImportStoresBody>},
+        TContext
+      > => {
+      return useMutation(getImportStoresMutationOptions(options));
     }
 
 export const getGetStoreUrl = (id: number,) => {
@@ -629,6 +781,83 @@ export const useBuildRoute = <TError = ErrorType<unknown>,
       > => {
       return useMutation(getBuildRouteMutationOptions(options));
     }
+
+export const getGetRouteSessionUrl = (id: number,) => {
+
+
+
+
+  return `/api/route/sessions/${id}`
+}
+
+/**
+ * @summary Get a saved route session by ID
+ */
+export const getRouteSession = async (id: number, options?: RequestInit): Promise<RouteResult> => {
+
+  return customFetch<RouteResult>(getGetRouteSessionUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetRouteSessionQueryKey = (id: number,) => {
+    return [
+    `/api/route/sessions/${id}`
+    ] as const;
+    }
+
+
+export const getGetRouteSessionQueryOptions = <TData = Awaited<ReturnType<typeof getRouteSession>>, TError = ErrorType<void>>(id: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getRouteSession>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetRouteSessionQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getRouteSession>>> = ({ signal }) => getRouteSession(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: !!(id), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getRouteSession>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetRouteSessionQueryResult = NonNullable<Awaited<ReturnType<typeof getRouteSession>>>
+export type GetRouteSessionQueryError = ErrorType<void>
+
+
+/**
+ * @summary Get a saved route session by ID
+ */
+
+export function useGetRouteSession<TData = Awaited<ReturnType<typeof getRouteSession>>, TError = ErrorType<void>>(
+ id: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getRouteSession>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetRouteSessionQueryOptions(id,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+
 
 export const getGetAnalyticsSummaryUrl = () => {
 

@@ -10,4 +10,9 @@ export interface VehicleInput {
   name: string;
   /** @nullable */
   capacity_kg?: number | null;
+  /**
+     * Average speed in km/h for this vehicle (overrides global default)
+     * @nullable
+     */
+  average_speed?: number | null;
 }

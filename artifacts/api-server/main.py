@@ -44,6 +44,7 @@ app.add_middleware(
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 AVG_SPEED_KMH = 30
+TRAFFIC_MULTIPLIER = 1.2
 geocode_cache: dict = {}
 
 # ── GraphHopper Matrix API ────────────────────────────────────────────────────
@@ -267,8 +268,12 @@ def init_db():
             saved_km DOUBLE PRECISION,
             saved_rub INTEGER,
             num_points INTEGER DEFAULT 0,
+            result_json TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
+    """)
+    cur.execute("""
+        ALTER TABLE route_sessions ADD COLUMN IF NOT EXISTS result_json TEXT
     """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS route_session_stores (
@@ -556,6 +561,7 @@ class StoreUpdate(BaseModel):
 class VehicleInput(BaseModel):
     name: str
     capacity_kg: Optional[int] = None
+    average_speed: Optional[float] = None
 
 
 class RouteRequest(BaseModel):
@@ -938,7 +944,8 @@ def build_route(body: RouteRequest):
             # Drive time from previous point
             leg_m = haversine_meters(prev_coord, curr_coord)
             dist_m += leg_m
-            leg_drive_min = max(1, int(leg_m / 1000 / AVG_SPEED_KMH * 60))
+            effective_speed = vehicle.average_speed if vehicle.average_speed else (AVG_SPEED_KMH * TRAFFIC_MULTIPLIER)
+            leg_drive_min = max(1, int(leg_m / 1000 / effective_speed * 60))
             cumulative_min += leg_drive_min
 
             # Estimated arrival time at this stop
@@ -972,7 +979,8 @@ def build_route(body: RouteRequest):
         total_km += km
 
         unload_min = sum(s["unload_minutes"] for s in store_list if s["id"] in [rs["store_id"] for rs in route_stores]) if body.use_unload_time else 0
-        drive_min = int(km / AVG_SPEED_KMH * 60)
+        eff_spd = vehicle.average_speed if vehicle.average_speed else (AVG_SPEED_KMH * TRAFFIC_MULTIPLIER)
+        drive_min = int(km / eff_spd * 60)
         est_minutes = drive_min + unload_min
 
         nav_coords = route_coords[1:]  # exclude depot for nav
@@ -990,17 +998,30 @@ def build_route(body: RouteRequest):
 
     savings = calculate_savings(total_km, len(store_list), num_vehicles)
 
+    result = {
+        "routes": routes,
+        "savings": savings,
+        "total_km": round(total_km, 1),
+        "matrix_source": matrix_source,
+        "geocoder_used": "yandex" if YANDEX_GEOCODER_API_KEY else "nominatim",
+        "session_id": None,
+    }
+
     # Save session to DB
     try:
         conn2 = get_db()
         cur2 = conn2.cursor()
         cur2.execute(
-            """INSERT INTO route_sessions (date, num_vehicles, total_km, saved_km, saved_rub, num_points)
-               VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+            """INSERT INTO route_sessions (date, num_vehicles, total_km, saved_km, saved_rub, num_points, result_json)
+               VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
             (str(date.today()), num_vehicles, round(total_km, 1),
-             savings["saved_km"], savings["saved_rub_day"], len(store_list))
+             savings["saved_km"], savings["saved_rub_day"], len(store_list),
+             json.dumps(result))
         )
         session_id = cur2.fetchone()[0]
+        result["session_id"] = session_id
+        cur2.execute("UPDATE route_sessions SET result_json = %s WHERE id = %s",
+                     (json.dumps(result), session_id))
         for rs in routes:
             for stop in rs["stores"]:
                 cur2.execute(
@@ -1013,13 +1034,20 @@ def build_route(body: RouteRequest):
     except Exception as e:
         logger.error(f"Failed to save route session: {e}")
 
-    return {
-        "routes": routes,
-        "savings": savings,
-        "total_km": round(total_km, 1),
-        "matrix_source": matrix_source,
-        "geocoder_used": "yandex" if YANDEX_GEOCODER_API_KEY else "nominatim",
-    }
+    return result
+
+
+@app.get("/api/route/sessions/{id}")
+def get_route_session(id: int):
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT result_json FROM route_sessions WHERE id = %s", (id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row or not row["result_json"]:
+        raise HTTPException(status_code=404, detail="Route session not found")
+    return json.loads(row["result_json"])
 
 
 @app.get("/api/analytics/summary")

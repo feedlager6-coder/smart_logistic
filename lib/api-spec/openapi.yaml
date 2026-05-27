@@ -63,6 +63,45 @@ paths:
               schema:
                 $ref: "#/components/schemas/Store"
 
+  /stores/template:
+    get:
+      operationId: getStoresTemplate
+      tags: [stores]
+      summary: Download Excel template for store import
+      responses:
+        "200":
+          description: Excel template file (.xlsx)
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+
+  /stores/import:
+    post:
+      operationId: importStores
+      tags: [stores]
+      summary: Import stores from Excel file
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+              required:
+                - file
+      responses:
+        "200":
+          description: Import result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportResult"
+
   /stores/{id}:
     get:
       operationId: getStore
@@ -157,6 +196,27 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RouteResult"
+
+  /route/sessions/{id}:
+    get:
+      operationId: getRouteSession
+      tags: [routes]
+      summary: Get a saved route session by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Full route session data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteResult"
+        "404":
+          description: Not found
 
   /analytics/summary:
     get:
@@ -343,12 +403,17 @@ components:
           type: string
         capacity_kg:
           type: ["integer", "null"]
+        average_speed:
+          type: ["number", "null"]
+          description: Average speed in km/h for this vehicle (overrides global default)
       required:
         - name
 
     RouteResult:
       type: object
       properties:
+        session_id:
+          type: ["integer", "null"]
         routes:
           type: array
           items:
