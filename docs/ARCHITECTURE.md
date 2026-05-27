@@ -86,6 +86,33 @@ that window transparently use Haversine.
 | `/result` | Result | Map, route cards, Yandex/WhatsApp links |
 | `/analytics` | Analytics | Mileage, savings, top-stores charts |
 
+### Arrive-by (расчётное время прибытия)
+
+Для каждой точки маршрута вычисляется ожидаемое время прибытия нарастающим итогом, начиная от 09:00 (депо):
+
+```
+prev_coord = depot
+cumulative_min = 0
+
+for each stop in route:
+    leg_m = haversine(prev_coord, stop_coord)
+    drive_min = max(1, int(leg_m / 1000 / AVG_SPEED_KMH * 60))
+    cumulative_min += drive_min
+    arrive_by = format(09:00 + cumulative_min)
+    if use_unload_time:
+        cumulative_min += stop.unload_minutes  # учитывается для следующей точки
+    prev_coord = stop_coord
+```
+
+`AVG_SPEED_KMH = 30` (городская скорость). Поле `arrive_by` всегда рассчитывается,
+независимо от флага `use_time_windows`.
+
+### Порядок endpoints `/api/stores/`
+
+FastAPI сопоставляет маршруты в порядке объявления. Статические пути (`/template`,
+`/import`) объявлены **до** параметрических (`/{id}`), чтобы избежать
+ошибочного сопоставления строки `"template"` с целочисленным `id`.
+
 ---
 
 ## API contract

@@ -105,6 +105,17 @@ PORT=24853 BASE_PATH=/ pnpm --filter @workspace/smartroute run dev
 pnpm --filter @workspace/api-spec run codegen
 ```
 
+## Алгоритм расчёта arrive_by
+
+Для каждой точки маршрута время прибытия вычисляется нарастающим итогом от 09:00:
+
+1. `drive_min = haversine(prev, curr) / AVG_SPEED_KMH (30 км/ч)` 
+2. `cumulative += drive_min`
+3. `arrive_by = 09:00 + cumulative`
+4. `cumulative += unload_minutes` (для следующей точки)
+
+Это гарантирует реалистичное расписание, а не просто дедлайн из временного окна.
+
 ## Документация
 
 - [Архитектура](docs/ARCHITECTURE.md)
