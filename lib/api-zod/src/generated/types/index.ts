@@ -13,6 +13,8 @@ export * from './importResult';
 export * from './monthlyStat';
 export * from './routeRequest';
 export * from './routeResult';
+export * from './routeResultGeocoderUsed';
+export * from './routeResultMatrixSource';
 export * from './routeStop';
 export * from './savings';
 export * from './store';

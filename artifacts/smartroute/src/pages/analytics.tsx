@@ -1,13 +1,18 @@
 import { useGetAnalyticsSummary, useGetAnalyticsDaily, useGetAnalyticsMonthly, useGetTopStores } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, YAxisProps, XAxisProps } from "recharts";
-import { TrendingDown, TrendingUp, Route, MapPin, Loader2, DollarSign } from "lucide-react";
+import { TrendingDown, Route, MapPin, Loader2, DollarSign } from "lucide-react";
 
 export function AnalyticsPage() {
-  const { data: summary, isLoading: isLoadingSummary } = useGetAnalyticsSummary();
-  const { data: daily, isLoading: isLoadingDaily } = useGetAnalyticsDaily();
-  const { data: monthly, isLoading: isLoadingMonthly } = useGetAnalyticsMonthly();
-  const { data: topStores, isLoading: isLoadingTop } = useGetTopStores();
+  const { data: summaryRaw, isLoading: isLoadingSummary } = useGetAnalyticsSummary();
+  const { data: dailyRaw, isLoading: isLoadingDaily } = useGetAnalyticsDaily();
+  const { data: monthlyRaw, isLoading: isLoadingMonthly } = useGetAnalyticsMonthly();
+  const { data: topStoresRaw, isLoading: isLoadingTop } = useGetTopStores();
+
+  const summary = summaryRaw && typeof summaryRaw === "object" && !Array.isArray(summaryRaw) ? summaryRaw : undefined;
+  const daily = Array.isArray(dailyRaw) ? dailyRaw : [];
+  const monthly = Array.isArray(monthlyRaw) ? monthlyRaw : [];
+  const topStores = Array.isArray(topStoresRaw) ? topStoresRaw : [];
 
   const xAxisProps: XAxisProps = {
     stroke: "hsl(var(--muted-foreground))",
@@ -32,7 +37,6 @@ export function AnalyticsPage() {
         <p className="text-muted-foreground">Ключевые показатели эффективности логистики</p>
       </div>
 
-      {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard 
           title="Построено маршрутов" 
@@ -63,7 +67,6 @@ export function AnalyticsPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Daily Line Chart */}
         <Card className="col-span-1 border-border">
           <CardHeader>
             <CardTitle>Пробег (последние 30 дней)</CardTitle>
@@ -72,7 +75,7 @@ export function AnalyticsPage() {
           <CardContent className="h-[300px]">
             {isLoadingDaily ? (
               <LoadingChart />
-            ) : daily && daily.length > 0 ? (
+            ) : daily.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={daily} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
@@ -92,7 +95,6 @@ export function AnalyticsPage() {
           </CardContent>
         </Card>
 
-        {/* Monthly Bar Chart */}
         <Card className="col-span-1 border-border">
           <CardHeader>
             <CardTitle>Экономия по месяцам (₽)</CardTitle>
@@ -101,7 +103,7 @@ export function AnalyticsPage() {
           <CardContent className="h-[300px]">
             {isLoadingMonthly ? (
               <LoadingChart />
-            ) : monthly && monthly.length > 0 ? (
+            ) : monthly.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={monthly} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
@@ -120,7 +122,6 @@ export function AnalyticsPage() {
           </CardContent>
         </Card>
 
-        {/* Top Stores Bar Chart (Horizontal) */}
         <Card className="col-span-1 lg:col-span-2 border-border">
           <CardHeader>
             <CardTitle>Топ-10 магазинов по частоте доставок</CardTitle>
@@ -129,7 +130,7 @@ export function AnalyticsPage() {
           <CardContent className="h-[350px]">
             {isLoadingTop ? (
               <LoadingChart />
-            ) : topStores && topStores.length > 0 ? (
+            ) : topStores.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={topStores} layout="vertical" margin={{ top: 5, right: 20, left: 50, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="hsl(var(--border))" />
@@ -166,7 +167,7 @@ function MetricCard({ title, value, icon, loading, highlight = false }: { title:
           {loading ? (
             <span className="animate-pulse bg-muted rounded w-24 h-8 inline-block" />
           ) : (
-            value?.toLocaleString('ru-RU') || "0"
+            (value ?? 0).toLocaleString('ru-RU')
           )}
         </div>
       </CardContent>

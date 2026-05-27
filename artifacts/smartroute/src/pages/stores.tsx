@@ -11,7 +11,8 @@ import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store } from "
 import { useToast } from "@/hooks/use-toast";
 
 export function StoresPage() {
-  const { data: stores = [], isLoading } = useListStores();
+  const { data: storesData, isLoading } = useListStores();
+  const stores = Array.isArray(storesData) ? storesData : [];
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [search, setSearch] = useState("");

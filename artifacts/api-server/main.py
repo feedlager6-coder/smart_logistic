@@ -46,6 +46,194 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 AVG_SPEED_KMH = 30
 geocode_cache: dict = {}
 
+# ── GraphHopper Matrix API ────────────────────────────────────────────────────
+
+GRAPHHOPPER_API_KEY: str = os.environ.get("GRAPHHOPPER_API_KEY", "")
+YANDEX_GEOCODER_API_KEY: str = os.environ.get("YANDEX_GEOCODER_API_KEY", "")
+GRAPHHOPPER_FREE_LIMIT = 5           # max locations per single Matrix API request (Free Plan)
+GRAPHHOPPER_RATE_LIMIT_TTL = 60      # seconds to suppress GH calls after a 429
+
+# Epoch-seconds timestamp; GH calls are suppressed while time.time() < this value
+_gh_rate_limited_until: float = 0.0
+
+
+def get_matrix_from_graphhopper(coords: list) -> Optional[tuple]:
+    """
+    Send ONE POST request to the GraphHopper Matrix API and return the full
+    distance + time matrix for the given coordinate list.
+
+    Args:
+        coords: list of (lat, lon) tuples (any length ≤ GRAPHHOPPER_FREE_LIMIT)
+
+    Returns:
+        (distance_matrix, time_matrix) where values are metres / seconds
+        respectively, or None on any failure (caller should fall back to
+        Haversine transparently).
+    """
+    global _gh_rate_limited_until
+
+    # Honour the rate-limit cool-down period set by a previous 429
+    if time.time() < _gh_rate_limited_until:
+        remaining = int(_gh_rate_limited_until - time.time())
+        logger.info("GraphHopper still rate-limited (%ds left), using Haversine", remaining)
+        return None
+
+    if not coords or len(coords) < 2:
+        return None
+
+    # Guard: silently skip if the batch exceeds the Free Plan point limit
+    if len(coords) > GRAPHHOPPER_FREE_LIMIT:
+        logger.info(
+            "GraphHopper: %d coords exceeds free limit %d, using Haversine",
+            len(coords), GRAPHHOPPER_FREE_LIMIT,
+        )
+        return None
+
+    # GraphHopper Matrix API expects [longitude, latitude] order
+    gh_points = [[lon, lat] for lat, lon in coords]
+
+    payload = json.dumps({
+        "from_points": gh_points,
+        "to_points": gh_points,
+        "out_arrays": ["distances", "times"],
+        "vehicle": "car",
+    }).encode("utf-8")
+
+    url = f"https://graphhopper.com/api/1/matrix?key={GRAPHHOPPER_API_KEY}"
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        distances = data.get("distances")   # list[list[float]] — metres
+        times = data.get("times")           # list[list[float]] — seconds
+
+        if distances and times:
+            logger.info(
+                "GraphHopper matrix fetched: %dx%d", len(distances), len(distances[0])
+            )
+            return distances, times
+
+        logger.warning("GraphHopper response missing distances/times: %s", data)
+
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            # Rate limit hit — back off and fall through to Haversine seamlessly
+            _gh_rate_limited_until = time.time() + GRAPHHOPPER_RATE_LIMIT_TTL
+            logger.warning(
+                "GraphHopper 429 — switching to Haversine for next %ds",
+                GRAPHHOPPER_RATE_LIMIT_TTL,
+            )
+        else:
+            logger.warning("GraphHopper HTTP error %d: %s", exc.code, exc.reason)
+
+    except Exception as exc:
+        logger.warning("GraphHopper API call failed: %s", exc)
+
+    return None
+
+
+def _build_haversine_matrix(coords: list) -> list:
+    """Build a full NxN distance matrix (metres) using Haversine."""
+    n = len(coords)
+    return [[haversine_meters(coords[i], coords[j]) for j in range(n)] for i in range(n)]
+
+
+def _cluster_by_sweep(store_indices: list, all_coords: list, num_vehicles: int) -> list:
+    """
+    Partition store node-indices into geographic clusters using the
+    polar-angle sweep algorithm (sectors around the depot).
+
+    Each cluster is guaranteed to contain at most GRAPHHOPPER_FREE_LIMIT-1
+    stops so that a single GraphHopper Matrix API call (depot + cluster)
+    never exceeds the Free Plan limit.  When `num_vehicles` alone would
+    produce oversized clusters, the function automatically increases the
+    number of clusters and merges extras onto the last vehicle group.
+
+    Returns a list of lists: each sub-list contains the node indices assigned
+    to one vehicle.  Indices refer to positions in `all_coords` (0 = depot).
+    """
+    max_stops_per_cluster = GRAPHHOPPER_FREE_LIMIT - 1  # depot takes one slot
+    # Minimum number of clusters needed to keep each ≤ max_stops_per_cluster
+    min_clusters = math.ceil(len(store_indices) / max_stops_per_cluster)
+    effective_vehicles = max(num_vehicles, min_clusters)
+
+    depot = all_coords[0]
+
+    def angle_from_depot(node_idx):
+        lat, lon = all_coords[node_idx]
+        return math.atan2(lon - depot[1], lat - depot[0])
+
+    sorted_nodes = sorted(store_indices, key=angle_from_depot)
+
+    # Distribute evenly round-robin across effective_vehicles buckets
+    chunks = [[] for _ in range(effective_vehicles)]
+    for i, node in enumerate(sorted_nodes):
+        chunks[i % effective_vehicles].append(node)
+
+    # If we created more clusters than vehicles, merge extra clusters back into
+    # the last num_vehicles bucket so the caller gets exactly num_vehicles routes
+    if effective_vehicles > num_vehicles:
+        merged = chunks[:num_vehicles]
+        for extra in chunks[num_vehicles:]:
+            # Append extra stops to the smallest existing bucket
+            smallest = min(range(len(merged)), key=lambda k: len(merged[k]))
+            # Only merge if it stays within the per-cluster limit
+            if len(merged[smallest]) + len(extra) <= max_stops_per_cluster:
+                merged[smallest].extend(extra)
+            else:
+                merged.append(extra)  # keep as separate cluster (extra vehicle)
+        chunks = merged
+
+    return [c for c in chunks if c]
+
+
+def _ortools_solve_group(depot_coord: tuple, group_node_indices: list,
+                         group_coords: list, dist_matrix: list) -> list:
+    """
+    Run OR-Tools VRP on a single vehicle's group of stops using a pre-built
+    distance matrix.  Returns the stop nodes in optimised visit order
+    (values from group_node_indices, NOT positional indices).
+    """
+    if not ORTOOLS_AVAILABLE or len(group_node_indices) <= 1:
+        return group_node_indices  # nothing to optimise
+
+    n = len(group_coords)  # includes depot at position 0
+    manager = pywrapcp.RoutingIndexManager(n, 1, 0)
+    routing = pywrapcp.RoutingModel(manager)
+
+    int_matrix = [[int(v) for v in row] for row in dist_matrix]
+
+    def dist_cb(from_idx, to_idx):
+        return int_matrix[manager.IndexToNode(from_idx)][manager.IndexToNode(to_idx)]
+
+    transit_idx = routing.RegisterTransitCallback(dist_cb)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
+
+    params = pywrapcp.DefaultRoutingSearchParameters()
+    params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    params.time_limit.seconds = 5
+
+    solution = routing.SolveWithParameters(params)
+    if not solution:
+        return group_node_indices  # fallback: return as-is
+
+    ordered = []
+    idx = routing.Start(0)
+    while not routing.IsEnd(idx):
+        node = manager.IndexToNode(idx)
+        if node != 0:
+            ordered.append(group_node_indices[node - 1])
+        idx = solution.Value(routing.NextVar(idx))
+    return ordered
+
 
 def get_db():
     conn = psycopg2.connect(DATABASE_URL)
@@ -105,59 +293,166 @@ def haversine_meters(c1: tuple, c2: tuple) -> int:
 
 
 def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None) -> list:
-    if not ORTOOLS_AVAILABLE:
-        # Simple greedy fallback: distribute points evenly
-        points = list(range(1, len(all_coords)))
-        chunk = max(1, len(points) // max(1, num_vehicles))
-        return [points[i:i+chunk] for i in range(0, len(points), chunk)][:num_vehicles]
+    """
+    Solve the Vehicle Routing Problem with a three-tier strategy:
 
+    Tier 1 — Small dataset (≤ GRAPHHOPPER_FREE_LIMIT points total):
+        Send ONE GraphHopper Matrix request for the full matrix, then run
+        OR-Tools on the precise road distances/times.
+
+    Tier 2 — Large dataset (> GRAPHHOPPER_FREE_LIMIT points):
+        a) Pre-cluster stores into `num_vehicles` geographic groups using the
+           polar-angle sweep algorithm (Haversine-based, no API calls).
+        b) For each cluster (guaranteed ≤ FREE_LIMIT-1 stops), send ONE precise
+           GraphHopper Matrix request (depot + cluster stops).
+        c) Run OR-Tools on the precise per-cluster matrix to polish the order.
+
+    Tier 3 — Fallback (GraphHopper unavailable / 429 / OR-Tools missing):
+        Pure Haversine distance matrix fed into OR-Tools (or simple greedy
+        split when OR-Tools is also unavailable).  Activated transparently so
+        the user never sees an error.
+    """
     n = len(all_coords)
-    if n <= 1:
+    store_count = n - 1  # node 0 is depot
+
+    if store_count == 0:
         return []
 
-    matrix = [[haversine_meters(all_coords[i], all_coords[j]) for j in range(n)] for i in range(n)]
+    # ── Tier 3a: no OR-Tools — greedy split ──────────────────────────────────
+    if not ORTOOLS_AVAILABLE:
+        points = list(range(1, n))
+        chunk = max(1, len(points) // max(1, num_vehicles))
+        return [points[i:i + chunk] for i in range(0, len(points), chunk)][:num_vehicles], "haversine"
 
-    manager = pywrapcp.RoutingIndexManager(n, num_vehicles, 0)
-    routing = pywrapcp.RoutingModel(manager)
+    # ── Helper: run full OR-Tools VRP on an NxN matrix (all vehicles) ─────────
+    def _ortools_full(matrix: list) -> list:
+        manager = pywrapcp.RoutingIndexManager(len(matrix), num_vehicles, 0)
+        routing = pywrapcp.RoutingModel(manager)
 
-    def distance_callback(from_index, to_index):
-        return matrix[manager.IndexToNode(from_index)][manager.IndexToNode(to_index)]
+        int_mat = [[int(v) for v in row] for row in matrix]
 
-    transit_idx = routing.RegisterTransitCallback(distance_callback)
-    routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
+        def dist_cb(fi, ti):
+            return int_mat[manager.IndexToNode(fi)][manager.IndexToNode(ti)]
 
-    if capacities and demands and len(capacities) == num_vehicles:
-        def demand_callback(from_index):
-            node = manager.IndexToNode(from_index)
-            return demands[node] if node > 0 and node < len(demands) else 0
-        demand_idx = routing.RegisterUnaryTransitCallback(demand_callback)
-        routing.AddDimensionWithVehicleCapacity(demand_idx, 0, capacities, True, "Capacity")
+        transit_idx = routing.RegisterTransitCallback(dist_cb)
+        routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
 
-    params = pywrapcp.DefaultRoutingSearchParameters()
-    params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-    params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    params.time_limit.seconds = 10
+        # ── Workload balancing: penalise gap between shortest and longest route ──
+        # This forces OR-Tools to spread stops more evenly across vehicles
+        # instead of leaving some idle while one vehicle takes all the work.
+        routing.AddDimension(transit_idx, 0, 10_000_000, True, "Distance")
+        distance_dim = routing.GetDimensionOrDie("Distance")
+        distance_dim.SetGlobalSpanCostCoefficient(100)
 
-    solution = routing.SolveWithParameters(params)
+        if capacities and demands and len(capacities) == num_vehicles:
+            def demand_cb(fi):
+                node = manager.IndexToNode(fi)
+                return demands[node] if 0 < node < len(demands) else 0
+            demand_idx = routing.RegisterUnaryTransitCallback(demand_cb)
+            routing.AddDimensionWithVehicleCapacity(demand_idx, 0, capacities, True, "Capacity")
+
+        params = pywrapcp.DefaultRoutingSearchParameters()
+        params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+        params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+        params.time_limit.seconds = 10
+
+        sol = routing.SolveWithParameters(params)
+        result = []
+        if sol:
+            for v in range(num_vehicles):
+                route = []
+                idx = routing.Start(v)
+                while not routing.IsEnd(idx):
+                    node = manager.IndexToNode(idx)
+                    if node != 0:
+                        route.append(node)
+                    idx = sol.Value(routing.NextVar(idx))
+                if route:
+                    result.append(route)
+        return result
+
+    # ── Tier 1: small dataset — one GraphHopper call for the whole matrix ─────
+    if store_count < GRAPHHOPPER_FREE_LIMIT:
+        gh_result = get_matrix_from_graphhopper(all_coords)
+        if gh_result:
+            dist_matrix, _time_matrix = gh_result
+            logger.info("Tier 1: GraphHopper full matrix used (%d nodes)", n)
+            return _ortools_full(dist_matrix), "graphhopper"
+
+        # GraphHopper unavailable / rate-limited — fall back to Haversine
+        logger.info("Tier 1 fallback: Haversine matrix (%d nodes)", n)
+        return _ortools_full(_build_haversine_matrix(all_coords)), "haversine"
+
+    # ── Tier 2: large dataset — sweep cluster → per-cluster GraphHopper ───────
+    logger.info(
+        "Tier 2: %d stores > limit %d — sweep clustering into %d vehicles",
+        store_count, GRAPHHOPPER_FREE_LIMIT - 1, num_vehicles,
+    )
+
+    all_store_nodes = list(range(1, n))
+    clusters = _cluster_by_sweep(all_store_nodes, all_coords, num_vehicles)
+
     routes = []
-    if solution:
-        for v in range(num_vehicles):
-            route = []
-            idx = routing.Start(v)
-            while not routing.IsEnd(idx):
-                node = manager.IndexToNode(idx)
-                if node != 0:
-                    route.append(node)
-                idx = solution.Value(routing.NextVar(idx))
-            if route:
-                routes.append(route)
-    return routes
+    gh_used = False
+    for cluster_nodes in clusters:
+        # Build coordinate list: depot first, then this cluster's stores
+        group_coords = [all_coords[0]] + [all_coords[node] for node in cluster_nodes]
+
+        # Attempt precise GraphHopper call for this cluster (≤ FREE_LIMIT pts)
+        gh_result = get_matrix_from_graphhopper(group_coords)
+
+        if gh_result:
+            dist_matrix, _time_matrix = gh_result
+            gh_used = True
+            logger.info(
+                "Tier 2 cluster: GraphHopper matrix used (%d nodes)", len(group_coords)
+            )
+        else:
+            # 429 or network error — seamlessly fall back to Haversine
+            logger.info(
+                "Tier 2 cluster fallback: Haversine matrix (%d nodes)", len(group_coords)
+            )
+            dist_matrix = _build_haversine_matrix(group_coords)
+
+        # Polish the order within this cluster using OR-Tools (single vehicle)
+        ordered_local = _ortools_solve_group(
+            all_coords[0], cluster_nodes, group_coords, dist_matrix
+        )
+        if ordered_local:
+            routes.append(ordered_local)
+
+    return routes, "graphhopper" if gh_used else "haversine"
 
 
-def geocode_address(address: str) -> Optional[tuple]:
-    cache_key = address.strip().lower()
-    if cache_key in geocode_cache:
-        return geocode_cache[cache_key]
+def geocode_address_yandex(address: str) -> Optional[tuple]:
+    """
+    Geocode using Yandex Geocoder API (primary, no rate-limit delay needed).
+    Returns (lat, lon) or None if unavailable / API key not configured.
+    """
+    if not YANDEX_GEOCODER_API_KEY:
+        return None
+    try:
+        url = (
+            "https://geocode-maps.yandex.ru/1.x/?"
+            f"geocode={urllib.parse.quote(address)}"
+            "&format=json"
+            f"&apikey={YANDEX_GEOCODER_API_KEY}"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "smartroute-app-1.0"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        members = data["response"]["GeoObjectCollection"]["featureMember"]
+        if members:
+            pos = members[0]["GeoObject"]["Point"]["pos"]
+            lon_str, lat_str = pos.split()
+            return (float(lat_str), float(lon_str))
+    except Exception as e:
+        logger.warning(f"Yandex geocoding failed for '{address}': {e}")
+    return None
+
+
+def geocode_address_nominatim(address: str) -> Optional[tuple]:
+    """Geocode using Nominatim (fallback, 1 req/sec limit)."""
     try:
         url = (
             "https://nominatim.openstreetmap.org/search?"
@@ -168,14 +463,30 @@ def geocode_address(address: str) -> Optional[tuple]:
         with urllib.request.urlopen(req, timeout=5) as r:
             data = json.loads(r.read().decode("utf-8"))
         if data:
-            lat = float(data[0]["lat"])
-            lon = float(data[0]["lon"])
-            geocode_cache[cache_key] = (lat, lon)
-            return (lat, lon)
+            return (float(data[0]["lat"]), float(data[0]["lon"]))
     except Exception as e:
-        logger.warning(f"Geocoding failed for '{address}': {e}")
-    geocode_cache[cache_key] = None
+        logger.warning(f"Nominatim geocoding failed for '{address}': {e}")
     return None
+
+
+def geocode_address(address: str) -> Optional[tuple]:
+    """
+    Geocode an address, trying Yandex Geocoder first (fast, no rate limit),
+    then falling back to Nominatim.  Results are cached in-memory.
+    """
+    cache_key = address.strip().lower()
+    if cache_key in geocode_cache:
+        return geocode_cache[cache_key]
+
+    # ── Primary: Yandex Geocoder ──────────────────────────────────────────────
+    result = geocode_address_yandex(address)
+
+    # ── Fallback: Nominatim ───────────────────────────────────────────────────
+    if result is None:
+        result = geocode_address_nominatim(address)
+
+    geocode_cache[cache_key] = result
+    return result
 
 
 def calculate_savings(optimized_km: float, num_points: int, num_vehicles: int) -> dict:
@@ -260,6 +571,14 @@ class RouteRequest(BaseModel):
 
 @app.on_event("startup")
 async def startup():
+    if not GRAPHHOPPER_API_KEY:
+        logger.warning(
+            "GRAPHHOPPER_API_KEY not set — GraphHopper Matrix API disabled, Haversine will be used"
+        )
+    if not YANDEX_GEOCODER_API_KEY:
+        logger.warning(
+            "YANDEX_GEOCODER_API_KEY not set — Yandex Geocoder disabled, falling back to Nominatim"
+        )
     init_db()
     seed_demo_data()
 
@@ -345,6 +664,101 @@ def create_store(body: StoreInput):
     cur.close()
     conn.close()
     return store_row_to_dict(row)
+
+
+@app.get("/api/stores/template")
+def download_stores_template():
+    if not OPENPYXL_AVAILABLE:
+        raise HTTPException(status_code=500, detail="openpyxl not installed")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Магазины"
+
+    headers = ["Название", "Адрес", "Время с", "Время до", "Время разгрузки мин"]
+    ws.append(headers)
+
+    from openpyxl.styles import Font, PatternFill, Alignment
+    header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
+    for col_num, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_num)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    ws.append(["Магазин Пятёрочка", "ул. Ленина 5, Москва", "09:00", "18:00", 15])
+    ws.append(["Магазин Магнит", "ул. Гагарина 12, Москва", "10:00", "17:00", 20])
+    ws.append(["Аптека Здоровье", "пр. Победы 7, Москва", "08:00", "20:00", 10])
+
+    col_widths = [30, 40, 12, 12, 22]
+    for i, width in enumerate(col_widths, 1):
+        ws.column_dimensions[ws.cell(1, i).column_letter].width = width
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=smartroute_template.xlsx"},
+    )
+
+
+@app.post("/api/stores/import")
+async def import_stores(file: UploadFile = File(...)):
+    if not OPENPYXL_AVAILABLE:
+        raise HTTPException(status_code=500, detail="openpyxl not installed")
+
+    content = await file.read()
+    wb = openpyxl.load_workbook(io.BytesIO(content))
+    ws = wb.active
+
+    imported = 0
+    failed = 0
+    stores = []
+    all_data_rows = [r for r in ws.iter_rows(min_row=2, values_only=True) if r and r[0]]
+    total_rows = len(all_data_rows)
+    logger.info("Excel import: %d data rows found", total_rows)
+
+    for i, row in enumerate(all_data_rows, start=1):
+        name = str(row[0]).strip() if row[0] else ""
+        address = str(row[1]).strip() if len(row) > 1 and row[1] else ""
+        tw_from = str(row[2]).strip() if len(row) > 2 and row[2] else "09:00"
+        tw_to = str(row[3]).strip() if len(row) > 3 and row[3] else "18:00"
+        unload = int(row[4]) if len(row) > 4 and row[4] else 15
+
+        if not name or not address:
+            failed += 1
+            continue
+
+        coords = geocode_address(address)
+        lat = coords[0] if coords else None
+        lon = coords[1] if coords else None
+        status = "found" if coords else "not_found"
+        logger.info("Import geocode %d/%d — %s → %s", i, total_rows, address, status)
+
+        try:
+            conn = get_db()
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute(
+                """INSERT INTO stores (name, address, lat, lon, geocode_status, time_window_from, time_window_to, unload_minutes)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+                (name, address, lat, lon, status, tw_from, tw_to, unload)
+            )
+            db_row = cur.fetchone()
+            conn.commit()
+            cur.close()
+            conn.close()
+            stores.append(store_row_to_dict(db_row))
+            imported += 1
+        except Exception as e:
+            logger.error(f"Failed to insert store row {i}: {e}")
+            failed += 1
+        if not YANDEX_GEOCODER_API_KEY:
+            time.sleep(1.1)
+
+    return {"total": imported + failed, "imported": imported, "failed": failed, "stores": stores}
 
 
 @app.get("/api/stores/{id}")
@@ -448,103 +862,6 @@ def geocode_store(id: int):
     return store_row_to_dict(row)
 
 
-@app.get("/api/stores/template")
-def download_stores_template():
-    if not OPENPYXL_AVAILABLE:
-        raise HTTPException(status_code=500, detail="openpyxl not installed")
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Магазины"
-
-    headers = ["Название", "Адрес", "Время с", "Время до", "Время разгрузки мин"]
-    ws.append(headers)
-
-    # Bold the header row
-    from openpyxl.styles import Font, PatternFill, Alignment
-    header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
-    for col_num, header in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col_num)
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal="center")
-
-    # Example rows
-    ws.append(["Магазин Пятёрочка", "ул. Ленина 5", "09:00", "18:00", 15])
-    ws.append(["Магазин Магнит", "ул. Гагарина 12", "10:00", "17:00", 20])
-    ws.append(["Аптека Здоровье", "пр. Победы 7", "08:00", "20:00", 10])
-
-    # Auto-fit column widths
-    col_widths = [30, 40, 12, 12, 22]
-    for i, width in enumerate(col_widths, 1):
-        ws.column_dimensions[ws.cell(1, i).column_letter].width = width
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-
-    return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=smartroute_template.xlsx"},
-    )
-
-
-@app.post("/api/stores/import")
-async def import_stores(file: UploadFile = File(...)):
-    if not OPENPYXL_AVAILABLE:
-        raise HTTPException(status_code=500, detail="openpyxl not installed")
-
-    content = await file.read()
-    wb = openpyxl.load_workbook(io.BytesIO(content))
-    ws = wb.active
-
-    imported = 0
-    failed = 0
-    stores = []
-    all_data_rows = [r for r in ws.iter_rows(min_row=2, values_only=True) if r and r[0]]
-    total_rows = len(all_data_rows)
-    logger.info("Excel import: %d data rows found", total_rows)
-
-    for i, row in enumerate(all_data_rows, start=1):
-        name = str(row[0]).strip() if row[0] else ""
-        address = str(row[1]).strip() if len(row) > 1 and row[1] else ""
-        tw_from = str(row[2]).strip() if len(row) > 2 and row[2] else "09:00"
-        tw_to = str(row[3]).strip() if len(row) > 3 and row[3] else "18:00"
-        unload = int(row[4]) if len(row) > 4 and row[4] else 15
-
-        if not name or not address:
-            failed += 1
-            continue
-
-        coords = geocode_address(address)
-        lat = coords[0] if coords else None
-        lon = coords[1] if coords else None
-        status = "found" if coords else "not_found"
-        logger.info("Import geocode %d/%d — %s → %s", i - 1, total_rows, address, status)
-
-        try:
-            conn = get_db()
-            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            cur.execute(
-                """INSERT INTO stores (name, address, lat, lon, geocode_status, time_window_from, time_window_to, unload_minutes)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
-                (name, address, lat, lon, status, tw_from, tw_to, unload)
-            )
-            db_row = cur.fetchone()
-            conn.commit()
-            cur.close()
-            conn.close()
-            stores.append(store_row_to_dict(db_row))
-            imported += 1
-        except Exception as e:
-            logger.error(f"Failed to insert store row {i}: {e}")
-            failed += 1
-        time.sleep(1.1)  # Nominatim rate limit: max 1 req/sec
-
-    return {"total": imported + failed, "imported": imported, "failed": failed, "stores": stores}
-
-
 @app.post("/api/route/build")
 def build_route(body: RouteRequest):
     if not body.store_ids:
@@ -585,7 +902,7 @@ def build_route(body: RouteRequest):
     )
 
     try:
-        vehicle_routes_indices = solve_vrp(all_coords, num_vehicles, capacities, demands)
+        vehicle_routes_indices, matrix_source = solve_vrp(all_coords, num_vehicles, capacities, demands)
     except Exception as vrp_exc:
         logger.error("solve_vrp failed:\n%s", traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"VRP solver error: {vrp_exc}")
@@ -603,9 +920,12 @@ def build_route(body: RouteRequest):
         if not route_indices:
             continue
 
+        ROUTE_START_MINUTES = 9 * 60  # 09:00 departure from depot
         route_stores = []
         route_coords = [(depot_lat, depot_lon)]
         dist_m = 0
+        cumulative_min = 0  # elapsed minutes since 09:00
+        prev_coord = (depot_lat, depot_lon)
 
         for order, idx in enumerate(route_indices, 1):
             store_idx = idx - 1  # node 0 = depot, node i = store_list[i-1]
@@ -613,10 +933,21 @@ def build_route(body: RouteRequest):
                 logger.warning("VRP returned out-of-range node %d (store_list len=%d) — skipping", idx, len(store_list))
                 continue
             store = store_list[store_idx]
-            route_coords.append((store["lat"], store["lon"]))
-            arrive_by = None
-            if body.use_time_windows:
-                arrive_by = store["time_window_to"]
+            curr_coord = (store["lat"], store["lon"])
+
+            # Drive time from previous point
+            leg_m = haversine_meters(prev_coord, curr_coord)
+            dist_m += leg_m
+            leg_drive_min = max(1, int(leg_m / 1000 / AVG_SPEED_KMH * 60))
+            cumulative_min += leg_drive_min
+
+            # Estimated arrival time at this stop
+            abs_min = ROUTE_START_MINUTES + cumulative_min
+            arrive_hour = (abs_min // 60) % 24
+            arrive_min_part = abs_min % 60
+            arrive_by = f"{arrive_hour:02d}:{arrive_min_part:02d}"
+
+            route_coords.append(curr_coord)
             route_stores.append({
                 "order": order,
                 "store_id": store["id"],
@@ -627,11 +958,14 @@ def build_route(body: RouteRequest):
                 "arrive_by": arrive_by,
             })
 
-        # Calc distance
-        for i in range(len(route_coords) - 1):
-            dist_m += haversine_meters(route_coords[i], route_coords[i+1])
-        # Return to depot
-        if route_coords:
+            # Add unload time before driving to the next stop
+            if body.use_unload_time:
+                cumulative_min += store.get("unload_minutes", 15)
+
+            prev_coord = curr_coord
+
+        # Return to depot distance
+        if len(route_coords) > 1:
             dist_m += haversine_meters(route_coords[-1], (depot_lat, depot_lon))
 
         km = dist_m / 1000.0
@@ -683,6 +1017,8 @@ def build_route(body: RouteRequest):
         "routes": routes,
         "savings": savings,
         "total_km": round(total_km, 1),
+        "matrix_source": matrix_source,
+        "geocoder_used": "yandex" if YANDEX_GEOCODER_API_KEY else "nominatim",
     }
 
 

@@ -357,6 +357,14 @@ components:
           $ref: "#/components/schemas/Savings"
         total_km:
           type: number
+        matrix_source:
+          type: string
+          enum: [graphhopper, haversine]
+          description: Distance matrix source used for optimization
+        geocoder_used:
+          type: string
+          enum: [yandex, nominatim]
+          description: Geocoding service used for address resolution
       required:
         - routes
         - savings

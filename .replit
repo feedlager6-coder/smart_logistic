@@ -11,6 +11,43 @@ env = { "CI" = "true" }
 [workflows]
 runButton = "Project"
 
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start API Server"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start Frontend"
+
+[[workflows.workflow]]
+name = "Start API Server"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd artifacts/api-server && python3 main.py"
+waitForPort = 8080
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow]]
+name = "Start Frontend"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "PORT=24853 BASE_PATH=/ pnpm --filter @workspace/smartroute run dev"
+waitForPort = 24853
+
 [agent]
 stack = "PNPM_WORKSPACE"
 expertMode = true
@@ -33,3 +70,9 @@ externalPort = 8081
 [[ports]]
 localPort = 24853
 externalPort = 3000
+
+[userenv]
+
+[userenv.shared]
+GRAPHHOPPER_API_KEY = "8a6a1fd0-73e5-4523-9b52-d6bd065fa911"
+YANDEX_GEOCODER_API_KEY = "ada8b170-25f4-4e00-a6ed-cf07e6b6d5a3"

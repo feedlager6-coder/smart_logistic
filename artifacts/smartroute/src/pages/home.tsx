@@ -68,7 +68,7 @@ export function HomePage() {
             </CardHeader>
             <CardContent>
               <div className="text-3xl font-bold text-foreground">
-                {isLoading ? <span className="animate-pulse bg-muted rounded w-20 h-8 inline-block" /> : summary?.total_routes.toLocaleString('ru-RU')}
+                {isLoading ? <span className="animate-pulse bg-muted rounded w-20 h-8 inline-block" /> : (summary?.total_routes ?? 0).toLocaleString('ru-RU')}
               </div>
               <p className="text-sm text-muted-foreground mt-1 flex items-center gap-1">
                 <CheckCircle2 className="w-4 h-4 text-emerald-500" />
@@ -83,7 +83,7 @@ export function HomePage() {
             </CardHeader>
             <CardContent>
               <div className="text-3xl font-bold text-primary">
-                {isLoading ? <span className="animate-pulse bg-muted rounded w-24 h-8 inline-block" /> : `${summary?.saved_km.toLocaleString('ru-RU')} км`}
+                {isLoading ? <span className="animate-pulse bg-muted rounded w-24 h-8 inline-block" /> : `${(summary?.saved_km ?? 0).toLocaleString('ru-RU')} км`}
               </div>
               <p className="text-sm text-muted-foreground mt-1 flex items-center gap-1">
                 <TrendingDown className="w-4 h-4 text-primary" />
@@ -98,7 +98,7 @@ export function HomePage() {
             </CardHeader>
             <CardContent>
               <div className="text-3xl font-bold text-emerald-600 dark:text-emerald-500">
-                {isLoading ? <span className="animate-pulse bg-muted rounded w-32 h-8 inline-block" /> : `${summary?.saved_rub.toLocaleString('ru-RU')} ₽`}
+                {isLoading ? <span className="animate-pulse bg-muted rounded w-32 h-8 inline-block" /> : `${(summary?.saved_rub ?? 0).toLocaleString('ru-RU')} ₽`}
               </div>
               <p className="text-sm text-muted-foreground mt-1">
                 Общая выгода

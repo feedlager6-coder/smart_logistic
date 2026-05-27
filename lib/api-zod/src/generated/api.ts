@@ -167,7 +167,9 @@ export const BuildRouteResponse = zod.object({
   "saved_rub_day": zod.number(),
   "saved_rub_month": zod.number()
 }),
-  "total_km": zod.number()
+  "total_km": zod.number(),
+  "matrix_source": zod.enum(['graphhopper', 'haversine']).optional().describe('Distance matrix source used for optimization'),
+  "geocoder_used": zod.enum(['yandex', 'nominatim']).optional().describe('Geocoding service used for address resolution')
 })
 
 

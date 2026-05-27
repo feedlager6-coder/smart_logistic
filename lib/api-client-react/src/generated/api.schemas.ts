@@ -77,6 +77,28 @@ export interface RouteRequest {
   use_unload_time?: boolean;
 }
 
+/**
+ * Distance matrix source used for optimization
+ */
+export type RouteResultMatrixSource = typeof RouteResultMatrixSource[keyof typeof RouteResultMatrixSource];
+
+
+export const RouteResultMatrixSource = {
+  graphhopper: 'graphhopper',
+  haversine: 'haversine',
+} as const;
+
+/**
+ * Geocoding service used for address resolution
+ */
+export type RouteResultGeocoderUsed = typeof RouteResultGeocoderUsed[keyof typeof RouteResultGeocoderUsed];
+
+
+export const RouteResultGeocoderUsed = {
+  yandex: 'yandex',
+  nominatim: 'nominatim',
+} as const;
+
 export interface RouteStop {
   order: number;
   store_id: number;
@@ -111,6 +133,10 @@ export interface RouteResult {
   routes: VehicleRoute[];
   savings: Savings;
   total_km: number;
+  /** Distance matrix source used for optimization */
+  matrix_source?: RouteResultMatrixSource;
+  /** Geocoding service used for address resolution */
+  geocoder_used?: RouteResultGeocoderUsed;
 }
 
 export interface AnalyticsSummary {

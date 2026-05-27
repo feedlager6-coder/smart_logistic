@@ -6,20 +6,25 @@
 
 | Слой | Технология |
 |---|---|
-| Frontend | React 19, Vite, Tailwind CSS, shadcn/ui |
+| Frontend | React 19, Vite 7, Tailwind CSS 4, shadcn/ui |
 | Backend API | Python 3.11, FastAPI, Uvicorn |
-| Оптимизация маршрутов | Google OR-Tools (VRP solver) |
-| Карты | Leaflet.js + OpenStreetMap / Nominatim |
+| Оптимизация маршрутов | Google OR-Tools (VRP solver) + балансировка нагрузки |
+| Матрица расстояний | GraphHopper Matrix API → Haversine (fallback) |
+| Геокодер (primary) | Yandex Geocoder API (без задержки) |
+| Геокодер (fallback) | Nominatim / OpenStreetMap (1 req/sec) |
+| Карты | Leaflet.js + OpenStreetMap |
 | База данных | PostgreSQL (Replit managed) |
 | Excel | openpyxl |
 | Графики | Recharts |
-| Type-safe API клиент | Orval (OpenAPI codegen) + Zod |
+| Type-safe API клиент | Orval v8 (OpenAPI codegen) + Zod |
 
 ## Возможности
 
-- Управление базой магазинов с геокодированием через Nominatim
+- Управление базой магазинов с умным геокодированием (Яндекс → Nominatim fallback)
 - Импорт магазинов из Excel-файла (`.xlsx`) со встроенным шаблоном
 - Построение оптимальных маршрутов для 1–50 машин с OR-Tools VRP
+- **Балансировка нагрузки**: `SetGlobalSpanCostCoefficient(100)` равномерно распределяет точки между курьерами
+- **Гибридная матрица расстояний**: GraphHopper для точных дорожных расстояний с Haversine fallback
 - Учёт грузоподъёмности и временных окон
 - Интерактивная карта Leaflet с цветными маршрутами
 - Ссылки на Яндекс Навигатор и отправка через WhatsApp
@@ -31,18 +36,21 @@
 smartroute/
 ├── artifacts/
 │   ├── api-server/          # Python FastAPI backend
-│   │   └── main.py          # Все API-эндпоинты, VRP-логика, геокодер
+│   │   └── main.py          # VRP-логика, геокодер, GraphHopper, OR-Tools
 │   └── smartroute/          # React + Vite frontend
 │       └── src/
 │           ├── pages/       # Страницы приложения
-│           ├── components/  # UI-компоненты (shadcn/ui)
-│           └── main.tsx
+│           └── components/  # UI-компоненты (shadcn/ui)
 ├── lib/
-│   ├── api-spec/            # OpenAPI 3.1 спецификация
+│   ├── api-spec/            # OpenAPI 3.1 спецификация + конфиг Orval
 │   │   └── openapi.yaml
 │   ├── api-client-react/    # Сгенерированные React-хуки (Orval)
 │   └── api-zod/             # Сгенерированные Zod-схемы (Orval)
-└── package.json             # pnpm workspace
+├── docs/
+│   ├── ARCHITECTURE.md      # Архитектура системы
+│   ├── PROJECT_FLOW.md      # Потоки данных и диаграммы
+│   └── CONTEXT.md           # Контекст проекта, решения, ограничения
+└── README.md
 ```
 
 ## Ключевые модули
@@ -50,96 +58,55 @@ smartroute/
 | Модуль | Расположение |
 |---|---|
 | VRP-логика (OR-Tools) | `artifacts/api-server/main.py` → `solve_vrp()` |
-| Геокодер (Nominatim) | `artifacts/api-server/main.py` → `geocode_address()` |
-| Импорт Excel | `artifacts/api-server/main.py` → `import_stores()` |
+| GraphHopper Matrix API | `artifacts/api-server/main.py` → `get_matrix_from_graphhopper()` |
+| Yandex Geocoder | `artifacts/api-server/main.py` → `geocode_address_yandex()` |
+| Nominatim (fallback) | `artifacts/api-server/main.py` → `geocode_address_nominatim()` |
+| Балансировка нагрузки | `artifacts/api-server/main.py` → `SetGlobalSpanCostCoefficient(100)` |
 | UI карты (Leaflet) | `artifacts/smartroute/src/pages/result.tsx` |
 | Аналитика | `artifacts/smartroute/src/pages/analytics.tsx` |
 | OpenAPI спецификация | `lib/api-spec/openapi.yaml` |
 
+## Гибридная стратегия GraphHopper
+
+Бесплатный план GraphHopper ограничен **5 точками на запрос**. Используется трёхуровневый подход:
+
+```
+≤ 4 магазинов → 1 запрос GraphHopper для всей матрицы → OR-Tools VRP
+> 4 магазинов → Haversine-кластеризация → GraphHopper на кластер (≤4 точки) → OR-Tools
+HTTP 429      → автоматический fallback на Haversine (60 сек блокировка)
+```
+
+## Переменные окружения
+
+| Переменная | Обязательна | Описание |
+|---|---|---|
+| `DATABASE_URL` | Да | PostgreSQL строка подключения |
+| `GRAPHHOPPER_API_KEY` | Рекомендована | Ключ GraphHopper Matrix API |
+| `YANDEX_GEOCODER_API_KEY` | Рекомендована | Ключ Яндекс Геокодера |
+
+При отсутствии ключей система выводит предупреждение и работает через fallback (Haversine / Nominatim).
+
 ## Запуск локально
 
-### Предварительные требования
-
-- Node.js 20+ и pnpm
-- Python 3.11+
-- PostgreSQL (или переменная окружения `DATABASE_URL`)
-
-### 1. Установка зависимостей
-
 ```bash
-# Node-зависимости
+# Установить зависимости
 pnpm install
 
-# Python-зависимости
-pip install fastapi uvicorn ortools openpyxl psycopg2-binary python-multipart
+# Запустить API-сервер (порт 8080)
+cd artifacts/api-server && python3 main.py
+
+# Запустить фронтенд (порт 24853)
+PORT=24853 BASE_PATH=/ pnpm --filter @workspace/smartroute run dev
 ```
 
-### 2. Переменные окружения
-
-Скопируйте `.env.example` в `.env` и заполните значения:
-
-```bash
-cp .env.example .env
-```
-
-### 3. Запуск backend
-
-```bash
-cd artifacts/api-server
-python main.py
-# API будет доступен на http://localhost:8080
-```
-
-### 4. Запуск frontend
-
-```bash
-pnpm --filter @workspace/smartroute run dev
-# Приложение будет доступно на http://localhost:24853
-```
-
-### 5. Кодогенерация (после изменений OpenAPI)
+## Codegen (после изменений OpenAPI spec)
 
 ```bash
 pnpm --filter @workspace/api-spec run codegen
 ```
 
-## Деплой
+## Документация
 
-Проект развёртывается в одно нажатие через Replit Deployments. После публикации:
-
-- Backend: `python main.py` (PORT задаётся через env)
-- Frontend: сборка через `pnpm --filter @workspace/smartroute run build`
-
-## Переменные окружения
-
-| Переменная | Обязательная | Описание |
-|---|---|---|
-| `DATABASE_URL` | Да | Строка подключения PostgreSQL |
-| `PORT` | Нет | Порт backend-сервера (по умолчанию 8080) |
-| `PGHOST` | Нет | Хост PostgreSQL |
-| `PGPORT` | Нет | Порт PostgreSQL |
-| `PGUSER` | Нет | Пользователь PostgreSQL |
-| `PGPASSWORD` | Нет | Пароль PostgreSQL |
-| `PGDATABASE` | Нет | Имя базы данных |
-
-## API-эндпоинты
-
-| Метод | Путь | Описание |
-|---|---|---|
-| GET | `/api/healthz` | Проверка работоспособности |
-| GET | `/api/stores` | Список магазинов |
-| POST | `/api/stores` | Добавить магазин |
-| GET | `/api/stores/template` | Скачать Excel-шаблон |
-| POST | `/api/stores/import` | Импорт из Excel |
-| PUT | `/api/stores/{id}` | Обновить магазин |
-| DELETE | `/api/stores/{id}` | Удалить магазин |
-| POST | `/api/stores/{id}/geocode` | Геокодировать адрес |
-| POST | `/api/route/build` | Построить маршруты |
-| GET | `/api/analytics/summary` | Итоги за всё время |
-| GET | `/api/analytics/daily` | Статистика по дням |
-| GET | `/api/analytics/monthly` | Статистика по месяцам |
-| GET | `/api/analytics/top-stores` | Топ-10 магазинов |
-
-## Лицензия
-
-MIT
+- [Архитектура](docs/ARCHITECTURE.md)
+- [Потоки данных](docs/PROJECT_FLOW.md)
+- [Контекст проекта](docs/CONTEXT.md)

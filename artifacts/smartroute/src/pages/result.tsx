@@ -159,7 +159,7 @@ export function ResultPage() {
                 </div>
                 <div className="flex items-center gap-4 text-sm text-muted-foreground mt-2">
                   <span className="flex items-center gap-1"><MapPin className="w-4 h-4" /> {Math.round(route.total_km)} км</span>
-                  <span className="flex items-center gap-1"><Clock className="w-4 h-4" /> ~{Math.round(route.estimated_minutes / 60)} ч {route.estimated_minutes % 60} мин</span>
+                  <span className="flex items-center gap-1"><Clock className="w-4 h-4" /> ~{Math.floor((route.estimated_minutes ?? 0) / 60)} ч {(route.estimated_minutes ?? 0) % 60} мин</span>
                 </div>
               </CardHeader>
               <CardContent className="p-0 flex-1">

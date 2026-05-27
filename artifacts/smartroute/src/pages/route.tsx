@@ -18,7 +18,8 @@ interface Vehicle {
 }
 
 export function RoutePage() {
-  const { data: stores = [], isLoading } = useListStores();
+  const { data: storesData, isLoading } = useListStores();
+  const stores = Array.isArray(storesData) ? storesData : [];
   const buildRoute = useBuildRoute();
   const { toast } = useToast();
   const [, setLocation] = useLocation();

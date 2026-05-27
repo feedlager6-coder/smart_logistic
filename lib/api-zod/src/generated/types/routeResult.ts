@@ -5,6 +5,8 @@
  * SmartRoute API - Delivery route optimization
  * OpenAPI spec version: 0.1.0
  */
+import type { RouteResultGeocoderUsed } from './routeResultGeocoderUsed';
+import type { RouteResultMatrixSource } from './routeResultMatrixSource';
 import type { Savings } from './savings';
 import type { VehicleRoute } from './vehicleRoute';
 
@@ -12,4 +14,8 @@ export interface RouteResult {
   routes: VehicleRoute[];
   savings: Savings;
   total_km: number;
+  /** Distance matrix source used for optimization */
+  matrix_source?: RouteResultMatrixSource;
+  /** Geocoding service used for address resolution */
+  geocoder_used?: RouteResultGeocoderUsed;
 }
