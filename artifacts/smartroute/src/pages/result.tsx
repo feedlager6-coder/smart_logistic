@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, Fragment } from "react";
 import { Link, useLocation } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -118,7 +118,7 @@ export function ResultPage() {
                 .map(s => [s.lat, s.lon] as [number, number]);
               
               return (
-                <div key={route.vehicle_name}>
+                <Fragment key={route.vehicle_name}>
                   {positions.length > 1 && (
                     <Polyline positions={positions} pathOptions={{ color, weight: 4, opacity: 0.8 }} />
                   )}
@@ -135,7 +135,7 @@ export function ResultPage() {
                       </Marker>
                     );
                   })}
-                </div>
+                </Fragment>
               );
             })}
           </MapContainer>

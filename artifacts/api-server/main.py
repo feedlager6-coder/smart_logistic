@@ -1,6 +1,7 @@
 import os
 import math
 import json
+import traceback
 import urllib.request
 import urllib.parse
 import time
@@ -12,6 +13,7 @@ import psycopg2
 import psycopg2.extras
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 try:
@@ -446,6 +448,48 @@ def geocode_store(id: int):
     return store_row_to_dict(row)
 
 
+@app.get("/api/stores/template")
+def download_stores_template():
+    if not OPENPYXL_AVAILABLE:
+        raise HTTPException(status_code=500, detail="openpyxl not installed")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Магазины"
+
+    headers = ["Название", "Адрес", "Время с", "Время до", "Время разгрузки мин"]
+    ws.append(headers)
+
+    # Bold the header row
+    from openpyxl.styles import Font, PatternFill, Alignment
+    header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
+    for col_num, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_num)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    # Example rows
+    ws.append(["Магазин Пятёрочка", "ул. Ленина 5", "09:00", "18:00", 15])
+    ws.append(["Магазин Магнит", "ул. Гагарина 12", "10:00", "17:00", 20])
+    ws.append(["Аптека Здоровье", "пр. Победы 7", "08:00", "20:00", 10])
+
+    # Auto-fit column widths
+    col_widths = [30, 40, 12, 12, 22]
+    for i, width in enumerate(col_widths, 1):
+        ws.column_dimensions[ws.cell(1, i).column_letter].width = width
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=smartroute_template.xlsx"},
+    )
+
+
 @app.post("/api/stores/import")
 async def import_stores(file: UploadFile = File(...)):
     if not OPENPYXL_AVAILABLE:
@@ -458,10 +502,11 @@ async def import_stores(file: UploadFile = File(...)):
     imported = 0
     failed = 0
     stores = []
+    all_data_rows = [r for r in ws.iter_rows(min_row=2, values_only=True) if r and r[0]]
+    total_rows = len(all_data_rows)
+    logger.info("Excel import: %d data rows found", total_rows)
 
-    for i, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-        if not row or not row[0]:
-            continue
+    for i, row in enumerate(all_data_rows, start=1):
         name = str(row[0]).strip() if row[0] else ""
         address = str(row[1]).strip() if len(row) > 1 and row[1] else ""
         tw_from = str(row[2]).strip() if len(row) > 2 and row[2] else "09:00"
@@ -476,6 +521,7 @@ async def import_stores(file: UploadFile = File(...)):
         lat = coords[0] if coords else None
         lon = coords[1] if coords else None
         status = "found" if coords else "not_found"
+        logger.info("Import geocode %d/%d — %s → %s", i - 1, total_rows, address, status)
 
         try:
             conn = get_db()
@@ -494,7 +540,7 @@ async def import_stores(file: UploadFile = File(...)):
         except Exception as e:
             logger.error(f"Failed to insert store row {i}: {e}")
             failed += 1
-        time.sleep(0.5)  # Rate limit for Nominatim
+        time.sleep(1.1)  # Nominatim rate limit: max 1 req/sec
 
     return {"total": imported + failed, "imported": imported, "failed": failed, "stores": stores}
 
@@ -530,10 +576,21 @@ def build_route(body: RouteRequest):
     capacities = None
     demands = None
     if any(v.capacity_kg for v in body.vehicles):
-        capacities = [v.capacity_kg or 99999 for v in body.vehicles]
+        capacities = [int(v.capacity_kg) if v.capacity_kg else 99999 for v in body.vehicles]
         demands = [0] + [1] * len(store_list)  # 1 unit per store
 
-    vehicle_routes_indices = solve_vrp(all_coords, num_vehicles, capacities, demands)
+    logger.info(
+        "solve_vrp: %d stores, %d vehicles, capacities=%s",
+        len(store_list), num_vehicles, capacities,
+    )
+
+    try:
+        vehicle_routes_indices = solve_vrp(all_coords, num_vehicles, capacities, demands)
+    except Exception as vrp_exc:
+        logger.error("solve_vrp failed:\n%s", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"VRP solver error: {vrp_exc}")
+
+    logger.info("solve_vrp result: %s routes", len(vehicle_routes_indices))
 
     # Build result
     routes = []
@@ -551,7 +608,11 @@ def build_route(body: RouteRequest):
         dist_m = 0
 
         for order, idx in enumerate(route_indices, 1):
-            store = store_list[idx - 1]  # idx-1 because depot is 0
+            store_idx = idx - 1  # node 0 = depot, node i = store_list[i-1]
+            if store_idx < 0 or store_idx >= len(store_list):
+                logger.warning("VRP returned out-of-range node %d (store_list len=%d) — skipping", idx, len(store_list))
+                continue
+            store = store_list[store_idx]
             route_coords.append((store["lat"], store["lon"]))
             arrive_by = None
             if body.use_time_windows:

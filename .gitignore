@@ -47,3 +47,28 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Environment secrets
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+venv/
+.venv/
+*.sqlite
+*.db
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
