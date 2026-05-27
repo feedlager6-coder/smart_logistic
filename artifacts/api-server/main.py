@@ -236,6 +236,14 @@ def _ortools_solve_group(depot_coord: tuple, group_node_indices: list,
     return ordered
 
 
+def _fallback_distribution(store_nodes: list, num_vehicles: int) -> list:
+    """Round-robin split when OR-Tools finds no solution."""
+    routes = [[] for _ in range(num_vehicles)]
+    for i, node in enumerate(store_nodes):
+        routes[i % num_vehicles].append(node)
+    return [r for r in routes if r]
+
+
 def get_db():
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = False
@@ -287,6 +295,10 @@ def init_db():
             visit_order INTEGER
         )
     """)
+    # Performance indexes
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_stores_geocode ON stores(geocode_status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_date ON route_sessions(date DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_session_stores_session ON route_session_stores(session_id)")
     conn.commit()
     cur.close()
     conn.close()
@@ -327,11 +339,9 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
     if store_count == 0:
         return []
 
-    # ── Tier 3a: no OR-Tools — greedy split ──────────────────────────────────
+    # ── Tier 3a: no OR-Tools — round-robin fallback ───────────────────────────
     if not ORTOOLS_AVAILABLE:
-        points = list(range(1, n))
-        chunk = max(1, len(points) // max(1, num_vehicles))
-        return [points[i:i + chunk] for i in range(0, len(points), chunk)][:num_vehicles], "haversine"
+        return _fallback_distribution(list(range(1, n)), num_vehicles), "haversine"
 
     # ── Helper: run full OR-Tools VRP on an NxN matrix (all vehicles) ─────────
     def _ortools_full(matrix: list) -> list:
@@ -363,9 +373,21 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
         params = pywrapcp.DefaultRoutingSearchParameters()
         params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
         params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-        params.time_limit.seconds = 10
+        # Adaptive time limit based on problem size
+        n_nodes = len(matrix)
+        if n_nodes > 20:
+            params.time_limit.seconds = 30
+        elif n_nodes > 10:
+            params.time_limit.seconds = 15
+        else:
+            params.time_limit.seconds = 10
 
-        sol = routing.SolveWithParameters(params)
+        try:
+            sol = routing.SolveWithParameters(params)
+        except Exception as e:
+            logger.error("OR-Tools solve error: %s", e, exc_info=True)
+            sol = None
+
         result = []
         if sol:
             for v in range(num_vehicles):
@@ -378,6 +400,9 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
                     idx = sol.Value(routing.NextVar(idx))
                 if route:
                     result.append(route)
+        if not result:
+            # Fallback: round-robin distribution across vehicles
+            result = _fallback_distribution(list(range(1, len(matrix))), num_vehicles)
         return result
 
     # ── Tier 1: small dataset — one GraphHopper call for the whole matrix ─────
