@@ -8,7 +8,7 @@
 - `store_row_to_dict` — добавлено поле `map_url` в возвращаемый словарь
 
 ### Step 2: Fix Excel Template Download
-- Шаблон работает через `window.open("/api/stores/template", "_blank")` — маршруты в FastAPI корректно упорядочены (`/template` до `/{id}`)
+- Шаблон скачивается принудительно через `fetch` + `Blob` + динамический `<a download>` (ранее `window.open` открывало пустую страницу в Replit-прокси)
 - Исправлено: импорт теперь пропускает note-строки (начинаются с `←`)
 
 ### Step 3: Add Precise Location Support

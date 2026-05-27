@@ -113,6 +113,29 @@ FastAPI сопоставляет маршруты в порядке объявл
 `/import`) объявлены **до** параметрических (`/{id}`), чтобы избежать
 ошибочного сопоставления строки `"template"` с целочисленным `id`.
 
+### Скачивание Excel-шаблона на фронтенде
+
+`window.open("/api/stores/template", "_blank")` **не работает** в Replit-прокси —
+прокси не пробрасывает `Content-Disposition: attachment`, из-за чего браузер
+открывает пустую страницу вместо диалога сохранения файла.
+
+Правильный способ — `fetch` + `Blob` + динамический `<a download>`:
+
+```ts
+const response = await fetch("/api/stores/template");
+const blob = await response.blob();
+const url = window.URL.createObjectURL(blob);
+const a = document.createElement("a");
+a.href = url;
+a.download = "smartroute_template.xlsx";
+document.body.appendChild(a);
+a.click();
+document.body.removeChild(a);
+window.URL.revokeObjectURL(url);
+```
+
+Это правило применимо ко **всем** файловым скачиваниям в приложении.
+
 ---
 
 ## API contract

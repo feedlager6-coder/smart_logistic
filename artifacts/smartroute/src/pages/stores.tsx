@@ -164,8 +164,23 @@ export function StoresPage() {
     );
   };
 
-  const handleDownloadTemplate = () => {
-    window.open("/api/stores/template", "_blank");
+  const handleDownloadTemplate = async () => {
+    try {
+      const response = await fetch("/api/stores/template");
+      if (!response.ok) throw new Error("Ошибка загрузки");
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "smartroute_template.xlsx";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("Ошибка скачивания шаблона:", error);
+      toast({ title: "Ошибка", description: "Не удалось скачать шаблон", variant: "destructive" });
+    }
   };
 
   const filteredStores = stores.filter(
