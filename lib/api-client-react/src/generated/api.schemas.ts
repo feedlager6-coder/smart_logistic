@@ -26,6 +26,11 @@ export interface Store {
   lat?: number | null;
   /** @nullable */
   lon?: number | null;
+  /**
+     * Direct map link (Yandex/Google/2GIS)
+     * @nullable
+     */
+  map_url?: string | null;
   geocode_status: StoreGeocodeStatus;
   time_window_from: string;
   time_window_to: string;
@@ -36,6 +41,21 @@ export interface Store {
 export interface StoreInput {
   name: string;
   address: string;
+  /**
+     * Latitude (if provided, skips geocoding)
+     * @nullable
+     */
+  lat?: number | null;
+  /**
+     * Longitude (if provided, skips geocoding)
+     * @nullable
+     */
+  lon?: number | null;
+  /**
+     * Direct map link (Yandex/Google/2GIS)
+     * @nullable
+     */
+  map_url?: string | null;
   time_window_from?: string;
   time_window_to?: string;
   unload_minutes?: number;
@@ -48,6 +68,8 @@ export interface StoreUpdate {
   lat?: number | null;
   /** @nullable */
   lon?: number | null;
+  /** @nullable */
+  map_url?: string | null;
   time_window_from?: string;
   time_window_to?: string;
   unload_minutes?: number;

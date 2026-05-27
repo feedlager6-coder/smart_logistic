@@ -9,6 +9,21 @@
 export interface StoreInput {
   name: string;
   address: string;
+  /**
+     * Latitude (if provided, skips geocoding)
+     * @nullable
+     */
+  lat?: number | null;
+  /**
+     * Longitude (if provided, skips geocoding)
+     * @nullable
+     */
+  lon?: number | null;
+  /**
+     * Direct map link (Yandex/Google/2GIS)
+     * @nullable
+     */
+  map_url?: string | null;
   time_window_from?: string;
   time_window_to?: string;
   unload_minutes?: number;

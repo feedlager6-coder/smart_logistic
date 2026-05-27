@@ -15,6 +15,11 @@ export interface Store {
   lat?: number | null;
   /** @nullable */
   lon?: number | null;
+  /**
+     * Direct map link (Yandex/Google/2GIS)
+     * @nullable
+     */
+  map_url?: string | null;
   geocode_status: StoreGeocodeStatus;
   time_window_from: string;
   time_window_to: string;

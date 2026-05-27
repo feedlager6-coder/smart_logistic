@@ -252,6 +252,7 @@ def init_db():
             address TEXT NOT NULL,
             lat DOUBLE PRECISION,
             lon DOUBLE PRECISION,
+            map_url TEXT,
             geocode_status TEXT DEFAULT 'pending',
             time_window_from TEXT DEFAULT '09:00',
             time_window_to TEXT DEFAULT '18:00',
@@ -274,6 +275,9 @@ def init_db():
     """)
     cur.execute("""
         ALTER TABLE route_sessions ADD COLUMN IF NOT EXISTS result_json TEXT
+    """)
+    cur.execute("""
+        ALTER TABLE stores ADD COLUMN IF NOT EXISTS map_url TEXT
     """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS route_session_stores (
@@ -530,6 +534,7 @@ def store_row_to_dict(row) -> dict:
         "address": row["address"],
         "lat": row["lat"],
         "lon": row["lon"],
+        "map_url": row.get("map_url"),
         "geocode_status": row["geocode_status"] or "pending",
         "time_window_from": row["time_window_from"] or "09:00",
         "time_window_to": row["time_window_to"] or "18:00",
@@ -543,6 +548,9 @@ def store_row_to_dict(row) -> dict:
 class StoreInput(BaseModel):
     name: str
     address: str
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    map_url: Optional[str] = None
     time_window_from: Optional[str] = "09:00"
     time_window_to: Optional[str] = "18:00"
     unload_minutes: Optional[int] = 15
@@ -553,6 +561,7 @@ class StoreUpdate(BaseModel):
     address: Optional[str] = None
     lat: Optional[float] = None
     lon: Optional[float] = None
+    map_url: Optional[str] = None
     time_window_from: Optional[str] = None
     time_window_to: Optional[str] = None
     unload_minutes: Optional[int] = None
@@ -652,18 +661,32 @@ def list_stores():
 
 @app.post("/api/stores", status_code=201)
 def create_store(body: StoreInput):
-    coords = geocode_address(body.address)
-    lat = coords[0] if coords else None
-    lon = coords[1] if coords else None
-    status = "found" if coords else "not_found"
+    # Validation
+    if not body.name or not body.name.strip():
+        raise HTTPException(status_code=422, detail="Название магазина не может быть пустым")
+    if not body.address or not body.address.strip():
+        raise HTTPException(status_code=422, detail="Адрес не может быть пустым")
+    if body.lat is not None and not (-90 <= body.lat <= 90):
+        raise HTTPException(status_code=422, detail="Широта должна быть от -90 до 90")
+    if body.lon is not None and not (-180 <= body.lon <= 180):
+        raise HTTPException(status_code=422, detail="Долгота должна быть от -180 до 180")
+
+    # Smart geocoding: use provided coordinates if both lat and lon are given
+    if body.lat is not None and body.lon is not None:
+        lat, lon, status = body.lat, body.lon, "found"
+    else:
+        coords = geocode_address(body.address)
+        lat = coords[0] if coords else None
+        lon = coords[1] if coords else None
+        status = "found" if coords else "not_found"
 
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        """INSERT INTO stores (name, address, lat, lon, geocode_status, time_window_from, time_window_to, unload_minutes)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
-        (body.name, body.address, lat, lon, status,
-         body.time_window_from, body.time_window_to, body.unload_minutes)
+        """INSERT INTO stores (name, address, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+        (body.name.strip(), body.address.strip(), lat, lon, body.map_url,
+         status, body.time_window_from, body.time_window_to, body.unload_minutes)
     )
     row = cur.fetchone()
     conn.commit()
@@ -677,14 +700,25 @@ def download_stores_template():
     if not OPENPYXL_AVAILABLE:
         raise HTTPException(status_code=500, detail="openpyxl not installed")
 
+    from openpyxl.styles import Font, PatternFill, Alignment
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Магазины"
 
-    headers = ["Название", "Адрес", "Время с", "Время до", "Время разгрузки мин"]
+    headers = [
+        "Название",       # store_name  (col A)
+        "Адрес",          # address     (col B)
+        "Город",          # city        (col C) — prepended to address automatically
+        "Широта",         # latitude    (col D) — optional, skips geocoding if set
+        "Долгота",        # longitude   (col E) — optional, skips geocoding if set
+        "Ссылка на карту",# map_url     (col F)
+        "Разгрузка мин",  # unload_minutes (col G)
+        "Время с",        # open_time   (col H)
+        "Время до",       # close_time  (col I)
+    ]
     ws.append(headers)
 
-    from openpyxl.styles import Font, PatternFill, Alignment
     header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
     for col_num, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col_num)
@@ -692,13 +726,21 @@ def download_stores_template():
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center")
 
-    ws.append(["Магазин Пятёрочка", "ул. Ленина 5, Москва", "09:00", "18:00", 15])
-    ws.append(["Магазин Магнит", "ул. Гагарина 12, Москва", "10:00", "17:00", 20])
-    ws.append(["Аптека Здоровье", "пр. Победы 7, Москва", "08:00", "20:00", 10])
+    # Example rows — lat/lon demonstrate manual coordinate entry
+    ws.append(["Магазин Пятёрочка", "ул. Ленина 5", "Москва", 55.7558, 37.6173, "", 15, "09:00", "18:00"])
+    ws.append(["Магазин Магнит",    "ул. Гагарина 12", "Москва", None, None, "", 20, "10:00", "17:00"])
+    ws.append(["Аптека Здоровье",   "пр. Победы 7",   "Москва", None, None, "https://yandex.ru/maps", 10, "08:00", "20:00"])
 
-    col_widths = [30, 40, 12, 12, 22]
+    col_widths = [28, 36, 16, 12, 12, 32, 16, 12, 12]
     for i, width in enumerate(col_widths, 1):
         ws.column_dimensions[ws.cell(1, i).column_letter].width = width
+
+    # Add a note row with field descriptions
+    note_row = ["← Обязательное", "← Обязательное", "← Необязательное", "← Необязательное (число)", "← Необязательное (число)", "← Необязательное (URL)", "← Число (минуты)", "← ЧЧ:ММ", "← ЧЧ:ММ"]
+    ws.append(note_row)
+    for col_num in range(1, len(note_row) + 1):
+        cell = ws.cell(row=ws.max_row, column=col_num)
+        cell.font = Font(italic=True, color="888888")
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -720,37 +762,113 @@ async def import_stores(file: UploadFile = File(...)):
     wb = openpyxl.load_workbook(io.BytesIO(content))
     ws = wb.active
 
+    # Read header row to detect column layout
+    header_row = [str(c).strip().lower() if c else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True), [])]
+
+    # Map header names → column indices (0-based)
+    def _col(candidates: list) -> Optional[int]:
+        for name in candidates:
+            for i, h in enumerate(header_row):
+                if name in h:
+                    return i
+        return None
+
+    c_name    = _col(["назван", "name", "store_name"]) 
+    c_address = _col(["адрес", "address"])
+    c_city    = _col(["город", "city"])
+    c_lat     = _col(["широта", "lat", "latitude"])
+    c_lon     = _col(["долгота", "lon", "longitude"])
+    c_mapurl  = _col(["ссылка", "map_url", "url", "карт"])
+    c_unload  = _col(["разгрузка", "unload"])
+    c_from    = _col(["время с", "open_time", "с (", "time_from", "время с"])
+    c_to      = _col(["время до", "close_time", "до (", "time_to", "время до"])
+
+    # Fall back to positional mapping for old-format files (5-column):
+    # Col0=name, Col1=address, Col2=tw_from, Col3=tw_to, Col4=unload
+    # or new-format (9-column): Col0=name Col1=addr Col2=city Col3=lat Col4=lon Col5=map_url Col6=unload Col7=from Col8=to
+    if c_name is None:
+        c_name = 0
+    if c_address is None:
+        c_address = 1
+
+    def _get(row, idx, default=""):
+        if idx is None or idx >= len(row):
+            return default
+        val = row[idx]
+        return val if val is not None else default
+
     imported = 0
     failed = 0
     stores = []
-    all_data_rows = [r for r in ws.iter_rows(min_row=2, values_only=True) if r and r[0]]
+    # Skip header row and any trailing note rows (those with col A starting with ←)
+    all_data_rows = [
+        r for r in ws.iter_rows(min_row=2, values_only=True)
+        if r and r[0] and not str(r[0]).strip().startswith("←")
+    ]
     total_rows = len(all_data_rows)
-    logger.info("Excel import: %d data rows found", total_rows)
+    logger.info("Excel import: %d data rows found (headers: %s)", total_rows, header_row)
 
     for i, row in enumerate(all_data_rows, start=1):
-        name = str(row[0]).strip() if row[0] else ""
-        address = str(row[1]).strip() if len(row) > 1 and row[1] else ""
-        tw_from = str(row[2]).strip() if len(row) > 2 and row[2] else "09:00"
-        tw_to = str(row[3]).strip() if len(row) > 3 and row[3] else "18:00"
-        unload = int(row[4]) if len(row) > 4 and row[4] else 15
+        name = str(_get(row, c_name, "")).strip()
+        city = str(_get(row, c_city, "")).strip()
+        raw_addr = str(_get(row, c_address, "")).strip()
+
+        # Combine city + address if city column is separate
+        if city and city not in raw_addr:
+            address = f"{raw_addr}, {city}" if raw_addr else city
+        else:
+            address = raw_addr
 
         if not name or not address:
+            logger.warning("Import row %d skipped: missing name or address", i)
             failed += 1
             continue
 
-        coords = geocode_address(address)
-        lat = coords[0] if coords else None
-        lon = coords[1] if coords else None
-        status = "found" if coords else "not_found"
-        logger.info("Import geocode %d/%d — %s → %s", i, total_rows, address, status)
+        # Parse optional lat/lon
+        raw_lat = _get(row, c_lat)
+        raw_lon = _get(row, c_lon)
+        map_url = str(_get(row, c_mapurl, "")).strip() or None
+
+        # Parse time window (old format: HH:MM in col 2/3; new format: col 7/8)
+        # Detect old format: if c_from is None but col 2 looks like a time string
+        if c_from is None and len(row) > 2 and row[2] and ":" in str(row[2]):
+            tw_from = str(row[2]).strip()
+            tw_to   = str(row[3]).strip() if len(row) > 3 and row[3] else "18:00"
+            unload  = int(row[4]) if len(row) > 4 and row[4] else 15
+        else:
+            tw_from = str(_get(row, c_from, "09:00")).strip() or "09:00"
+            tw_to   = str(_get(row, c_to,   "18:00")).strip() or "18:00"
+            try:
+                unload = int(_get(row, c_unload, 15))
+            except (ValueError, TypeError):
+                unload = 15
+
+        # Smart geocoding: use provided coords if both are valid numbers
+        try:
+            prov_lat = float(raw_lat) if raw_lat not in (None, "", "None") else None
+            prov_lon = float(raw_lon) if raw_lon not in (None, "", "None") else None
+        except (ValueError, TypeError):
+            prov_lat = prov_lon = None
+
+        if prov_lat is not None and prov_lon is not None and (-90 <= prov_lat <= 90) and (-180 <= prov_lon <= 180):
+            lat, lon, status = prov_lat, prov_lon, "found"
+            logger.info("Import row %d/%d — %s → coords provided (%.4f, %.4f)", i, total_rows, address, lat, lon)
+        else:
+            coords = geocode_address(address)
+            lat = coords[0] if coords else None
+            lon = coords[1] if coords else None
+            status = "found" if coords else "not_found"
+            logger.info("Import geocode %d/%d — %s → %s", i, total_rows, address, status)
+            if not YANDEX_GEOCODER_API_KEY:
+                time.sleep(1.1)
 
         try:
             conn = get_db()
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cur.execute(
-                """INSERT INTO stores (name, address, lat, lon, geocode_status, time_window_from, time_window_to, unload_minutes)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
-                (name, address, lat, lon, status, tw_from, tw_to, unload)
+                """INSERT INTO stores (name, address, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+                (name, address, lat, lon, map_url, status, tw_from, tw_to, unload)
             )
             db_row = cur.fetchone()
             conn.commit()
@@ -761,8 +879,6 @@ async def import_stores(file: UploadFile = File(...)):
         except Exception as e:
             logger.error(f"Failed to insert store row {i}: {e}")
             failed += 1
-        if not YANDEX_GEOCODER_API_KEY:
-            time.sleep(1.1)
 
     return {"total": imported + failed, "imported": imported, "failed": failed, "stores": stores}
 

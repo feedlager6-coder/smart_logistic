@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store } from "lucide-react";
+import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store, ChevronDown, ChevronUp, ExternalLink } from "lucide-react";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useToast } from "@/hooks/use-toast";
 
@@ -23,6 +23,10 @@ export function StoresPage() {
   const [timeFrom, setTimeFrom] = useState("09:00");
   const [timeTo, setTimeTo] = useState("18:00");
   const [unloadMinutes, setUnloadMinutes] = useState("15");
+  const [lat, setLat] = useState("");
+  const [lon, setLon] = useState("");
+  const [mapUrl, setMapUrl] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   // Import progress state
   const [importStatus, setImportStatus] = useState<string | null>(null);
@@ -33,13 +37,39 @@ export function StoresPage() {
   const geocodeStore = useGeocodeStore();
   const importStores = useImportStores();
 
+  const validateForm = (): string | null => {
+    if (!name.trim()) return "Введите название магазина";
+    if (!address.trim()) return "Введите адрес магазина";
+    if (lat && (isNaN(Number(lat)) || Number(lat) < -90 || Number(lat) > 90))
+      return "Широта должна быть числом от -90 до 90";
+    if (lon && (isNaN(Number(lon)) || Number(lon) < -180 || Number(lon) > 180))
+      return "Долгота должна быть числом от -180 до 180";
+    if (lat && !lon) return "Укажите долготу вместе с широтой";
+    if (!lat && lon) return "Укажите широту вместе с долготой";
+    const unload = parseInt(unloadMinutes);
+    if (isNaN(unload) || unload < 1) return "Время разгрузки должно быть положительным числом";
+    return null;
+  };
+
   const handleAddStore = (e: React.FormEvent) => {
     e.preventDefault();
+    const err = validateForm();
+    if (err) {
+      toast({ title: "Ошибка валидации", description: err, variant: "destructive" });
+      return;
+    }
+
+    const parsedLat = lat ? Number(lat) : undefined;
+    const parsedLon = lon ? Number(lon) : undefined;
+
     createStore.mutate(
       {
         data: {
-          name,
-          address,
+          name: name.trim(),
+          address: address.trim(),
+          lat: parsedLat ?? null,
+          lon: parsedLon ?? null,
+          map_url: mapUrl.trim() || null,
           time_window_from: timeFrom,
           time_window_to: timeTo,
           unload_minutes: parseInt(unloadMinutes) || 15,
@@ -47,13 +77,26 @@ export function StoresPage() {
       },
       {
         onSuccess: () => {
-          toast({ title: "Магазин добавлен", description: "Магазин успешно добавлен в базу." });
+          const usedCoords = parsedLat && parsedLon;
+          toast({
+            title: "Магазин добавлен",
+            description: usedCoords
+              ? "Магазин добавлен с указанными координатами."
+              : "Магазин добавлен. Геокодирование выполнено автоматически.",
+          });
           queryClient.invalidateQueries({ queryKey: getListStoresQueryKey() });
           setName("");
           setAddress("");
+          setLat("");
+          setLon("");
+          setMapUrl("");
         },
-        onError: () => {
-          toast({ title: "Ошибка", description: "Не удалось добавить магазин.", variant: "destructive" });
+        onError: (err: any) => {
+          toast({
+            title: "Ошибка",
+            description: err?.message || "Не удалось добавить магазин.",
+            variant: "destructive",
+          });
         },
       }
     );
@@ -92,7 +135,7 @@ export function StoresPage() {
     e.target.value = "";
 
     setImportLoading(true);
-    setImportStatus("Геокодирую адреса (это займёт ~1 сек на строку)...");
+    setImportStatus("Геокодирую адреса (это займёт ~1 сек на строку без API-ключа)...");
 
     importStores.mutate(
       { data: { file } },
@@ -179,30 +222,100 @@ export function StoresPage() {
           <CardTitle>Добавить магазин</CardTitle>
         </CardHeader>
         <CardContent>
-          <form onSubmit={handleAddStore} className="grid grid-cols-1 md:grid-cols-6 gap-4 items-end">
-            <div className="space-y-2 md:col-span-2">
-              <Label>Название</Label>
-              <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="ООО Ромашка" />
-            </div>
-            <div className="space-y-2 md:col-span-2">
-              <Label>Адрес</Label>
-              <Input required value={address} onChange={(e) => setAddress(e.target.value)} placeholder="г. Москва, ул. Ленина 1" />
-            </div>
-            <div className="space-y-2">
-              <Label>Окно (с — до)</Label>
-              <div className="flex gap-2">
-                <Input type="time" required value={timeFrom} onChange={(e) => setTimeFrom(e.target.value)} />
-                <Input type="time" required value={timeTo} onChange={(e) => setTimeTo(e.target.value)} />
+          <form onSubmit={handleAddStore} className="space-y-4">
+            {/* Main fields */}
+            <div className="grid grid-cols-1 md:grid-cols-6 gap-4 items-end">
+              <div className="space-y-2 md:col-span-2">
+                <Label>Название <span className="text-destructive">*</span></Label>
+                <Input
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="ООО Ромашка"
+                />
+              </div>
+              <div className="space-y-2 md:col-span-2">
+                <Label>Адрес <span className="text-destructive">*</span></Label>
+                <Input
+                  value={address}
+                  onChange={(e) => setAddress(e.target.value)}
+                  placeholder="г. Москва, ул. Ленина 1"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Окно (с — до)</Label>
+                <div className="flex gap-2">
+                  <Input type="time" value={timeFrom} onChange={(e) => setTimeFrom(e.target.value)} />
+                  <Input type="time" value={timeTo} onChange={(e) => setTimeTo(e.target.value)} />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label>Разгрузка (мин)</Label>
+                <Input
+                  type="number"
+                  min="1"
+                  value={unloadMinutes}
+                  onChange={(e) => setUnloadMinutes(e.target.value)}
+                />
               </div>
             </div>
-            <div className="space-y-2">
-              <Label>Разгрузка (мин)</Label>
-              <Input type="number" required min="1" value={unloadMinutes} onChange={(e) => setUnloadMinutes(e.target.value)} />
+
+            {/* Advanced: lat/lon/map_url */}
+            <div>
+              <button
+                type="button"
+                className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors"
+                onClick={() => setShowAdvanced(!showAdvanced)}
+              >
+                {showAdvanced ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                {showAdvanced ? "Скрыть" : "Точные координаты и ссылка на карту (необязательно)"}
+              </button>
+
+              {showAdvanced && (
+                <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-4 p-4 rounded-lg border border-dashed bg-muted/30">
+                  <div className="space-y-2">
+                    <Label>Широта</Label>
+                    <Input
+                      type="number"
+                      step="any"
+                      min="-90"
+                      max="90"
+                      value={lat}
+                      onChange={(e) => setLat(e.target.value)}
+                      placeholder="55.7558"
+                    />
+                    <p className="text-xs text-muted-foreground">Если указана — геокодинг не нужен</p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Долгота</Label>
+                    <Input
+                      type="number"
+                      step="any"
+                      min="-180"
+                      max="180"
+                      value={lon}
+                      onChange={(e) => setLon(e.target.value)}
+                      placeholder="37.6173"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Ссылка на карту</Label>
+                    <Input
+                      type="url"
+                      value={mapUrl}
+                      onChange={(e) => setMapUrl(e.target.value)}
+                      placeholder="https://yandex.ru/maps/..."
+                    />
+                  </div>
+                </div>
+              )}
             </div>
-            <Button type="submit" disabled={createStore.isPending} className="md:col-span-6 w-full sm:w-auto sm:ml-auto">
-              {createStore.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Plus className="w-4 h-4 mr-2" />}
-              Добавить
-            </Button>
+
+            <div className="flex justify-end">
+              <Button type="submit" disabled={createStore.isPending}>
+                {createStore.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Plus className="w-4 h-4 mr-2" />}
+                Добавить
+              </Button>
+            </div>
           </form>
         </CardContent>
       </Card>
@@ -243,6 +356,7 @@ export function StoresPage() {
                     <TableHead>Название</TableHead>
                     <TableHead>Адрес</TableHead>
                     <TableHead>Геокодинг</TableHead>
+                    <TableHead>Координаты</TableHead>
                     <TableHead>Временное окно</TableHead>
                     <TableHead>Разгрузка</TableHead>
                     <TableHead className="text-right">Действия</TableHead>
@@ -256,11 +370,29 @@ export function StoresPage() {
                       <TableCell>
                         <StatusBadge status={store.geocode_status as "found" | "pending" | "not_found"} />
                       </TableCell>
+                      <TableCell className="text-xs text-muted-foreground font-mono">
+                        {store.lat != null && store.lon != null
+                          ? `${store.lat.toFixed(4)}, ${store.lon.toFixed(4)}`
+                          : <span className="italic">нет</span>
+                        }
+                      </TableCell>
                       <TableCell className="text-sm">
                         {store.time_window_from} — {store.time_window_to}
                       </TableCell>
                       <TableCell className="text-sm">{store.unload_minutes} мин</TableCell>
                       <TableCell className="text-right space-x-1">
+                        {store.map_url && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title="Открыть на карте"
+                            asChild
+                          >
+                            <a href={store.map_url} target="_blank" rel="noopener noreferrer">
+                              <ExternalLink className="w-4 h-4" />
+                            </a>
+                          </Button>
+                        )}
                         <Button
                           variant="ghost"
                           size="icon"

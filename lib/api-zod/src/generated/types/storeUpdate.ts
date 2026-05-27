@@ -13,6 +13,8 @@ export interface StoreUpdate {
   lat?: number | null;
   /** @nullable */
   lon?: number | null;
+  /** @nullable */
+  map_url?: string | null;
   time_window_from?: string;
   time_window_to?: string;
   unload_minutes?: number;

@@ -299,6 +299,9 @@ components:
           type: ["number", "null"]
         lon:
           type: ["number", "null"]
+        map_url:
+          type: ["string", "null"]
+          description: Direct map link (Yandex/Google/2GIS)
         geocode_status:
           type: string
           enum: [found, pending, not_found]
@@ -326,6 +329,15 @@ components:
           type: string
         address:
           type: string
+        lat:
+          type: ["number", "null"]
+          description: Latitude (if provided, skips geocoding)
+        lon:
+          type: ["number", "null"]
+          description: Longitude (if provided, skips geocoding)
+        map_url:
+          type: ["string", "null"]
+          description: Direct map link (Yandex/Google/2GIS)
         time_window_from:
           type: string
         time_window_to:
@@ -347,6 +359,8 @@ components:
           type: ["number", "null"]
         lon:
           type: ["number", "null"]
+        map_url:
+          type: ["string", "null"]
         time_window_from:
           type: string
         time_window_to:
