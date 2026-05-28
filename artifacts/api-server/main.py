@@ -889,11 +889,17 @@ def download_stores_template():
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
+    content = buf.read()
 
-    return StreamingResponse(
-        buf,
+    from fastapi.responses import Response
+    return Response(
+        content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=smartroute_template.xlsx"},
+        headers={
+            "Content-Disposition": 'attachment; filename="smartroute_template.xlsx"',
+            "Content-Length": str(len(content)),
+            "Cache-Control": "no-cache",
+        },
     )
 
 

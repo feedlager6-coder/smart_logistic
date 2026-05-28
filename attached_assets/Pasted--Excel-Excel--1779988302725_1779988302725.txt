@@ -1,0 +1,114 @@
+Проблема: Excel шаблон скачивается но не открывается.
+Excel пишет "формат недопустим".
+
+Причина: бэкенд возвращает не валидный xlsx файл.
+
+ДИАГНОСТИКА:
+Выполни в терминале:
+
+curl -v http://localhost:8080/api/stores/template \
+  -o /tmp/test.xlsx 2>&1 | head -50
+
+Проверь:
+1. Content-Type в ответе должен быть:
+   application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+   
+2. Размер файла — должен быть больше 3000 байт
+
+3. Первые байты файла — должны начинаться с PK
+   (это ZIP-заголовок настоящего xlsx):
+   xxd /tmp/test.xlsx | head -3
+
+Если первые байты не PK — файл не xlsx а HTML/текст.
+
+ИСПРАВЛЕНИЕ:
+Замени функцию download_stores_template полностью:
+
+from fastapi.responses import Response
+import openpyxl
+import io
+
+@app.get("/api/stores/template")
+async def download_stores_template():
+    try:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Магазины"
+
+        # Заголовки
+        headers = [
+            "Название", "Ссылка Яндекс", "Адрес",
+            "Город", "Разгрузка мин", "Время с", "Время до"
+        ]
+        for col, h in enumerate(headers, 1):
+            ws.cell(row=1, column=col, value=h)
+
+        # Пример 1 — со ссылкой
+        row1 = [
+            "Магазин Пятёрочка",
+            "https://yandex.ru/maps/?whatshere%5Bpoint%5D=37.617635,55.755814",
+            "",
+            "",
+            15, "09:00", "18:00"
+        ]
+        for col, val in enumerate(row1, 1):
+            ws.cell(row=2, column=col, value=val)
+
+        # Пример 2 — с адресом
+        row2 = [
+            "Магазин Магнит",
+            "",
+            "ул. Гагарина 12",
+            "Москва",
+            20, "10:00", "17:00"
+        ]
+        for col, val in enumerate(row2, 1):
+            ws.cell(row=3, column=col, value=val)
+
+        # Подсказки
+        hints = [
+            "← Название (обязательное)",
+            "← Ссылка из Яндекс Карт (рекомендуется)",
+            "← Адрес (если нет ссылки)",
+            "← Город",
+            "← Минут (число)",
+            "← ЧЧ:ММ",
+            "← ЧЧ:ММ"
+        ]
+        for col, hint in enumerate(hints, 1):
+            ws.cell(row=4, column=col, value=hint)
+
+        # Ширина колонок
+        widths = [25, 50, 30, 15, 15, 10, 10]
+        cols = ['A','B','C','D','E','F','G']
+        for col, width in zip(cols, widths):
+            ws.column_dimensions[col].width = width
+
+        # Сохраняем в байты
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        content = buf.read()
+
+        # Возвращаем как Response с правильными заголовками
+        return Response(
+            content=content,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": 'attachment; filename="smartroute_template.xlsx"',
+                "Content-Length": str(len(content)),
+                "Cache-Control": "no-cache"
+            }
+        )
+    except Exception as e:
+        logger.error(f"Template error: {e}", exc_info=True)
+        raise HTTPException(500, f"Ошибка генерации шаблона: {e}")
+
+ПРОВЕРКА после исправления:
+curl -v http://localhost:8080/api/stores/template \
+  -o /tmp/test2.xlsx
+
+xxd /tmp/test2.xlsx | head -3
+
+Первые байты должны быть: 50 4b 03 04 (это PK...)
+Если так — файл валидный xlsx.

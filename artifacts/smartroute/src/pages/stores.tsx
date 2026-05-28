@@ -93,7 +93,8 @@ export function StoresPage() {
     );
   };
 
-  const handleDelete = (id: number) => {
+  const handleDelete = (id: number, name: string) => {
+    if (!window.confirm(`Удалить магазин «${name}»? Это действие нельзя отменить.`)) return;
     deleteStore.mutate(
       { id },
       {
@@ -177,7 +178,7 @@ export function StoresPage() {
   const filteredStores = stores.filter(
     (s) =>
       s.name.toLowerCase().includes(search.toLowerCase()) ||
-      s.address.toLowerCase().includes(search.toLowerCase())
+      (s.address ?? "").toLowerCase().includes(search.toLowerCase())
   );
 
   return (
@@ -413,7 +414,7 @@ export function StoresPage() {
                           size="icon"
                           title="Удалить"
                           className="text-destructive hover:text-destructive"
-                          onClick={() => handleDelete(store.id)}
+                          onClick={() => handleDelete(store.id, store.name)}
                           disabled={deleteStore.isPending}
                         >
                           <Trash2 className="w-4 h-4" />

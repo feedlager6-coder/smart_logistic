@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## [Unreleased] — 2026-05-28 (Bugfixes + UX Audit)
+
+### Исправлено
+
+- **Excel шаблон**: `StreamingResponse` → `Response` с явным `Content-Length` — файл теперь корректно открывается в Excel (ранее «формат недопустим» из-за отсутствия Content-Length через Replit-прокси)
+- **stores.tsx**: `store.address.toLowerCase()` → `(store.address ?? "").toLowerCase()` — предотвращён crash при null address (магазин добавлен через Яндекс ссылку без ручного адреса)
+- **stores.tsx**: Удаление магазина теперь требует подтверждения через `window.confirm` с именем магазина
+
+### Добавлено
+
+- `docs/UX_AUDIT.md` — исчерпывающий аудит UX/UI с 35 пунктами от критических до низкоприоритетных, с таблицей приоритетов и анализом для сценария 300–600 доставок/день, 9–15 водителей
+- `replit.md` — обновлён: корректный стек, where things live, architecture decisions, gotchas
+
+---
+
 ## [Unreleased] — 2026-05-28 (Yandex URL Smart Input)
 
 ### Задача 1 — Умный ввод через ссылку Яндекс Карт
