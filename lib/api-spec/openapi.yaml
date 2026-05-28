@@ -328,16 +328,23 @@ components:
         name:
           type: string
         address:
-          type: string
+          type: ["string", "null"]
+          description: Street address (optional if yandex_url is provided)
+        city:
+          type: ["string", "null"]
+          description: City name (prepended to address for geocoding)
+        yandex_url:
+          type: ["string", "null"]
+          description: Yandex Maps link — coords extracted automatically
         lat:
           type: ["number", "null"]
-          description: Latitude (if provided, skips geocoding)
+          description: Latitude (highest priority, skips geocoding)
         lon:
           type: ["number", "null"]
-          description: Longitude (if provided, skips geocoding)
+          description: Longitude (highest priority, skips geocoding)
         map_url:
           type: ["string", "null"]
-          description: Direct map link (Yandex/Google/2GIS)
+          description: Direct map link stored for reference
         time_window_from:
           type: string
         time_window_to:
@@ -346,7 +353,6 @@ components:
           type: integer
       required:
         - name
-        - address
 
     StoreUpdate:
       type: object
@@ -355,6 +361,10 @@ components:
           type: string
         address:
           type: string
+        city:
+          type: ["string", "null"]
+        yandex_url:
+          type: ["string", "null"]
         lat:
           type: ["number", "null"]
         lon:

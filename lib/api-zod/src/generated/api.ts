@@ -41,10 +41,12 @@ export const ListStoresResponse = zod.array(ListStoresResponseItem)
  */
 export const CreateStoreBody = zod.object({
   "name": zod.string(),
-  "address": zod.string(),
-  "lat": zod.number().nullish().describe('Latitude (if provided, skips geocoding)'),
-  "lon": zod.number().nullish().describe('Longitude (if provided, skips geocoding)'),
-  "map_url": zod.string().nullish().describe('Direct map link (Yandex\/Google\/2GIS)'),
+  "address": zod.string().nullish().describe('Street address (optional if yandex_url is provided)'),
+  "city": zod.string().nullish().describe('City name (prepended to address for geocoding)'),
+  "yandex_url": zod.string().nullish().describe('Yandex Maps link — coords extracted automatically'),
+  "lat": zod.number().nullish().describe('Latitude (highest priority, skips geocoding)'),
+  "lon": zod.number().nullish().describe('Longitude (highest priority, skips geocoding)'),
+  "map_url": zod.string().nullish().describe('Direct map link stored for reference'),
   "time_window_from": zod.string().optional(),
   "time_window_to": zod.string().optional(),
   "unload_minutes": zod.number().optional()
@@ -110,6 +112,8 @@ export const UpdateStoreParams = zod.object({
 export const UpdateStoreBody = zod.object({
   "name": zod.string().optional(),
   "address": zod.string().optional(),
+  "city": zod.string().nullish(),
+  "yandex_url": zod.string().nullish(),
   "lat": zod.number().nullish(),
   "lon": zod.number().nullish(),
   "map_url": zod.string().nullish(),

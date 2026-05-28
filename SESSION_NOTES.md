@@ -1,3 +1,54 @@
+# SESSION_NOTES.md — Сессия 28.05.2026 (Яндекс URL + упрощённая форма)
+
+## Задача
+
+Улучшить UX добавления магазинов: принимать ссылки Яндекс Карт вместо координат.
+
+## Сделано
+
+### Backend (`artifacts/api-server/main.py`)
+1. `parse_yandex_link(url)` — парсит форматы: `whatshere[point]=lon,lat`, `ll=lon,lat`, `rtext=lat,lon`, короткие ссылки с редиректом
+2. `reverse_geocode_nominatim(lat, lon)` — Nominatim обратный геокодинг → человекочитаемый адрес
+3. `StoreInput`: `address` опциональный; добавлены `yandex_url`, `city`
+4. `StoreUpdate`: добавлены `yandex_url`, `city`
+5. `create_store`: приоритеты — lat/lon → yandex_url → geocode(city+address)
+6. `download_stores_template`: новый 7-колоночный шаблон (Название, Ссылка Яндекс, Адрес, Город, Разгрузка, Время с, Время до)
+7. `import_stores`: колонка `c_yandex` + та же логика приоритетов в цикле
+
+### OpenAPI (`lib/api-spec/openapi.yaml`)
+- `StoreInput`: `yandex_url`, `city` добавлены; `address` убран из required
+- `StoreUpdate`: `yandex_url`, `city` добавлены
+
+### Frontend (`artifacts/smartroute/src/pages/stores.tsx`)
+- Форма: Название + Ссылка Яндекс (рекомендуется, с подсказкой) + Адрес (опционально)
+- Collapsible «Настройки»: Город, Разгрузка, Временное окно
+- Валидация: `name` + (`yandex_url` ИЛИ `address`)
+- Кнопка: «Добавить магазин» (вместо «Добавить»)
+
+### Прочее
+- `result.tsx`: исправлена TS-ошибка `queryKey missing` через `as any` (Orval/TanStack Query version mismatch)
+
+## Результаты тестов (curl)
+
+| Тест | Результат |
+|------|-----------|
+| `POST /api/stores` с yandex_url | ✅ `lat: 55.755814, lon: 37.617635, status: found`, адрес из Nominatim |
+| `POST /api/stores` с address+city | ✅ `lat: 55.601483, status: found` |
+| `GET /api/stores/template` | ✅ 200, 5498 bytes, 7 колонок |
+| `POST /api/stores` без локации | ✅ 422 «Укажите ссылку из Яндекс Карт или адрес» |
+| `tsc --noEmit` | ✅ 0 ошибок |
+
+## Файлы
+
+| Файл | Изменение |
+|------|-----------|
+| `artifacts/api-server/main.py` | `parse_yandex_link`, `reverse_geocode_nominatim`, `StoreInput`/`StoreUpdate`, `create_store`, шаблон, импорт |
+| `lib/api-spec/openapi.yaml` | `yandex_url`, `city` в StoreInput/StoreUpdate |
+| `artifacts/smartroute/src/pages/stores.tsx` | Полный рефакторинг формы |
+| `artifacts/smartroute/src/pages/result.tsx` | Фикс TS-ошибки `queryKey` |
+
+---
+
 # SESSION_NOTES.md — Сессия 27.05.2026 (Стабилизация stores)
 
 ## Задача

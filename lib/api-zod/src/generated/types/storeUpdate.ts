@@ -10,6 +10,10 @@ export interface StoreUpdate {
   name?: string;
   address?: string;
   /** @nullable */
+  city?: string | null;
+  /** @nullable */
+  yandex_url?: string | null;
+  /** @nullable */
   lat?: number | null;
   /** @nullable */
   lon?: number | null;

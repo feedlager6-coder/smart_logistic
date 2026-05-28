@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store, ChevronDown, ChevronUp, ExternalLink } from "lucide-react";
+import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store, ChevronDown, ChevronUp, ExternalLink, Link } from "lucide-react";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useToast } from "@/hooks/use-toast";
 
@@ -19,14 +19,13 @@ export function StoresPage() {
 
   // Form state
   const [name, setName] = useState("");
+  const [yandexUrl, setYandexUrl] = useState("");
   const [address, setAddress] = useState("");
+  const [city, setCity] = useState("");
   const [timeFrom, setTimeFrom] = useState("09:00");
   const [timeTo, setTimeTo] = useState("18:00");
   const [unloadMinutes, setUnloadMinutes] = useState("15");
-  const [lat, setLat] = useState("");
-  const [lon, setLon] = useState("");
-  const [mapUrl, setMapUrl] = useState("");
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   // Import progress state
   const [importStatus, setImportStatus] = useState<string | null>(null);
@@ -39,16 +38,18 @@ export function StoresPage() {
 
   const validateForm = (): string | null => {
     if (!name.trim()) return "Введите название магазина";
-    if (!address.trim()) return "Введите адрес магазина";
-    if (lat && (isNaN(Number(lat)) || Number(lat) < -90 || Number(lat) > 90))
-      return "Широта должна быть числом от -90 до 90";
-    if (lon && (isNaN(Number(lon)) || Number(lon) < -180 || Number(lon) > 180))
-      return "Долгота должна быть числом от -180 до 180";
-    if (lat && !lon) return "Укажите долготу вместе с широтой";
-    if (!lat && lon) return "Укажите широту вместе с долготой";
-    const unload = parseInt(unloadMinutes);
-    if (isNaN(unload) || unload < 1) return "Время разгрузки должно быть положительным числом";
+    if (!yandexUrl.trim() && !address.trim()) return "Укажите ссылку из Яндекс Карт или адрес";
     return null;
+  };
+
+  const resetForm = () => {
+    setName("");
+    setYandexUrl("");
+    setAddress("");
+    setCity("");
+    setTimeFrom("09:00");
+    setTimeTo("18:00");
+    setUnloadMinutes("15");
   };
 
   const handleAddStore = (e: React.FormEvent) => {
@@ -59,37 +60,27 @@ export function StoresPage() {
       return;
     }
 
-    const parsedLat = lat ? Number(lat) : undefined;
-    const parsedLon = lon ? Number(lon) : undefined;
-
     createStore.mutate(
       {
         data: {
           name: name.trim(),
-          address: address.trim(),
-          lat: parsedLat ?? null,
-          lon: parsedLon ?? null,
-          map_url: mapUrl.trim() || null,
+          yandex_url: yandexUrl.trim() || null,
+          address: address.trim() || null,
+          city: city.trim() || null,
           time_window_from: timeFrom,
           time_window_to: timeTo,
           unload_minutes: parseInt(unloadMinutes) || 15,
-        },
+        } as any,
       },
       {
         onSuccess: () => {
-          const usedCoords = parsedLat && parsedLon;
+          const source = yandexUrl.trim() ? "из ссылки Яндекс Карт" : "геокодированием адреса";
           toast({
             title: "Магазин добавлен",
-            description: usedCoords
-              ? "Магазин добавлен с указанными координатами."
-              : "Магазин добавлен. Геокодирование выполнено автоматически.",
+            description: `Координаты определены ${source}.`,
           });
           queryClient.invalidateQueries({ queryKey: getListStoresQueryKey() });
-          setName("");
-          setAddress("");
-          setLat("");
-          setLon("");
-          setMapUrl("");
+          resetForm();
         },
         onError: (err: any) => {
           toast({
@@ -238,88 +229,88 @@ export function StoresPage() {
         </CardHeader>
         <CardContent>
           <form onSubmit={handleAddStore} className="space-y-4">
-            {/* Main fields */}
-            <div className="grid grid-cols-1 md:grid-cols-6 gap-4 items-end">
-              <div className="space-y-2 md:col-span-2">
-                <Label>Название <span className="text-destructive">*</span></Label>
-                <Input
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="ООО Ромашка"
-                />
-              </div>
-              <div className="space-y-2 md:col-span-2">
-                <Label>Адрес <span className="text-destructive">*</span></Label>
-                <Input
-                  value={address}
-                  onChange={(e) => setAddress(e.target.value)}
-                  placeholder="г. Москва, ул. Ленина 1"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Окно (с — до)</Label>
-                <div className="flex gap-2">
-                  <Input type="time" value={timeFrom} onChange={(e) => setTimeFrom(e.target.value)} />
-                  <Input type="time" value={timeTo} onChange={(e) => setTimeTo(e.target.value)} />
-                </div>
-              </div>
-              <div className="space-y-2">
-                <Label>Разгрузка (мин)</Label>
-                <Input
-                  type="number"
-                  min="1"
-                  value={unloadMinutes}
-                  onChange={(e) => setUnloadMinutes(e.target.value)}
-                />
-              </div>
+
+            {/* Name */}
+            <div className="space-y-2">
+              <Label>Название <span className="text-destructive">*</span></Label>
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Магазин Пятёрочка"
+                className="max-w-sm"
+              />
             </div>
 
-            {/* Advanced: lat/lon/map_url */}
+            {/* Yandex URL */}
+            <div className="space-y-2">
+              <Label className="flex items-center gap-2">
+                <Link className="w-4 h-4 text-primary" />
+                Ссылка из Яндекс Карт
+                <span className="text-xs font-normal text-primary bg-primary/10 px-2 py-0.5 rounded-full">рекомендуется</span>
+              </Label>
+              <Input
+                value={yandexUrl}
+                onChange={(e) => setYandexUrl(e.target.value)}
+                placeholder="https://yandex.ru/maps/?whatshere[point]=37.617,55.755"
+                type="url"
+              />
+              <p className="text-xs text-muted-foreground">
+                Откройте Яндекс Карты → зажмите нужное место → нажмите <b>Поделиться</b> → скопируйте ссылку
+              </p>
+            </div>
+
+            {/* Address */}
+            <div className="space-y-2">
+              <Label>
+                Адрес
+                {!yandexUrl.trim() && <span className="text-destructive"> *</span>}
+                {yandexUrl.trim() && <span className="text-xs font-normal text-muted-foreground ml-2">(необязательно, если указана ссылка)</span>}
+              </Label>
+              <Input
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
+                placeholder="ул. Ленина 5"
+                className="max-w-sm"
+              />
+            </div>
+
+            {/* Collapsible settings */}
             <div>
               <button
                 type="button"
                 className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors"
-                onClick={() => setShowAdvanced(!showAdvanced)}
+                onClick={() => setShowSettings(!showSettings)}
               >
-                {showAdvanced ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                {showAdvanced ? "Скрыть" : "Точные координаты и ссылка на карту (необязательно)"}
+                {showSettings ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                {showSettings ? "Скрыть настройки" : "Настройки (город, окно, разгрузка)"}
               </button>
 
-              {showAdvanced && (
+              {showSettings && (
                 <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-4 p-4 rounded-lg border border-dashed bg-muted/30">
                   <div className="space-y-2">
-                    <Label>Широта</Label>
+                    <Label>Город</Label>
                     <Input
-                      type="number"
-                      step="any"
-                      min="-90"
-                      max="90"
-                      value={lat}
-                      onChange={(e) => setLat(e.target.value)}
-                      placeholder="55.7558"
+                      value={city}
+                      onChange={(e) => setCity(e.target.value)}
+                      placeholder="Москва"
                     />
-                    <p className="text-xs text-muted-foreground">Если указана — геокодинг не нужен</p>
+                    <p className="text-xs text-muted-foreground">Добавляется к адресу при геокодинге</p>
                   </div>
                   <div className="space-y-2">
-                    <Label>Долгота</Label>
+                    <Label>Разгрузка (мин)</Label>
                     <Input
                       type="number"
-                      step="any"
-                      min="-180"
-                      max="180"
-                      value={lon}
-                      onChange={(e) => setLon(e.target.value)}
-                      placeholder="37.6173"
+                      min="1"
+                      value={unloadMinutes}
+                      onChange={(e) => setUnloadMinutes(e.target.value)}
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label>Ссылка на карту</Label>
-                    <Input
-                      type="url"
-                      value={mapUrl}
-                      onChange={(e) => setMapUrl(e.target.value)}
-                      placeholder="https://yandex.ru/maps/..."
-                    />
+                    <Label>Временное окно (с — до)</Label>
+                    <div className="flex gap-2">
+                      <Input type="time" value={timeFrom} onChange={(e) => setTimeFrom(e.target.value)} />
+                      <Input type="time" value={timeTo} onChange={(e) => setTimeTo(e.target.value)} />
+                    </div>
                   </div>
                 </div>
               )}
@@ -328,7 +319,7 @@ export function StoresPage() {
             <div className="flex justify-end">
               <Button type="submit" disabled={createStore.isPending}>
                 {createStore.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Plus className="w-4 h-4 mr-2" />}
-                Добавить
+                Добавить магазин
               </Button>
             </div>
           </form>

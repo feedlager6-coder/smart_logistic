@@ -36,7 +36,7 @@ export function ResultPage() {
 
   const { data: serverResult, isLoading: sessionLoading } = useGetRouteSession(
     sessionId ?? 0,
-    { query: { enabled: !!sessionId } }
+    { query: { enabled: !!sessionId } as any }
   );
 
   // Fallback: load from localStorage (legacy, no session_id in URL)

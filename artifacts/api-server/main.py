@@ -523,6 +523,71 @@ def geocode_address(address: str) -> Optional[tuple]:
     return result
 
 
+def parse_yandex_link(url: str) -> tuple:
+    """
+    Extract (lat, lon) from various Yandex Maps URL formats.
+    Returns (None, None) if extraction fails.
+    """
+    from urllib.parse import urlparse, parse_qs, unquote
+    try:
+        decoded = unquote(url)
+        parsed = urlparse(decoded)
+        params = parse_qs(parsed.query)
+
+        # Format: whatshere[point]=lon,lat
+        if "whatshere[point]" in params:
+            lon_s, lat_s = params["whatshere[point]"][0].split(",")
+            return float(lat_s), float(lon_s)
+
+        # Format: ll=lon,lat (map centre)
+        if "ll" in params:
+            lon_s, lat_s = params["ll"][0].split(",")
+            return float(lat_s), float(lon_s)
+
+        # Format: rtext=lat,lon~lat,lon (route first point)
+        if "rtext" in params:
+            parts = params["rtext"][0].split("~")[0].split(",")
+            if len(parts) >= 2:
+                return float(parts[0]), float(parts[1])
+
+        # Short links (/-/) — follow redirect
+        if "/-/" in url or "maps.yandex" in url:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "Mozilla/5.0"}, method="GET"
+            )
+            opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler())
+            response = opener.open(req, timeout=10)
+            final_url = response.geturl()
+            if final_url != url:
+                return parse_yandex_link(final_url)
+
+        return None, None
+    except Exception as e:
+        logger.error("parse_yandex_link error for '%s': %s", url, e)
+        return None, None
+
+
+def reverse_geocode_nominatim(lat: float, lon: float) -> Optional[str]:
+    """Get a human-readable address from coordinates using Nominatim."""
+    try:
+        url = (
+            "https://nominatim.openstreetmap.org/reverse?"
+            f"lat={lat}&lon={lon}&format=json&accept-language=ru"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "smartroute-app-1.0"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        addr = data.get("address", {})
+        road = addr.get("road", "")
+        house = addr.get("house_number", "")
+        city = addr.get("city") or addr.get("town") or addr.get("village") or ""
+        parts = [p for p in [city, road, house] if p]
+        return ", ".join(parts) if parts else data.get("display_name", "")
+    except Exception as e:
+        logger.warning("reverse_geocode_nominatim error: %s", e)
+        return None
+
+
 def calculate_savings(optimized_km: float, num_points: int, num_vehicles: int) -> dict:
     unoptimized_km = optimized_km * 1.3
     saved_km = unoptimized_km - optimized_km
@@ -572,7 +637,9 @@ def store_row_to_dict(row) -> dict:
 
 class StoreInput(BaseModel):
     name: str
-    address: str
+    address: Optional[str] = None
+    city: Optional[str] = None
+    yandex_url: Optional[str] = None
     lat: Optional[float] = None
     lon: Optional[float] = None
     map_url: Optional[str] = None
@@ -584,6 +651,8 @@ class StoreInput(BaseModel):
 class StoreUpdate(BaseModel):
     name: Optional[str] = None
     address: Optional[str] = None
+    city: Optional[str] = None
+    yandex_url: Optional[str] = None
     lat: Optional[float] = None
     lon: Optional[float] = None
     map_url: Optional[str] = None
@@ -686,31 +755,61 @@ def list_stores():
 
 @app.post("/api/stores", status_code=201)
 def create_store(body: StoreInput):
-    # Validation
     if not body.name or not body.name.strip():
         raise HTTPException(status_code=422, detail="Название магазина не может быть пустым")
-    if not body.address or not body.address.strip():
-        raise HTTPException(status_code=422, detail="Адрес не может быть пустым")
+    if not body.yandex_url and not body.address and not body.city and body.lat is None:
+        raise HTTPException(status_code=422, detail="Укажите ссылку из Яндекс Карт или адрес")
     if body.lat is not None and not (-90 <= body.lat <= 90):
         raise HTTPException(status_code=422, detail="Широта должна быть от -90 до 90")
     if body.lon is not None and not (-180 <= body.lon <= 180):
         raise HTTPException(status_code=422, detail="Долгота должна быть от -180 до 180")
 
-    # Smart geocoding: use provided coordinates if both lat and lon are given
+    raw_address = (body.address or "").strip()
+    city = (body.city or "").strip()
+    geocode_query = f"{city} {raw_address}".strip() if city and city not in raw_address else raw_address
+
+    lat, lon, status = None, None, "not_found"
+    address = raw_address or city
+
+    # Priority 1: explicit lat/lon
     if body.lat is not None and body.lon is not None:
         lat, lon, status = body.lat, body.lon, "found"
-    else:
-        coords = geocode_address(body.address)
+
+    # Priority 2: parse Yandex Maps URL
+    elif body.yandex_url:
+        lat, lon = parse_yandex_link(body.yandex_url)
+        if lat is not None and lon is not None:
+            status = "found"
+            if not address:
+                address = reverse_geocode_nominatim(lat, lon) or body.yandex_url
+            logger.info("create_store: coords from yandex_url → (%.5f, %.5f)", lat, lon)
+        elif geocode_query:
+            coords = geocode_address(geocode_query)
+            lat = coords[0] if coords else None
+            lon = coords[1] if coords else None
+            status = "found" if coords else "not_found"
+            logger.info("create_store: yandex_url parse failed, geocoded '%s' → %s", geocode_query, status)
+
+    # Priority 3: geocode address
+    elif geocode_query:
+        coords = geocode_address(geocode_query)
         lat = coords[0] if coords else None
         lon = coords[1] if coords else None
         status = "found" if coords else "not_found"
+        logger.info("create_store: geocoded '%s' → %s", geocode_query, status)
+
+    if not address:
+        address = geocode_query or body.yandex_url or "Адрес не указан"
+
+    # Store yandex_url as map_url if no explicit map_url provided
+    map_url = body.map_url or body.yandex_url
 
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
         """INSERT INTO stores (name, address, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
-        (body.name.strip(), body.address.strip(), lat, lon, body.map_url,
+        (body.name.strip(), address, lat, lon, map_url,
          status, body.time_window_from, body.time_window_to, body.unload_minutes)
     )
     row = cur.fetchone()
@@ -725,22 +824,22 @@ def download_stores_template():
     if not OPENPYXL_AVAILABLE:
         raise HTTPException(status_code=500, detail="openpyxl not installed")
 
-    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.styles import Font, PatternFill, Alignment, PatternFill
+    from openpyxl.utils import get_column_letter
 
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Магазины"
 
+    # 7-column simplified template
     headers = [
-        "Название",       # store_name  (col A)
-        "Адрес",          # address     (col B)
-        "Город",          # city        (col C) — prepended to address automatically
-        "Широта",         # latitude    (col D) — optional, skips geocoding if set
-        "Долгота",        # longitude   (col E) — optional, skips geocoding if set
-        "Ссылка на карту",# map_url     (col F)
-        "Разгрузка мин",  # unload_minutes (col G)
-        "Время с",        # open_time   (col H)
-        "Время до",       # close_time  (col I)
+        "Название",         # A — required
+        "Ссылка Яндекс",    # B — recommended (coords parsed automatically)
+        "Адрес",            # C — if no Yandex link
+        "Город",            # D — optional, prepended to address
+        "Разгрузка мин",    # E — optional
+        "Время с",          # F — optional
+        "Время до",         # G — optional
     ]
     ws.append(headers)
 
@@ -751,17 +850,37 @@ def download_stores_template():
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center")
 
-    # Example rows — lat/lon demonstrate manual coordinate entry
-    ws.append(["Магазин Пятёрочка", "ул. Ленина 5", "Москва", 55.7558, 37.6173, "", 15, "09:00", "18:00"])
-    ws.append(["Магазин Магнит",    "ул. Гагарина 12", "Москва", None, None, "", 20, "10:00", "17:00"])
-    ws.append(["Аптека Здоровье",   "пр. Победы 7",   "Москва", None, None, "https://yandex.ru/maps", 10, "08:00", "20:00"])
+    # Example row 1: with Yandex URL
+    ws.append([
+        "Магазин Пятёрочка",
+        "https://yandex.ru/maps/?whatshere[point]=37.617635,55.755814",
+        "",
+        "",
+        15, "09:00", "18:00",
+    ])
+    # Example row 2: with address + city
+    ws.append([
+        "Магазин Магнит",
+        "",
+        "ул. Гагарина 12",
+        "Москва",
+        20, "10:00", "17:00",
+    ])
 
-    col_widths = [28, 36, 16, 12, 12, 32, 16, 12, 12]
+    col_widths = [28, 52, 36, 16, 16, 12, 12]
     for i, width in enumerate(col_widths, 1):
-        ws.column_dimensions[ws.cell(1, i).column_letter].width = width
+        ws.column_dimensions[get_column_letter(i)].width = width
 
-    # Add a note row with field descriptions
-    note_row = ["← Обязательное", "← Обязательное", "← Необязательное", "← Необязательное (число)", "← Необязательное (число)", "← Необязательное (URL)", "← Число (минуты)", "← ЧЧ:ММ", "← ЧЧ:ММ"]
+    # Hint row (skipped on import — starts with ←)
+    note_row = [
+        "← Название магазина",
+        "← Ссылка из Яндекс: зажми место → Поделиться",
+        "← Адрес если нет ссылки",
+        "← Город",
+        "← Минут (число)",
+        "← ЧЧ:ММ",
+        "← ЧЧ:ММ",
+    ]
     ws.append(note_row)
     for col_num in range(1, len(note_row) + 1):
         cell = ws.cell(row=ws.max_row, column=col_num)
@@ -798,22 +917,22 @@ async def import_stores(file: UploadFile = File(...)):
                     return i
         return None
 
-    c_name    = _col(["назван", "name", "store_name"]) 
+    c_name    = _col(["назван", "name", "store_name"])
+    c_yandex  = _col(["ссылка яндекс", "яндекс", "yandex", "ссылка"])
     c_address = _col(["адрес", "address"])
     c_city    = _col(["город", "city"])
     c_lat     = _col(["широта", "lat", "latitude"])
     c_lon     = _col(["долгота", "lon", "longitude"])
-    c_mapurl  = _col(["ссылка", "map_url", "url", "карт"])
+    c_mapurl  = _col(["map_url", "ссылка на карт"])
     c_unload  = _col(["разгрузка", "unload"])
-    c_from    = _col(["время с", "open_time", "с (", "time_from", "время с"])
-    c_to      = _col(["время до", "close_time", "до (", "time_to", "время до"])
+    c_from    = _col(["время с", "open_time", "с (", "time_from"])
+    c_to      = _col(["время до", "close_time", "до (", "time_to"])
 
     # Fall back to positional mapping for old-format files (5-column):
     # Col0=name, Col1=address, Col2=tw_from, Col3=tw_to, Col4=unload
-    # or new-format (9-column): Col0=name Col1=addr Col2=city Col3=lat Col4=lon Col5=map_url Col6=unload Col7=from Col8=to
     if c_name is None:
         c_name = 0
-    if c_address is None:
+    if c_address is None and c_yandex is None:
         c_address = 1
 
     def _get(row, idx, default=""):
@@ -834,28 +953,28 @@ async def import_stores(file: UploadFile = File(...)):
     logger.info("Excel import: %d data rows found (headers: %s)", total_rows, header_row)
 
     for i, row in enumerate(all_data_rows, start=1):
-        name = str(_get(row, c_name, "")).strip()
-        city = str(_get(row, c_city, "")).strip()
-        raw_addr = str(_get(row, c_address, "")).strip()
+        name       = str(_get(row, c_name, "")).strip()
+        yandex_url = str(_get(row, c_yandex, "")).strip() or None
+        city       = str(_get(row, c_city, "")).strip()
+        raw_addr   = str(_get(row, c_address, "")).strip()
 
-        # Combine city + address if city column is separate
+        # Combine city + address
         if city and city not in raw_addr:
             address = f"{raw_addr}, {city}" if raw_addr else city
         else:
             address = raw_addr
 
-        if not name or not address:
-            logger.warning("Import row %d skipped: missing name or address", i)
+        if not name or (not yandex_url and not address):
+            logger.warning("Import row %d skipped: missing name or location", i)
             failed += 1
             continue
 
-        # Parse optional lat/lon
+        # Parse optional lat/lon columns
         raw_lat = _get(row, c_lat)
         raw_lon = _get(row, c_lon)
         map_url = str(_get(row, c_mapurl, "")).strip() or None
 
-        # Parse time window (old format: HH:MM in col 2/3; new format: col 7/8)
-        # Detect old format: if c_from is None but col 2 looks like a time string
+        # Parse time window
         if c_from is None and len(row) > 2 and row[2] and ":" in str(row[2]):
             tw_from = str(row[2]).strip()
             tw_to   = str(row[3]).strip() if len(row) > 3 and row[3] else "18:00"
@@ -868,7 +987,10 @@ async def import_stores(file: UploadFile = File(...)):
             except (ValueError, TypeError):
                 unload = 15
 
-        # Smart geocoding: use provided coords if both are valid numbers
+        # ── Coord resolution (priority order) ────────────────────────────────
+        lat, lon, status = None, None, "not_found"
+
+        # 1. Explicit lat/lon columns
         try:
             prov_lat = float(raw_lat) if raw_lat not in (None, "", "None") else None
             prov_lon = float(raw_lon) if raw_lon not in (None, "", "None") else None
@@ -877,15 +999,39 @@ async def import_stores(file: UploadFile = File(...)):
 
         if prov_lat is not None and prov_lon is not None and (-90 <= prov_lat <= 90) and (-180 <= prov_lon <= 180):
             lat, lon, status = prov_lat, prov_lon, "found"
-            logger.info("Import row %d/%d — %s → coords provided (%.4f, %.4f)", i, total_rows, address, lat, lon)
-        else:
+            logger.info("Import %d/%d — %s → explicit coords (%.4f, %.4f)", i, total_rows, name, lat, lon)
+
+        # 2. Parse Yandex URL
+        elif yandex_url:
+            lat, lon = parse_yandex_link(yandex_url)
+            if lat is not None and lon is not None:
+                status = "found"
+                if not address:
+                    address = reverse_geocode_nominatim(lat, lon) or yandex_url
+                logger.info("Import %d/%d — %s → yandex_url (%.4f, %.4f)", i, total_rows, name, lat, lon)
+            elif address:
+                coords = geocode_address(address)
+                lat = coords[0] if coords else None
+                lon = coords[1] if coords else None
+                status = "found" if coords else "not_found"
+                if not YANDEX_GEOCODER_API_KEY:
+                    time.sleep(1.1)
+                logger.info("Import %d/%d — %s → geocoded (yandex failed) → %s", i, total_rows, name, status)
+
+        # 3. Geocode address
+        elif address:
             coords = geocode_address(address)
             lat = coords[0] if coords else None
             lon = coords[1] if coords else None
             status = "found" if coords else "not_found"
-            logger.info("Import geocode %d/%d — %s → %s", i, total_rows, address, status)
+            logger.info("Import %d/%d — %s → geocoded '%s' → %s", i, total_rows, name, address, status)
             if not YANDEX_GEOCODER_API_KEY:
                 time.sleep(1.1)
+
+        if not address:
+            address = yandex_url or "Адрес не указан"
+
+        final_map_url = map_url or yandex_url
 
         try:
             conn = get_db()
@@ -893,7 +1039,7 @@ async def import_stores(file: UploadFile = File(...)):
             cur.execute(
                 """INSERT INTO stores (name, address, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
-                (name, address, lat, lon, map_url, status, tw_from, tw_to, unload)
+                (name, address, lat, lon, final_map_url, status, tw_from, tw_to, unload)
             )
             db_row = cur.fetchone()
             conn.commit()

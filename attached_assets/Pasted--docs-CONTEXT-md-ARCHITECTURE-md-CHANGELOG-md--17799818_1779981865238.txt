@@ -1,0 +1,232 @@
+Прочитай все файлы в папке docs/ перед началом.
+Особенно CONTEXT.md, ARCHITECTURE.md, CHANGELOG.md.
+
+Это проект SmartRoute — B2B SaaS для оптимизации 
+маршрутов доставки дистрибьюторов.
+Backend: Python FastAPI + OR-Tools.
+Frontend: React + Vite + TailwindCSS + shadcn/ui.
+База данных: PostgreSQL.
+
+Твоя задача: улучшить UX добавления магазинов.
+
+ЗАДАЧА 1 — УПРОЩЁННЫЙ ВВОД МАГАЗИНА
+
+Текущая проблема:
+Форма добавления магазина требует слишком много полей.
+Пользователь не знает координаты наизусть.
+Ссылка из Яндекс Карт — самый точный и удобный способ.
+
+Реши это через умную логику на бэкенде.
+
+В POST /api/stores принимать:
+{
+  "name": "Магазин Пятёрочка",
+  "yandex_url": "https://yandex.ru/maps/?whatshere[point]=37.617,55.755",
+  "address": "ул. Ленина 5",  // необязательно если есть yandex_url
+  "city": "Москва",           // необязательно
+  "unload_minutes": 15,
+  "time_window_from": "09:00",
+  "time_window_to": "18:00"
+}
+
+Логика определения координат (приоритеты):
+
+def extract_coords(yandex_url, address, city):
+    # Приоритет 1: координаты из ссылки Яндекс Карт
+    if yandex_url:
+        coords = parse_yandex_link(yandex_url)
+        if coords:
+            return coords  # самый точный вариант
+    
+    # Приоритет 2: геокодирование адреса
+    if address:
+        query = f"{city} {address}".strip() if city else address
+        coords = geocode_address(query)
+        if coords:
+            return coords
+    
+    # Координаты не найдены
+    return None, None
+
+Функция parse_yandex_link — парсит все форматы ссылок:
+
+def parse_yandex_link(url: str):
+    from urllib.parse import urlparse, parse_qs, unquote
+    try:
+        decoded = unquote(url)
+        parsed = urlparse(decoded)
+        params = parse_qs(parsed.query)
+        
+        # Формат whatshere[point]=lon,lat
+        if "whatshere[point]" in params:
+            lon, lat = params["whatshere[point]"][0].split(",")
+            return float(lat), float(lon)
+        
+        # Формат ll=lon,lat
+        if "ll" in params:
+            lon, lat = params["ll"][0].split(",")
+            return float(lat), float(lon)
+        
+        # Формат rtext=lat,lon
+        if "rtext" in params:
+            parts = params["rtext"][0].split("~")[0].split(",")
+            if len(parts) >= 2:
+                return float(parts[0]), float(parts[1])
+        
+        # Короткая ссылка — раскрыть редирект
+        if "/-/" in url or "maps.yandex" in url:
+            import urllib.request
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                method="GET"
+            )
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPRedirectHandler()
+            )
+            response = opener.open(req, timeout=10)
+            final_url = response.geturl()
+            return parse_yandex_link(final_url)  # рекурсия
+        
+        return None, None
+    except Exception as e:
+        logger.error(f"parse_yandex_link error: {e}")
+        return None, None
+
+Если координаты получены из ссылки — 
+определить адрес через обратный геокодинг:
+
+async def reverse_geocode(lat, lon, yandex_key=None):
+    # Яндекс обратный геокодинг
+    if yandex_key:
+        try:
+            url = (
+                "https://geocode-maps.yandex.ru/1.x/?"
+                f"apikey={yandex_key}"
+                f"&geocode={lon},{lat}"
+                "&format=json&results=1&lang=ru_RU&kind=house"
+            )
+            # ... HTTP запрос ...
+            # Вернуть строку адреса
+        except:
+            pass
+    
+    # Nominatim обратный геокодинг
+    url = (
+        f"https://nominatim.openstreetmap.org/reverse?"
+        f"lat={lat}&lon={lon}&format=json&accept-language=ru"
+    )
+    # ... HTTP запрос ...
+    # Вернуть road + house_number
+
+ЗАДАЧА 2 — УПРОЩЁННЫЙ EXCEL ШАБЛОН
+
+Новый шаблон — только 4 обязательных колонки:
+
+A: Название (обязательное)
+B: Ссылка из Яндекс Карт (рекомендуется)
+C: Адрес (если нет ссылки)
+D: Город (необязательное)
+E: Разгрузка мин (необязательное, по умолчанию 15)
+F: Время с (необязательное, по
+
+
+09:00)
+G: Время до (необязательное, по умолчанию 18:00)
+
+Примеры в шаблоне:
+Строка 1 (заголовок):
+A1=Название B1=Ссылка Яндекс C1=Адрес D1=Город
+E1=Разгрузка мин F1=Время с G1=Время до
+
+Строка 2 (пример со ссылкой):
+A2=Магазин Пятёрочка
+B2=https://yandex.ru/maps/?whatshere[point]=37.617,55.755
+C2= (пусто)
+D2= (пусто)
+E2=15 F2=09:00 G2=18:00
+
+Строка 3 (пример с адресом):
+A3=Магазин Магнит
+B3= (пусто)
+C3=ул. Гагарина 12
+D3=Москва
+E3=20 F3=10:00 G3=17:00
+
+Строка 4 (подсказка, начинается с ←):
+A4=← Название магазина
+B4=← Ссылка из Яндекс: зажми место → Поделиться
+C4=← Адрес если нет ссылки
+D4=← Город
+E4=← Минут (число)
+F4=← ЧЧ:ММ
+G4=← ЧЧ:ММ
+
+При импорте:
+- Если есть ссылка → парсим координаты из неё
+- Если нет ссылки → геокодируем адрес+город
+- Пустые строки и строки с ← пропускаем
+
+ЗАДАЧА 3 — ФОРМА ДОБАВЛЕНИЯ НА ФРОНТЕНДЕ
+
+В stores.tsx упрости форму добавления магазина.
+
+Основные поля (всегда видны):
+- Название (обязательное)
+- Ссылка из Яндекс Карт (рекомендуется)
+  Подсказка под полем: 
+  "Откройте Яндекс Карты → зажмите место → Поделиться → скопируйте ссылку"
+- Адрес (необязательное если есть ссылка)
+
+Дополнительные поля (collapsible секция "Настройки"):
+- Город
+- Время разгрузки (минуты)
+- Временное окно (с/до)
+
+Логика валидации:
+if (!name) → ошибка "Введите название"
+if (!yandex_url && !address) → ошибка 
+  "Укажите ссылку из Яндекс Карт или адрес"
+
+Кнопка отправки: "Добавить магазин"
+
+ЗАДАЧА 4 — ОБНОВИТЬ OPENAPI SPEC И КОДОГЕНЕРАЦИЮ
+
+После изменений в бэкенде:
+
+1. Обнови lib/api-spec/openapi.yaml:
+   Добавь поле yandex_url в StoreInput и StoreUpdate
+
+2. Запусти кодогенерацию:
+   pnpm --filter @workspace/api-spec run codegen
+
+3. Проверь что typecheck проходит:
+   pnpm --filter @workspace/smartroute run typecheck
+
+ЗАДАЧА 5 — ТЕСТИРОВАНИЕ
+
+После всех изменений проверь:
+
+1. Добавь магазин со ссылкой Яндекс:
+   curl -X POST http://localhost:8080/api/stores \
+   -H "Content-Type: application/json" \
+   -d '{
+     "name": "Тест со ссылкой",
+     "yandex_url": "https://yandex.ru/maps/?whatshere%5Bpoint%5D=37.617635,55.755814"
+   }'
+   → координаты определены из ссылки, адрес найден
+
+2. Добавь магазин с адресом:
+   curl -X POST http://localhost:8080/api/stores \
+   -H "Content-Type: application/json" \
+   -d '{"name": "Тест с адресом", "address": "ул. Ленина 5", "city": "Москва"}'
+   → координаты найдены геокодером
+
+3. Скачай новый шаблон:
+   curl http://localhost:8080/api/stores/template -o test.xlsx
+   → файл с 7 колонками открывается в Excel
+
+4. Импортируй файл с обоими примерами
+   → оба магазина добавлены с координатами
+
+После тестов сделай git add/commit всех изменённых файлов. умолчанию

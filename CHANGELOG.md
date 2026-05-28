@@ -1,5 +1,38 @@
 # CHANGELOG
 
+## [Unreleased] — 2026-05-28 (Yandex URL Smart Input)
+
+### Задача 1 — Умный ввод через ссылку Яндекс Карт
+- `parse_yandex_link(url)` — парсит форматы: `whatshere[point]`, `ll`, `rtext`, короткие ссылки (редирект)
+- `reverse_geocode_nominatim(lat, lon)` — обратный геокодинг через Nominatim для получения адреса по координатам
+- `create_store`: новая логика приоритетов — lat/lon → yandex_url → geocode address
+- `StoreInput`: `address` теперь опциональный; добавлены `city`, `yandex_url`
+- `StoreUpdate`: добавлены `city`, `yandex_url`
+- `yandex_url` автоматически сохраняется как `map_url` (кнопка открытия карты в таблице)
+
+### Задача 2 — Упрощённый Excel шаблон (7 колонок вместо 9)
+- A: Название, B: Ссылка Яндекс, C: Адрес, D: Город, E: Разгрузка мин, F: Время с, G: Время до
+- Пример строка 1: со ссылкой Яндекс; строка 2: с адресом и городом
+- Строка-подсказка с `←` (пропускается при импорте)
+
+### Задача 3 — Упрощённая форма добавления магазина
+- Основные поля: Название, Ссылка Яндекс (с подсказкой «зажмите место → Поделиться»), Адрес
+- Collapsible «Настройки»: Город, Разгрузка (мин), Временное окно
+- Валидация: `name` обязательно + `yandex_url ИЛИ address`
+
+### Задача 4 — OpenAPI + кодогенерация
+- `StoreInput`: добавлены `yandex_url`, `city`; `address` убран из `required`
+- `StoreUpdate`: добавлены `yandex_url`, `city`
+- Кодогенерация прошла (`orval` + `typecheck:libs`)
+- Typecheck фронтенда прошёл (`tsc -p tsconfig.json --noEmit`)
+
+### Задача 5 — Импорт Excel
+- `import_stores`: поддержка колонки «Ссылка Яндекс» (B в новом шаблоне)
+- Та же логика приоритетов: lat/lon → yandex_url → geocode address
+- Обратная совместимость: старые форматы (5-колоночный) продолжают работать
+
+---
+
 ## [Unreleased] — 2026-05-27 (Stores Flow Stabilization)
 
 ### Step 1: Debug & Fix Stores Creation

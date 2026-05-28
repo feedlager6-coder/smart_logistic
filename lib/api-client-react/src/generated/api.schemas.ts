@@ -40,19 +40,33 @@ export interface Store {
 
 export interface StoreInput {
   name: string;
-  address: string;
   /**
-     * Latitude (if provided, skips geocoding)
+     * Street address (optional if yandex_url is provided)
+     * @nullable
+     */
+  address?: string | null;
+  /**
+     * City name (prepended to address for geocoding)
+     * @nullable
+     */
+  city?: string | null;
+  /**
+     * Yandex Maps link — coords extracted automatically
+     * @nullable
+     */
+  yandex_url?: string | null;
+  /**
+     * Latitude (highest priority, skips geocoding)
      * @nullable
      */
   lat?: number | null;
   /**
-     * Longitude (if provided, skips geocoding)
+     * Longitude (highest priority, skips geocoding)
      * @nullable
      */
   lon?: number | null;
   /**
-     * Direct map link (Yandex/Google/2GIS)
+     * Direct map link stored for reference
      * @nullable
      */
   map_url?: string | null;
@@ -64,6 +78,10 @@ export interface StoreInput {
 export interface StoreUpdate {
   name?: string;
   address?: string;
+  /** @nullable */
+  city?: string | null;
+  /** @nullable */
+  yandex_url?: string | null;
   /** @nullable */
   lat?: number | null;
   /** @nullable */
