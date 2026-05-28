@@ -819,6 +819,24 @@ def create_store(body: StoreInput):
     return store_row_to_dict(row)
 
 
+@app.get("/api/geocode")
+def geocode_endpoint(address: Optional[str] = None, yandex_url: Optional[str] = None):
+    """Geocode an address or parse a Yandex Maps URL. Returns {lat, lon, display}."""
+    if yandex_url and yandex_url.strip():
+        lat, lon = parse_yandex_link(yandex_url.strip())
+        if lat is not None and lon is not None:
+            display = reverse_geocode_nominatim(lat, lon) or yandex_url.strip()
+            return {"lat": lat, "lon": lon, "display": display}
+        raise HTTPException(status_code=422, detail="Не удалось извлечь координаты из ссылки Яндекс Карт")
+    if address and address.strip():
+        result = geocode_address(address.strip())
+        if result:
+            lat, lon = result
+            return {"lat": lat, "lon": lon, "display": address.strip()}
+        raise HTTPException(status_code=404, detail="Адрес не найден. Попробуйте уточнить запрос.")
+    raise HTTPException(status_code=400, detail="Укажите параметр address или yandex_url")
+
+
 @app.get("/api/stores/template")
 def download_stores_template():
     if not OPENPYXL_AVAILABLE:

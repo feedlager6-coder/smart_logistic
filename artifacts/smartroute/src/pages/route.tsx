@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Search, Loader2, MapPin, Truck, Route as RouteIcon, Plus, X, Copy, Save, AlertCircle, Warehouse } from "lucide-react";
+import { Search, Loader2, MapPin, Truck, Route as RouteIcon, Plus, X, Copy, Save, AlertCircle, Warehouse, ExternalLink, Link } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useLocation } from "wouter";
 
@@ -51,9 +51,11 @@ export function RoutePage() {
   const [selectedStores, setSelectedStores] = useState<Set<number>>(new Set());
 
   // Depot state — persisted in localStorage
-  const [depotAddress, setDepotAddress] = useState(() => loadDepot().address);
-  const [depotLat, setDepotLat] = useState(() => loadDepot().lat);
-  const [depotLon, setDepotLon] = useState(() => loadDepot().lon);
+  const savedDepot = loadDepot() as { address: string; lat: string; lon: string; yandexUrl?: string };
+  const [depotAddress, setDepotAddress] = useState(() => savedDepot.address);
+  const [depotYandexUrl, setDepotYandexUrl] = useState(() => savedDepot.yandexUrl ?? "");
+  const [depotLat, setDepotLat] = useState(() => savedDepot.lat);
+  const [depotLon, setDepotLon] = useState(() => savedDepot.lon);
   const [depotGeocoding, setDepotGeocoding] = useState(false);
 
   // Fleet state — persisted in localStorage
@@ -63,8 +65,8 @@ export function RoutePage() {
 
   // Persist depot to localStorage on change
   useEffect(() => {
-    localStorage.setItem(DEPOT_KEY, JSON.stringify({ address: depotAddress, lat: depotLat, lon: depotLon }));
-  }, [depotAddress, depotLat, depotLon]);
+    localStorage.setItem(DEPOT_KEY, JSON.stringify({ address: depotAddress, yandexUrl: depotYandexUrl, lat: depotLat, lon: depotLon }));
+  }, [depotAddress, depotYandexUrl, depotLat, depotLon]);
 
   const filteredStores = stores.filter(s =>
     s.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -114,31 +116,38 @@ export function RoutePage() {
   };
 
   const handleGeocodeDepot = async () => {
-    if (!depotAddress.trim()) {
-      toast({ title: "Введите адрес склада", variant: "destructive" });
+    const hasYandex = depotYandexUrl.trim();
+    const hasAddress = depotAddress.trim();
+    if (!hasYandex && !hasAddress) {
+      toast({ title: "Введите адрес или ссылку Яндекс Карт", variant: "destructive" });
       return;
     }
     setDepotGeocoding(true);
     try {
-      const res = await fetch(`/api/stores`, { method: "GET" });
-      // Use Nominatim to geocode depot address
-      const q = encodeURIComponent(depotAddress.trim());
-      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${q}&limit=1`;
-      const r = await fetch(url, { headers: { "User-Agent": "SmartRoute/1.0" } });
-      const data = await r.json();
-      if (data && data.length > 0) {
-        setDepotLat(parseFloat(data[0].lat).toFixed(6));
-        setDepotLon(parseFloat(data[0].lon).toFixed(6));
-        toast({ title: "Склад геокодирован", description: `${data[0].display_name.slice(0, 60)}...` });
-      } else {
-        toast({ title: "Адрес не найден", description: "Попробуйте уточнить адрес", variant: "destructive" });
+      const params = new URLSearchParams();
+      if (hasYandex) params.set("yandex_url", hasYandex);
+      else params.set("address", hasAddress);
+
+      const res = await fetch(`/api/geocode?${params}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        toast({ title: "Адрес не найден", description: err.detail ?? "Попробуйте уточнить запрос", variant: "destructive" });
+        return;
       }
+      const data = await res.json();
+      setDepotLat(String(data.lat));
+      setDepotLon(String(data.lon));
+      toast({ title: "Склад геокодирован", description: `${data.lat.toFixed(5)}, ${data.lon.toFixed(5)}` });
     } catch {
-      toast({ title: "Ошибка геокодинга", variant: "destructive" });
+      toast({ title: "Ошибка геокодинга", description: "Проверьте соединение", variant: "destructive" });
     } finally {
       setDepotGeocoding(false);
     }
   };
+
+  const depotYandexNavUrl = depotLat && depotLon
+    ? `https://yandex.ru/maps/?pt=${depotLon},${depotLat}&z=16&l=map`
+    : null;
 
   const handleBuild = () => {
     if (selectedStores.size === 0) {
@@ -197,7 +206,7 @@ export function RoutePage() {
           </CardTitle>
           <CardDescription>Откуда начинаются и куда возвращаются все машины. Сохраняется автоматически.</CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-3">
           <div className="flex gap-2 items-end flex-wrap">
             <div className="flex-1 min-w-[260px] space-y-1.5">
               <Label className="text-xs">Адрес</Label>
@@ -208,14 +217,38 @@ export function RoutePage() {
                 onKeyDown={(e) => e.key === "Enter" && handleGeocodeDepot()}
               />
             </div>
+            <div className="flex-1 min-w-[200px] space-y-1.5">
+              <Label className="text-xs flex items-center gap-1.5">
+                <Link className="w-3 h-3" />
+                Ссылка Яндекс Карт (необязательно)
+              </Label>
+              <Input
+                value={depotYandexUrl}
+                onChange={(e) => setDepotYandexUrl(e.target.value)}
+                placeholder="https://yandex.ru/maps/..."
+                onKeyDown={(e) => e.key === "Enter" && handleGeocodeDepot()}
+              />
+            </div>
+          </div>
+          <div className="flex gap-2 items-center flex-wrap">
             <Button variant="outline" onClick={handleGeocodeDepot} disabled={depotGeocoding} className="shrink-0">
               {depotGeocoding ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <MapPin className="w-4 h-4 mr-2" />}
               Геокодировать
             </Button>
             {depotLat && depotLon && (
-              <div className="text-xs text-muted-foreground font-mono bg-muted px-2 py-1.5 rounded border">
-                {parseFloat(depotLat).toFixed(4)}, {parseFloat(depotLon).toFixed(4)}
-              </div>
+              <>
+                <div className="text-xs text-muted-foreground font-mono bg-muted px-2 py-1.5 rounded border">
+                  {parseFloat(depotLat).toFixed(4)}, {parseFloat(depotLon).toFixed(4)}
+                </div>
+                {depotYandexNavUrl && (
+                  <a href={depotYandexNavUrl} target="_blank" rel="noopener noreferrer">
+                    <Button variant="ghost" size="sm" className="text-xs h-7 px-2 gap-1">
+                      <ExternalLink className="w-3 h-3" />
+                      Яндекс Карты
+                    </Button>
+                  </a>
+                )}
+              </>
             )}
           </div>
         </CardContent>

@@ -1,0 +1,3 @@
+- [Vite proxy for API](vite-proxy.md) — Vite dev server MUST proxy `/api` to port 8080; without it browser gets HTML from Vite SPA fallback.
+- [Excel download pattern](excel-download.md) — Excel files must be returned as base64 JSON `{data, filename}`; StreamingResponse/binary breaks through Replit proxy.
+- [Depot geocoding](depot-geocoding.md) — Frontend must NEVER call Nominatim/Yandex directly (CORS); always use `/api/geocode` backend endpoint.
