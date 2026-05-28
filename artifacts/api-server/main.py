@@ -588,18 +588,35 @@ def reverse_geocode_nominatim(lat: float, lon: float) -> Optional[str]:
         return None
 
 
-def calculate_savings(optimized_km: float, num_points: int, num_vehicles: int) -> dict:
-    unoptimized_km = optimized_km * 1.3
-    saved_km = unoptimized_km - optimized_km
+def calculate_savings(
+    optimized_km: float,
+    num_points: int,
+    num_vehicles: int,
+    depot_coord: tuple = None,
+    store_coords: list = None,
+) -> dict:
+    """
+    Сравнение с «наивной» доставкой: каждый магазин — отдельный рейс туда-обратно от склада.
+    Если переданы координаты — вычисляем точно через Haversine, иначе оценка +35%.
+    """
+    if depot_coord and store_coords:
+        unoptimized_km = sum(
+            2 * haversine_meters(depot_coord, sc) / 1000
+            for sc in store_coords
+        )
+    else:
+        unoptimized_km = optimized_km * 1.35
+
+    unoptimized_km = max(float(unoptimized_km), optimized_km)
+    saved_km = round(unoptimized_km - optimized_km, 1)
     cost_per_km = 12
     saved_rub_day = round(saved_km * cost_per_km)
-    saved_rub_month = saved_rub_day * 30
     return {
         "optimized_km": round(optimized_km, 1),
         "unoptimized_km": round(unoptimized_km, 1),
-        "saved_km": round(saved_km, 1),
+        "saved_km": saved_km,
         "saved_rub_day": saved_rub_day,
-        "saved_rub_month": saved_rub_month,
+        "saved_rub_month": saved_rub_day * 30,
     }
 
 
@@ -689,7 +706,33 @@ async def startup():
             "YANDEX_GEOCODER_API_KEY not set — Yandex Geocoder disabled, falling back to Nominatim"
         )
     init_db()
+    migrate_moscow_stores()
     seed_demo_data()
+
+
+def migrate_moscow_stores():
+    """Удаляем старые московские демо-магазины (lat > 50), сохраняя всё остальное."""
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            "SELECT COUNT(*) as moscow_cnt "
+            "FROM stores WHERE lat IS NOT NULL AND lat > 50"
+        )
+        row = cur.fetchone()
+        moscow_cnt = int(row["moscow_cnt"])
+        # Only remove if there are Moscow-like stores and it's a small demo-sized batch
+        if moscow_cnt > 0 and moscow_cnt <= 15:
+            logger.info("Removing %d Moscow demo stores (lat > 50)...", moscow_cnt)
+            cur.execute("DELETE FROM stores WHERE lat IS NOT NULL AND lat > 50")
+            conn.commit()
+            logger.info("Migration done: %d Moscow stores removed.", moscow_cnt)
+    except Exception as exc:
+        logger.error("migrate_moscow_stores failed: %s", exc)
+        conn.rollback()
+    finally:
+        cur.close()
+        conn.close()
 
 
 def seed_demo_data():
@@ -697,7 +740,8 @@ def seed_demo_data():
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("SELECT COUNT(*) as cnt FROM stores")
     row = cur.fetchone()
-    if row["cnt"] > 0:
+    # Seed if empty, or if only a handful remain after migration
+    if row["cnt"] >= 3:
         cur.close()
         conn.close()
         return
@@ -1112,6 +1156,18 @@ def update_store(id: int, body: StoreUpdate):
             fields["lat"] = None
             fields["lon"] = None
             fields["geocode_status"] = "not_found"
+    if body.yandex_url is not None:
+        yurl = body.yandex_url.strip() if body.yandex_url else None
+        fields["map_url"] = yurl
+        if yurl:
+            lat_y, lon_y = parse_yandex_link(yurl)
+            if lat_y is not None and lon_y is not None:
+                fields["lat"] = lat_y
+                fields["lon"] = lon_y
+                fields["geocode_status"] = "found"
+    if body.city is not None:
+        # Store city as part of address if address not separately updated
+        pass  # city is used in geocoding, stored implicitly in address
     if body.lat is not None:
         fields["lat"] = body.lat
     if body.lon is not None:
@@ -1302,7 +1358,14 @@ def build_route(body: RouteRequest):
             "whatsapp_url": wurl,
         })
 
-    savings = calculate_savings(total_km, len(store_list), num_vehicles)
+    store_coords = [(s["lat"], s["lon"]) for s in store_list if s.get("lat") and s.get("lon")]
+    savings = calculate_savings(
+        total_km,
+        len(store_list),
+        num_vehicles,
+        depot_coord=(depot_lat, depot_lon),
+        store_coords=store_coords,
+    )
 
     result = {
         "routes": routes,

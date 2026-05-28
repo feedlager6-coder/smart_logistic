@@ -17,10 +17,10 @@ import React from "react";
 export function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <SidebarProvider>
-      <div className="flex min-h-screen w-full bg-background overflow-hidden">
+      <div className="flex min-h-screen w-full bg-background overflow-hidden print:block">
         <AppSidebar />
-        <main className="flex-1 flex flex-col min-w-0">
-          <header className="h-14 border-b border-border bg-card flex items-center px-4 md:px-6 shrink-0 z-10 sticky top-0">
+        <main className="flex-1 flex flex-col min-w-0 print:block">
+          <header className="h-14 border-b border-border bg-card flex items-center px-4 md:px-6 shrink-0 z-10 sticky top-0 print:hidden">
             <SidebarTrigger className="-ml-2 md:hidden mr-2" />
             <div className="flex-1" />
             <div className="flex items-center gap-4 text-sm text-muted-foreground">
@@ -30,7 +30,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
               </span>
             </div>
           </header>
-          <div className="flex-1 overflow-auto bg-background p-4 md:p-6 lg:p-8">
+          <div className="flex-1 overflow-auto bg-background p-4 md:p-6 lg:p-8 print:p-4">
             <div className="max-w-[1400px] mx-auto w-full">
               {children}
             </div>
@@ -52,7 +52,7 @@ function AppSidebar() {
   ];
 
   return (
-    <Sidebar className="border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
+    <Sidebar className="border-r border-sidebar-border bg-sidebar text-sidebar-foreground print:hidden">
       <SidebarHeader className="h-14 px-4 flex items-center shrink-0 flex-row gap-2 font-semibold text-lg">
         <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center text-primary-foreground">
           <Truck className="w-5 h-5" />

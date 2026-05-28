@@ -281,3 +281,49 @@
     inset: -1px;
   }
 }
+
+@media print {
+  /* Скрыть боковое меню и шапку */
+  [data-sidebar],
+  aside {
+    display: none !important;
+  }
+
+  /* Убрать фиксированный заголовок */
+  header.sticky {
+    position: static !important;
+  }
+
+  /* Убрать отступы контейнера */
+  body {
+    font-size: 11pt;
+    background: white !important;
+    color: black !important;
+  }
+
+  /* Карточки не разрывать по страницам */
+  .card,
+  [class*="rounded"] {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
+  /* Убрать тени у карточек */
+  * {
+    box-shadow: none !important;
+    text-shadow: none !important;
+  }
+
+  /* Ссылки не подчёркивать */
+  a {
+    text-decoration: none !important;
+  }
+
+  /* Заголовок страницы */
+  h1 {
+    font-size: 18pt;
+  }
+  h2, h3 {
+    font-size: 13pt;
+  }
+}

@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store, ChevronDown, ChevronUp, ExternalLink, Link, Pencil } from "lucide-react";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useToast } from "@/hooks/use-toast";
@@ -37,6 +37,7 @@ export function StoresPage() {
   const [editId, setEditId] = useState<number | null>(null);
   const [editName, setEditName] = useState("");
   const [editAddress, setEditAddress] = useState("");
+  const [editYandexUrl, setEditYandexUrl] = useState("");
   const [editTimeFrom, setEditTimeFrom] = useState("09:00");
   const [editTimeTo, setEditTimeTo] = useState("18:00");
   const [editUnload, setEditUnload] = useState("15");
@@ -198,6 +199,7 @@ export function StoresPage() {
     setEditId(store.id);
     setEditName(store.name);
     setEditAddress(store.address ?? "");
+    setEditYandexUrl(store.map_url ?? "");
     setEditTimeFrom(store.time_window_from);
     setEditTimeTo(store.time_window_to);
     setEditUnload(String(store.unload_minutes));
@@ -216,6 +218,7 @@ export function StoresPage() {
         data: {
           name: editName.trim(),
           address: editAddress.trim() || undefined,
+          yandex_url: editYandexUrl.trim() || undefined,
           time_window_from: editTimeFrom,
           time_window_to: editTimeTo,
           unload_minutes: parseInt(editUnload) || 15,
@@ -501,6 +504,9 @@ export function StoresPage() {
         <DialogContent className="sm:max-w-[480px]">
           <DialogHeader>
             <DialogTitle>Редактировать магазин</DialogTitle>
+            <DialogDescription>
+              Измените данные магазина. Ссылка Яндекс Карт или адрес используются для геолокации.
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div className="space-y-2">
@@ -512,11 +518,27 @@ export function StoresPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label>Адрес</Label>
+              <Label className="flex items-center gap-2">
+                <Link className="w-4 h-4 text-primary" />
+                Ссылка из Яндекс Карт
+                <span className="text-xs font-normal text-primary bg-primary/10 px-2 py-0.5 rounded-full">рекомендуется</span>
+              </Label>
+              <Input
+                value={editYandexUrl}
+                onChange={(e) => setEditYandexUrl(e.target.value)}
+                placeholder="https://yandex.ru/maps/?whatshere[point]=47.5,42.98"
+                type="url"
+              />
+              <p className="text-xs text-muted-foreground">
+                Если изменена — координаты обновятся автоматически
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label>Адрес (для геокодинга, если нет ссылки)</Label>
               <Input
                 value={editAddress}
                 onChange={(e) => setEditAddress(e.target.value)}
-                placeholder="ул. Ленина 5"
+                placeholder="Махачкала, ул. Ленина 5"
               />
             </div>
             <div className="grid grid-cols-2 gap-4">

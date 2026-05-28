@@ -196,11 +196,11 @@ export function ResultPage() {
               <span className="hidden sm:inline">Копировать ссылку</span>
             </Button>
           )}
-          <Button variant="outline" onClick={() => window.print()} className="gap-2">
+          <Button variant="outline" onClick={() => window.print()} className="gap-2 print:hidden">
             <Download className="w-4 h-4" />
-            <span className="hidden sm:inline">Скачать PDF</span>
+            <span className="hidden sm:inline">Печать / PDF</span>
           </Button>
-          <Button className="gap-2" asChild>
+          <Button className="gap-2 print:hidden" asChild>
             <Link href="/route">
               <RefreshCw className="w-4 h-4" />
               <span className="hidden sm:inline">Новый маршрут</span>
@@ -220,7 +220,7 @@ export function ResultPage() {
           <CardContent className="pt-6">
             <div className="text-sm font-medium opacity-90 mb-1">Сэкономлено (км)</div>
             <div className="text-3xl font-bold">{Math.round(result.savings.saved_km)} км</div>
-            <div className="text-sm opacity-90 mt-1">Было {Math.round(result.savings.unoptimized_km)} км</div>
+            <div className="text-sm opacity-90 mt-1">Без VRP: {Math.round(result.savings.unoptimized_km)} км</div>
           </CardContent>
         </Card>
         <Card className="bg-emerald-600 text-white border-transparent">
