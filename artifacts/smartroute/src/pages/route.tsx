@@ -213,7 +213,7 @@ export function RoutePage() {
               <Input
                 value={depotAddress}
                 onChange={(e) => setDepotAddress(e.target.value)}
-                placeholder="Москва, ул. Складская 1 (или оставьте пустым для центра Москвы)"
+                placeholder="Махачкала, ул. Ленина 1 (или оставьте пустым для центра Махачкалы)"
                 onKeyDown={(e) => e.key === "Enter" && handleGeocodeDepot()}
               />
             </div>
@@ -241,12 +241,12 @@ export function RoutePage() {
                   {parseFloat(depotLat).toFixed(4)}, {parseFloat(depotLon).toFixed(4)}
                 </div>
                 {depotYandexNavUrl && (
-                  <a href={depotYandexNavUrl} target="_blank" rel="noopener noreferrer">
-                    <Button variant="ghost" size="sm" className="text-xs h-7 px-2 gap-1">
+                  <Button variant="ghost" size="sm" className="text-xs h-7 px-2 gap-1" asChild>
+                    <a href={depotYandexNavUrl} target="_blank" rel="noopener noreferrer">
                       <ExternalLink className="w-3 h-3" />
                       Яндекс Карты
-                    </Button>
-                  </a>
+                    </a>
+                  </Button>
                 )}
               </>
             )}

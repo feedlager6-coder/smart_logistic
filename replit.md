@@ -2,13 +2,14 @@
 
 B2B SaaS для оптимизации маршрутов доставки. Диспетчер загружает точки доставки (магазины), указывает машины и водителей — система строит оптимальные маршруты с помощью Google OR-Tools VRP solver, отправляет водителям через WhatsApp или Яндекс Навигатор.
 
+**Базовый город**: Махачкала (дефолтный депо — 42.9849, 47.5046)
+
 ## Run & Operate
 
 - `pnpm --filter @workspace/api-spec run codegen` — пересобрать API hooks + Zod schemas из OpenAPI spec (запускать после изменения `lib/api-spec/openapi.yaml`)
 - `pnpm run typecheck` — проверить типы по всему монорепо
-- Workflow `artifacts/api-server: API Server` — FastAPI бэкенд на порту 8080
+- Workflow `Start API Server` — FastAPI бэкенд на порту 8080 (`cd artifacts/api-server && python3 main.py`)
 - Workflow `Start Frontend` — Vite dev server, порт 24853, BASE_PATH=/
-- **НЕ** запускать `Start API Server` (дублирует порт 8080)
 
 ## Stack
 
@@ -26,6 +27,7 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 |---|---|
 | `artifacts/api-server/main.py` | Весь бэкенд (FastAPI, VRP, geocoding, DB) |
 | `artifacts/smartroute/src/pages/` | Фронтенд страницы (home, stores, route, result, analytics) |
+| `artifacts/smartroute/index.html` | Root HTML, `translate="no"` для защиты от Google Translate |
 | `lib/api-spec/openapi.yaml` | Источник истины для API контракта |
 | `lib/api-client-react/src/generated/api.ts` | Сгенерированные React Query хуки (не редактировать вручную) |
 | `lib/zod/src/generated/` | Сгенерированные Zod схемы (не редактировать вручную) |
@@ -33,31 +35,53 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 ## Architecture decisions
 
 - **Single-file backend**: весь Python код в одном `main.py` — намеренно для простоты MVP
-- **StreamingResponse → Response**: шаблон Excel возвращается через `Response` с явным `Content-Length`, т.к. Replit-прокси не пробрасывает `Content-Disposition` при StreamingResponse
-- **fetch + Blob download**: все файлы скачиваются через `fetch → Blob → <a download>`, а не `window.open` — Replit proxy strips Content-Disposition
-- **Depot hardcoded**: координаты склада (55.7558, 37.6173 — центр Москвы) захардкожены в `build_route`. API поддерживает `depot_lat`/`depot_lon`, но UI их не отправляет — TODO
+- **Excel download as base64 JSON**: файлы возвращаются как `{"data": "<base64>", "filename": "..."}` — Replit proxy strips `Content-Disposition` при StreamingResponse/binary ответах; frontend декодирует через `atob()` → Blob → `<a download>`
+- **Vite proxy**: `vite.config.ts` проксирует `/api/*` → `http://localhost:8080`. Без этого браузерные fetch к `/api/` попадают на Vite dev server и получают HTML вместо JSON
+- **Frontend geocoding → backend**: геокодинг ВСЕГДА через `/api/geocode` (использует существующие `geocode_address` и `parse_yandex_link`). Прямые вызовы Nominatim/Яндекс из браузера заблокированы CORS
+- **Depot UI**: координаты склада задаются на странице `/route`, сохраняются в `localStorage` (ключ `smartroute_depot`), отправляются в `POST /api/route/build` как `depot_lat`/`depot_lon`. Дефолт — Махачкала (42.9849, 47.5046)
+- **Button asChild для ссылок**: кнопки-ссылки используют `<Button asChild><a href="...">...</a></Button>` — вложение `<a><button>` нарушает React 19 DOM reconciliation (`insertBefore` error)
+- **translate="no"**: `index.html` имеет `lang="ru" translate="no"` для защиты от Google Translate, который ломает React reconciliation модификацией текстовых узлов
 - **VRP unit demands = 1**: каждая точка = 1 единица груза. Реальный вес товара не учитывается — упрощение для MVP
 - **Orval/TanStack Query mismatch**: `useGetRouteSession` в result.tsx использует `as any` для опции `enabled` из-за несовместимости версий
 
 ## Product
 
-- **Магазины**: CRUD точек доставки с геокодингом (Яндекс/Nominatim), импорт из Excel (7 колонок), поддержка ссылок Яндекс Карт
-- **Маршруты**: VRP оптимизация с временными окнами и временем разгрузки, поддержка 1-50 машин
-- **Результат**: интерактивная карта Leaflet, детализация по машинам, ссылки Яндекс Навигатора, отправка в WhatsApp
+- **Магазины**: CRUD точек доставки с геокодингом (Яндекс/Nominatim), импорт из Excel (7 колонок), поддержка ссылок Яндекс Карт, кнопка «Открыть на карте», редактирование через диалог, подтверждение удаления
+- **Склад (депо)**: адрес + опциональная ссылка Яндекс Карт, геокодинг через `/api/geocode`, кнопка «Открыть в Яндекс Картах», сохранение в localStorage
+- **Маршруты**: VRP оптимизация с временными окнами и временем разгрузки, поддержка 1-50 машин, сохранение автопарка как шаблон
+- **Результат**: интерактивная карта Leaflet с автозумом, цветная легенда, детализация по машинам, ссылки Яндекс Навигатора, отправка в WhatsApp, мобильный режим водителя
 - **Аналитика**: пробег/экономия за 30 дней/12 месяцев, топ-10 магазинов по частоте
-- **Мобильный режим**: упрощённый вид для водителя (отдельный UI на телефоне)
+
+## API эндпоинты
+
+| Метод | Путь | Описание |
+|---|---|---|
+| GET | `/api/stores` | Список магазинов |
+| POST | `/api/stores` | Создать магазин |
+| PUT | `/api/stores/{id}` | Обновить магазин |
+| DELETE | `/api/stores/{id}` | Удалить магазин |
+| POST | `/api/stores/{id}/geocode` | Геокодировать магазин |
+| POST | `/api/stores/import` | Импорт из Excel |
+| GET | `/api/stores/template` | Скачать шаблон Excel (base64 JSON) |
+| GET | `/api/geocode` | Геокодировать адрес/ссылку Яндекс Карт |
+| POST | `/api/route/build` | Построить маршруты (VRP) |
+| GET | `/api/route/sessions/{id}` | Получить сохранённый маршрут |
+| GET | `/api/analytics/summary` | Сводка аналитики |
+| GET | `/api/analytics/daily` | Ежедневная статистика |
+| GET | `/api/analytics/monthly` | Помесячная статистика |
+| GET | `/api/analytics/top-stores` | Топ магазинов |
 
 ## User preferences
 
 - Язык интерфейса: русский
 - Документация пишется на русском
-- Changelog и SESSION_NOTES обновляются после каждой сессии
+- Базовый город: Махачкала
 
 ## Gotchas
 
 - `artifacts/smartroute: web` workflow всегда FAILED (конфликт порта с `Start Frontend`) — это ожидаемо, не чинить
 - После изменения `openapi.yaml` всегда запускать codegen, затем typecheck
 - `YANDEX_GEOCODER_API_KEY` не установлен → Nominatim (1 req/sec, медленный импорт больших файлов)
-- `GRAPHHOPPER_API_KEY` не установлен → Haversine-расстояния (приблизительные, не дорожные)
+- `GRAPHHOPPER_API_KEY` не установлен → Haversine-расстояния (приблизительные, не дорожные); GraphHopper 429 — автоматический fallback на 60 секунд
 - При импорте Excel строки начинающиеся с `←` — подсказки, пропускаются
-- Удаление магазина без подтверждения (confirm dialog добавлен в 28.05.2026)
+- Демо-данные (магазины Махачкалы) загружаются автоматически при первом запуске если БД пустая

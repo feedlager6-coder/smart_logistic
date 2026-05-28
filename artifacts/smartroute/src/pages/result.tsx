@@ -180,7 +180,7 @@ export function ResultPage() {
   }
 
   // ── Desktop view ─────────────────────────────────────────────────────────
-  const center: [number, number] = [55.7558, 37.6173];
+  const center: [number, number] = [42.9849, 47.5046]; // Махачкала
 
   return (
     <div className="space-y-6 pb-20">
@@ -200,12 +200,12 @@ export function ResultPage() {
             <Download className="w-4 h-4" />
             <span className="hidden sm:inline">Скачать PDF</span>
           </Button>
-          <Link href="/route">
-            <Button className="gap-2">
+          <Button className="gap-2" asChild>
+            <Link href="/route">
               <RefreshCw className="w-4 h-4" />
               <span className="hidden sm:inline">Новый маршрут</span>
-            </Button>
-          </Link>
+            </Link>
+          </Button>
         </div>
       </div>
 
