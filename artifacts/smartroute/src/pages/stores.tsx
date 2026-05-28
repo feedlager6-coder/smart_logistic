@@ -160,7 +160,10 @@ export function StoresPage() {
     try {
       const response = await fetch("/api/stores/template");
       if (!response.ok) throw new Error("Ошибка загрузки");
-      const blob = await response.blob();
+      const arrayBuffer = await response.arrayBuffer();
+      const blob = new Blob([arrayBuffer], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
