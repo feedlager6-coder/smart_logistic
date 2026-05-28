@@ -1,12 +1,13 @@
 import { useState } from "react";
-import { useListStores, useCreateStore, useDeleteStore, useGeocodeStore, useImportStores, getListStoresQueryKey } from "@workspace/api-client-react";
+import { useListStores, useCreateStore, useDeleteStore, useGeocodeStore, useImportStores, useUpdateStore, getListStoresQueryKey } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store, ChevronDown, ChevronUp, ExternalLink, Link } from "lucide-react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store, ChevronDown, ChevronUp, ExternalLink, Link, Pencil } from "lucide-react";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useToast } from "@/hooks/use-toast";
 
@@ -17,7 +18,7 @@ export function StoresPage() {
   const { toast } = useToast();
   const [search, setSearch] = useState("");
 
-  // Form state
+  // Add form state
   const [name, setName] = useState("");
   const [yandexUrl, setYandexUrl] = useState("");
   const [address, setAddress] = useState("");
@@ -31,10 +32,20 @@ export function StoresPage() {
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [importLoading, setImportLoading] = useState(false);
 
+  // Edit modal state
+  const [editOpen, setEditOpen] = useState(false);
+  const [editId, setEditId] = useState<number | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editAddress, setEditAddress] = useState("");
+  const [editTimeFrom, setEditTimeFrom] = useState("09:00");
+  const [editTimeTo, setEditTimeTo] = useState("18:00");
+  const [editUnload, setEditUnload] = useState("15");
+
   const createStore = useCreateStore();
   const deleteStore = useDeleteStore();
   const geocodeStore = useGeocodeStore();
   const importStores = useImportStores();
+  const updateStore = useUpdateStore();
 
   const validateForm = (): string | null => {
     if (!name.trim()) return "Введите название магазина";
@@ -160,14 +171,19 @@ export function StoresPage() {
     try {
       const response = await fetch("/api/stores/template");
       if (!response.ok) throw new Error("Ошибка загрузки");
-      const arrayBuffer = await response.arrayBuffer();
-      const blob = new Blob([arrayBuffer], {
+      const json = await response.json();
+      const binaryStr = atob(json.data);
+      const bytes = new Uint8Array(binaryStr.length);
+      for (let i = 0; i < binaryStr.length; i++) {
+        bytes[i] = binaryStr.charCodeAt(i);
+      }
+      const blob = new Blob([bytes], {
         type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       });
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "smartroute_template.xlsx";
+      a.download = json.filename ?? "smartroute_template.xlsx";
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -176,6 +192,46 @@ export function StoresPage() {
       console.error("Ошибка скачивания шаблона:", error);
       toast({ title: "Ошибка", description: "Не удалось скачать шаблон", variant: "destructive" });
     }
+  };
+
+  const handleOpenEdit = (store: typeof stores[0]) => {
+    setEditId(store.id);
+    setEditName(store.name);
+    setEditAddress(store.address ?? "");
+    setEditTimeFrom(store.time_window_from);
+    setEditTimeTo(store.time_window_to);
+    setEditUnload(String(store.unload_minutes));
+    setEditOpen(true);
+  };
+
+  const handleSaveEdit = () => {
+    if (!editId) return;
+    if (!editName.trim()) {
+      toast({ title: "Ошибка", description: "Введите название магазина", variant: "destructive" });
+      return;
+    }
+    updateStore.mutate(
+      {
+        id: editId,
+        data: {
+          name: editName.trim(),
+          address: editAddress.trim() || undefined,
+          time_window_from: editTimeFrom,
+          time_window_to: editTimeTo,
+          unload_minutes: parseInt(editUnload) || 15,
+        },
+      },
+      {
+        onSuccess: () => {
+          toast({ title: "Магазин обновлён" });
+          queryClient.invalidateQueries({ queryKey: getListStoresQueryKey() });
+          setEditOpen(false);
+        },
+        onError: () => {
+          toast({ title: "Ошибка", description: "Не удалось обновить магазин", variant: "destructive" });
+        },
+      }
+    );
   };
 
   const filteredStores = stores.filter(
@@ -406,6 +462,14 @@ export function StoresPage() {
                         <Button
                           variant="ghost"
                           size="icon"
+                          title="Редактировать"
+                          onClick={() => handleOpenEdit(store)}
+                        >
+                          <Pencil className="w-4 h-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
                           title="Геокодировать адрес"
                           onClick={() => handleGeocode(store.id)}
                           disabled={geocodeStore.isPending}
@@ -431,6 +495,60 @@ export function StoresPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Edit store dialog */}
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent className="sm:max-w-[480px]">
+          <DialogHeader>
+            <DialogTitle>Редактировать магазин</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label>Название <span className="text-destructive">*</span></Label>
+              <Input
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                placeholder="Магазин Пятёрочка"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Адрес</Label>
+              <Input
+                value={editAddress}
+                onChange={(e) => setEditAddress(e.target.value)}
+                placeholder="ул. Ленина 5"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Временное окно (с)</Label>
+                <Input type="time" value={editTimeFrom} onChange={(e) => setEditTimeFrom(e.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <Label>Временное окно (до)</Label>
+                <Input type="time" value={editTimeTo} onChange={(e) => setEditTimeTo(e.target.value)} />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Разгрузка (мин)</Label>
+              <Input
+                type="number"
+                min="1"
+                value={editUnload}
+                onChange={(e) => setEditUnload(e.target.value)}
+                className="max-w-[120px]"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditOpen(false)}>Отмена</Button>
+            <Button onClick={handleSaveEdit} disabled={updateStore.isPending}>
+              {updateStore.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+              Сохранить
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

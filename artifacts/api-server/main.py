@@ -891,16 +891,11 @@ def download_stores_template():
     buf.seek(0)
     content = buf.read()
 
-    from fastapi.responses import Response
-    return Response(
-        content=content,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={
-            "Content-Disposition": 'attachment; filename="smartroute_template.xlsx"',
-            "Content-Length": str(len(content)),
-            "Cache-Control": "no-cache",
-        },
-    )
+    import base64
+    return {
+        "data": base64.b64encode(content).decode("ascii"),
+        "filename": "smartroute_template.xlsx",
+    }
 
 
 @app.post("/api/stores/import")

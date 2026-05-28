@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useListStores, useBuildRoute } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Search, Loader2, MapPin, Truck, Route as RouteIcon, Plus, X } from "lucide-react";
+import { Search, Loader2, MapPin, Truck, Route as RouteIcon, Plus, X, Copy, Save, AlertCircle, Warehouse } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useLocation } from "wouter";
 
@@ -19,6 +19,27 @@ interface Vehicle {
   average_speed: string;
 }
 
+const DEPOT_KEY = "smartroute_depot";
+const FLEET_KEY = "smartroute_fleet";
+
+function loadDepot(): { address: string; lat: string; lon: string } {
+  try {
+    const raw = localStorage.getItem(DEPOT_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return { address: "", lat: "", lon: "" };
+}
+
+function loadFleet(): Vehicle[] | null {
+  try {
+    const raw = localStorage.getItem(FLEET_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return null;
+}
+
+const DEFAULT_VEHICLE: Vehicle = { id: "1", name: "Газель 1", capacity_kg: "1500", average_speed: "" };
+
 export function RoutePage() {
   const { data: storesData, isLoading } = useListStores();
   const stores = Array.isArray(storesData) ? storesData : [];
@@ -28,13 +49,25 @@ export function RoutePage() {
 
   const [search, setSearch] = useState("");
   const [selectedStores, setSelectedStores] = useState<Set<number>>(new Set());
-  
-  const [vehicles, setVehicles] = useState<Vehicle[]>([{ id: "1", name: "Газель 1", capacity_kg: "1500", average_speed: "" }]);
+
+  // Depot state — persisted in localStorage
+  const [depotAddress, setDepotAddress] = useState(() => loadDepot().address);
+  const [depotLat, setDepotLat] = useState(() => loadDepot().lat);
+  const [depotLon, setDepotLon] = useState(() => loadDepot().lon);
+  const [depotGeocoding, setDepotGeocoding] = useState(false);
+
+  // Fleet state — persisted in localStorage
+  const [vehicles, setVehicles] = useState<Vehicle[]>(() => loadFleet() ?? [DEFAULT_VEHICLE]);
   const [useTimeWindows, setUseTimeWindows] = useState(true);
   const [useUnloadTime, setUseUnloadTime] = useState(true);
 
-  const filteredStores = stores.filter(s => 
-    s.name.toLowerCase().includes(search.toLowerCase()) || 
+  // Persist depot to localStorage on change
+  useEffect(() => {
+    localStorage.setItem(DEPOT_KEY, JSON.stringify({ address: depotAddress, lat: depotLat, lon: depotLon }));
+  }, [depotAddress, depotLat, depotLon]);
+
+  const filteredStores = stores.filter(s =>
+    s.name.toLowerCase().includes(search.toLowerCase()) ||
     s.address.toLowerCase().includes(search.toLowerCase())
   );
 
@@ -61,8 +94,50 @@ export function RoutePage() {
     setVehicles(vehicles.filter(v => v.id !== id));
   };
 
+  const handleDuplicateVehicle = (id: string) => {
+    const v = vehicles.find(v => v.id === id);
+    if (!v) return;
+    const newV: Vehicle = { ...v, id: Math.random().toString(), name: `${v.name} (копия)` };
+    const idx = vehicles.findIndex(v => v.id === id);
+    const next = [...vehicles];
+    next.splice(idx + 1, 0, newV);
+    setVehicles(next);
+  };
+
   const handleVehicleChange = (id: string, field: keyof Vehicle, value: string) => {
     setVehicles(vehicles.map(v => v.id === id ? { ...v, [field]: value } : v));
+  };
+
+  const handleSaveFleet = () => {
+    localStorage.setItem(FLEET_KEY, JSON.stringify(vehicles));
+    toast({ title: "Автопарк сохранён", description: `${vehicles.length} авт. сохранено как шаблон` });
+  };
+
+  const handleGeocodeDepot = async () => {
+    if (!depotAddress.trim()) {
+      toast({ title: "Введите адрес склада", variant: "destructive" });
+      return;
+    }
+    setDepotGeocoding(true);
+    try {
+      const res = await fetch(`/api/stores`, { method: "GET" });
+      // Use Nominatim to geocode depot address
+      const q = encodeURIComponent(depotAddress.trim());
+      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${q}&limit=1`;
+      const r = await fetch(url, { headers: { "User-Agent": "SmartRoute/1.0" } });
+      const data = await r.json();
+      if (data && data.length > 0) {
+        setDepotLat(parseFloat(data[0].lat).toFixed(6));
+        setDepotLon(parseFloat(data[0].lon).toFixed(6));
+        toast({ title: "Склад геокодирован", description: `${data[0].display_name.slice(0, 60)}...` });
+      } else {
+        toast({ title: "Адрес не найден", description: "Попробуйте уточнить адрес", variant: "destructive" });
+      }
+    } catch {
+      toast({ title: "Ошибка геокодинга", variant: "destructive" });
+    } finally {
+      setDepotGeocoding(false);
+    }
   };
 
   const handleBuild = () => {
@@ -75,6 +150,9 @@ export function RoutePage() {
       return;
     }
 
+    const depotLatNum = depotLat ? parseFloat(depotLat) : undefined;
+    const depotLonNum = depotLon ? parseFloat(depotLon) : undefined;
+
     buildRoute.mutate({
       data: {
         store_ids: Array.from(selectedStores),
@@ -83,6 +161,8 @@ export function RoutePage() {
           capacity_kg: v.capacity_kg ? parseInt(v.capacity_kg) : null,
           average_speed: v.average_speed ? parseFloat(v.average_speed) : null,
         })),
+        depot_lat: depotLatNum ?? null,
+        depot_lon: depotLonNum ?? null,
         use_time_windows: useTimeWindows,
         use_unload_time: useUnloadTime,
       }
@@ -108,8 +188,41 @@ export function RoutePage() {
         <p className="text-muted-foreground">Настройка параметров и запуск оптимизации</p>
       </div>
 
+      {/* Depot address */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Warehouse className="w-4 h-4 text-primary" />
+            Адрес склада (депо)
+          </CardTitle>
+          <CardDescription>Откуда начинаются и куда возвращаются все машины. Сохраняется автоматически.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex gap-2 items-end flex-wrap">
+            <div className="flex-1 min-w-[260px] space-y-1.5">
+              <Label className="text-xs">Адрес</Label>
+              <Input
+                value={depotAddress}
+                onChange={(e) => setDepotAddress(e.target.value)}
+                placeholder="Москва, ул. Складская 1 (или оставьте пустым для центра Москвы)"
+                onKeyDown={(e) => e.key === "Enter" && handleGeocodeDepot()}
+              />
+            </div>
+            <Button variant="outline" onClick={handleGeocodeDepot} disabled={depotGeocoding} className="shrink-0">
+              {depotGeocoding ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <MapPin className="w-4 h-4 mr-2" />}
+              Геокодировать
+            </Button>
+            {depotLat && depotLon && (
+              <div className="text-xs text-muted-foreground font-mono bg-muted px-2 py-1.5 rounded border">
+                {parseFloat(depotLat).toFixed(4)}, {parseFloat(depotLon).toFixed(4)}
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-        
+
         {/* Left Panel: Stores */}
         <Card className="lg:col-span-2 flex flex-col h-[calc(100vh-200px)]">
           <CardHeader className="pb-4 shrink-0">
@@ -120,9 +233,9 @@ export function RoutePage() {
             <CardDescription>Выберите точки для доставки</CardDescription>
             <div className="relative mt-2">
               <Search className="w-4 h-4 absolute left-2.5 top-2.5 text-muted-foreground" />
-              <Input 
-                placeholder="Поиск..." 
-                className="pl-8" 
+              <Input
+                placeholder="Поиск..."
+                className="pl-8"
                 value={search}
                 onChange={e => setSearch(e.target.value)}
               />
@@ -139,14 +252,21 @@ export function RoutePage() {
               ) : (
                 <div className="space-y-2">
                   {filteredStores.map(store => (
-                    <label key={store.id} className="flex items-start gap-3 p-3 rounded-lg border hover:bg-muted/50 cursor-pointer transition-colors">
-                      <Checkbox 
-                        checked={selectedStores.has(store.id)} 
+                    <label key={store.id} className={`flex items-start gap-3 p-3 rounded-lg border hover:bg-muted/50 cursor-pointer transition-colors ${store.geocode_status === 'not_found' ? 'border-destructive/40 bg-destructive/5' : ''}`}>
+                      <Checkbox
+                        checked={selectedStores.has(store.id)}
                         onCheckedChange={() => handleToggleStore(store.id)}
                         className="mt-1"
                       />
                       <div className="flex-1 space-y-1">
-                        <p className="font-medium text-sm leading-none">{store.name}</p>
+                        <p className="font-medium text-sm leading-none flex items-center gap-1.5">
+                          {store.name}
+                          {store.geocode_status === 'not_found' && (
+                            <span title="Координаты не найдены — точка будет пропущена">
+                              <AlertCircle className="w-3.5 h-3.5 text-destructive shrink-0" />
+                            </span>
+                          )}
+                        </p>
                         <p className="text-xs text-muted-foreground flex items-center gap-1">
                           <MapPin className="w-3 h-3" />
                           {store.address}
@@ -174,14 +294,20 @@ export function RoutePage() {
                 <CardTitle>Транспорт</CardTitle>
                 <CardDescription>Укажите автомобили для распределения</CardDescription>
               </div>
-              <Button variant="outline" size="sm" onClick={handleAddVehicle}>
-                <Plus className="w-4 h-4 mr-2" /> Добавить
-              </Button>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={handleSaveFleet} title="Сохранить текущий автопарк как шаблон">
+                  <Save className="w-4 h-4 mr-2" />
+                  Сохранить шаблон
+                </Button>
+                <Button variant="outline" size="sm" onClick={handleAddVehicle}>
+                  <Plus className="w-4 h-4 mr-2" /> Добавить
+                </Button>
+              </div>
             </CardHeader>
             <CardContent className="flex-1 overflow-hidden p-0">
               <ScrollArea className="h-full px-6 pb-4">
                 <div className="space-y-3 pt-2">
-                  {vehicles.map((vehicle, i) => (
+                  {vehicles.map((vehicle) => (
                     <div key={vehicle.id} className="flex items-center gap-3 p-3 rounded-lg border bg-card relative group">
                       <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center text-primary shrink-0">
                         <Truck className="w-4 h-4" />
@@ -215,16 +341,27 @@ export function RoutePage() {
                           />
                         </div>
                       </div>
-                      {vehicles.length > 1 && (
-                        <Button 
-                          variant="ghost" 
-                          size="icon" 
-                          className="w-8 h-8 text-muted-foreground hover:text-destructive shrink-0"
-                          onClick={() => handleRemoveVehicle(vehicle.id)}
+                      <div className="flex gap-1 shrink-0">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="w-8 h-8 text-muted-foreground hover:text-primary"
+                          title="Дублировать"
+                          onClick={() => handleDuplicateVehicle(vehicle.id)}
                         >
-                          <X className="w-4 h-4" />
+                          <Copy className="w-4 h-4" />
                         </Button>
-                      )}
+                        {vehicles.length > 1 && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="w-8 h-8 text-muted-foreground hover:text-destructive"
+                            onClick={() => handleRemoveVehicle(vehicle.id)}
+                          >
+                            <X className="w-4 h-4" />
+                          </Button>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -252,9 +389,9 @@ export function RoutePage() {
                 <Switch checked={useUnloadTime} onCheckedChange={setUseUnloadTime} />
               </div>
 
-              <Button 
-                className="w-full h-14 text-lg shadow-lg shadow-primary/20" 
-                size="lg" 
+              <Button
+                className="w-full h-14 text-lg shadow-lg shadow-primary/20"
+                size="lg"
                 onClick={handleBuild}
                 disabled={buildRoute.isPending}
               >
@@ -278,4 +415,3 @@ export function RoutePage() {
     </div>
   );
 }
-

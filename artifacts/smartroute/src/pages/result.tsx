@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check } from "lucide-react";
-import { MapContainer, TileLayer, Polyline, Marker, Popup } from "react-leaflet";
+import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap } from "react-leaflet";
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import { useGetRouteSession } from "@workspace/api-client-react";
@@ -22,7 +22,24 @@ L.Icon.Default.mergeOptions({
 
 import type { RouteResult } from "@workspace/api-client-react";
 
-const COLORS = ["#0ea5e9", "#f43f5e", "#8b5cf6", "#10b981", "#f59e0b"];
+const COLORS = ["#0ea5e9", "#f43f5e", "#8b5cf6", "#10b981", "#f59e0b", "#6366f1", "#ec4899", "#14b8a6", "#f97316", "#84cc16"];
+
+// Auto-fits map to all route points
+function FitBoundsToRoutes({ routes }: { routes: RouteResult["routes"] }) {
+  const map = useMap();
+  useEffect(() => {
+    const pts: [number, number][] = [];
+    routes.forEach(route =>
+      route.stores.forEach(stop => {
+        if (stop.lat && stop.lon) pts.push([stop.lat, stop.lon]);
+      })
+    );
+    if (pts.length > 0) {
+      map.fitBounds(pts, { padding: [40, 40], maxZoom: 14 });
+    }
+  }, [map, routes]);
+  return null;
+}
 
 export function ResultPage() {
   const [, setLocation] = useLocation();
@@ -121,7 +138,7 @@ export function ResultPage() {
 
         {/* Stop list */}
         <div className="flex-1 overflow-y-auto divide-y">
-          {activeRoute?.stores.map((stop, idx) => (
+          {activeRoute?.stores.map((stop) => (
             <div key={stop.store_id} className="px-4 py-4 flex gap-4 items-start">
               <div
                 className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0 mt-0.5"
@@ -163,21 +180,7 @@ export function ResultPage() {
   }
 
   // ── Desktop view ─────────────────────────────────────────────────────────
-  let allLats = 0;
-  let allLons = 0;
-  let pointCount = 0;
-  result.routes.forEach(route => {
-    route.stores.forEach(stop => {
-      if (stop.lat && stop.lon) {
-        allLats += stop.lat;
-        allLons += stop.lon;
-        pointCount++;
-      }
-    });
-  });
-  const center: [number, number] = pointCount > 0
-    ? [allLats / pointCount, allLons / pointCount]
-    : [55.7558, 37.6173];
+  const center: [number, number] = [55.7558, 37.6173];
 
   return (
     <div className="space-y-6 pb-20">
@@ -229,13 +232,15 @@ export function ResultPage() {
         </Card>
       </div>
 
+      {/* Map + Legend */}
       <Card className="overflow-hidden border-border print:hidden">
-        <div className="h-[400px] w-full relative z-0">
+        <div className="h-[440px] w-full relative z-0">
           <MapContainer center={center} zoom={11} style={{ height: '100%', width: '100%' }}>
             <TileLayer
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
               url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
             />
+            <FitBoundsToRoutes routes={result.routes} />
             {result.routes.map((route, i) => {
               const color = COLORS[i % COLORS.length];
               const positions = route.stores
@@ -263,6 +268,25 @@ export function ResultPage() {
               );
             })}
           </MapContainer>
+
+          {/* Color Legend overlay */}
+          {result.routes.length > 1 && (
+            <div className="absolute bottom-3 left-3 z-[1000] bg-background/90 backdrop-blur-sm border rounded-lg px-3 py-2 shadow-md">
+              <p className="text-xs font-semibold text-muted-foreground mb-1.5 uppercase tracking-wide">Легенда</p>
+              <div className="space-y-1">
+                {result.routes.map((route, i) => (
+                  <div key={route.vehicle_name} className="flex items-center gap-2 text-xs">
+                    <span
+                      className="w-4 h-2 rounded-full shrink-0"
+                      style={{ backgroundColor: COLORS[i % COLORS.length] }}
+                    />
+                    <span className="font-medium truncate max-w-[140px]">{route.vehicle_name}</span>
+                    <span className="text-muted-foreground ml-auto pl-2">{Math.round(route.total_km)} км</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </Card>
 
