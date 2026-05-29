@@ -215,7 +215,65 @@ export interface TopStore {
   visit_count: number;
 }
 
+export interface RouteSessionItem {
+  id: number;
+  date: string;
+  num_vehicles: number;
+  total_km: number;
+  saved_km: number;
+  saved_rub: number;
+  num_points: number;
+  /** @nullable */
+  created_at?: string | null;
+}
+
+export interface RouteSessionList {
+  total: number;
+  page: number;
+  page_size: number;
+  items: RouteSessionItem[];
+}
+
+export interface VehicleLoadItem {
+  date: string;
+  avg_points_per_vehicle: number;
+  total_points: number;
+  total_vehicles: number;
+}
+
 export type ImportStoresBody = {
   file: Blob;
+};
+
+export type ListRouteSessionsParams = {
+page?: number;
+page_size?: number;
+};
+
+export type GetAnalyticsDailyParams = {
+/**
+ * Start date YYYY-MM-DD (inclusive)
+ */
+date_from?: string;
+/**
+ * End date YYYY-MM-DD (inclusive)
+ */
+date_to?: string;
+};
+
+export type GetAnalyticsMonthlyParams = {
+/**
+ * Start date YYYY-MM-DD (inclusive)
+ */
+date_from?: string;
+/**
+ * End date YYYY-MM-DD (inclusive)
+ */
+date_to?: string;
+};
+
+export type GetAnalyticsVehicleLoadParams = {
+date_from?: string;
+date_to?: string;
 };
 

@@ -8,14 +8,20 @@
 
 export * from './analyticsSummary';
 export * from './dailyStat';
+export * from './getAnalyticsDailyParams';
+export * from './getAnalyticsMonthlyParams';
+export * from './getAnalyticsVehicleLoadParams';
 export * from './healthStatus';
 export * from './importResult';
 export * from './importStoresBody';
+export * from './listRouteSessionsParams';
 export * from './monthlyStat';
 export * from './routeRequest';
 export * from './routeResult';
 export * from './routeResultGeocoderUsed';
 export * from './routeResultMatrixSource';
+export * from './routeSessionItem';
+export * from './routeSessionList';
 export * from './routeStop';
 export * from './savings';
 export * from './store';
@@ -24,4 +30,5 @@ export * from './storeInput';
 export * from './storeUpdate';
 export * from './topStore';
 export * from './vehicleInput';
+export * from './vehicleLoadItem';
 export * from './vehicleRoute';

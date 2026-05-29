@@ -22,16 +22,22 @@ import type {
 import type {
   AnalyticsSummary,
   DailyStat,
+  GetAnalyticsDailyParams,
+  GetAnalyticsMonthlyParams,
+  GetAnalyticsVehicleLoadParams,
   HealthStatus,
   ImportResult,
   ImportStoresBody,
+  ListRouteSessionsParams,
   MonthlyStat,
   RouteRequest,
   RouteResult,
+  RouteSessionList,
   Store,
   StoreInput,
   StoreUpdate,
-  TopStore
+  TopStore,
+  VehicleLoadItem
 } from './api.schemas';
 
 import { customFetch } from '../custom-fetch';
@@ -782,6 +788,90 @@ export const useBuildRoute = <TError = ErrorType<unknown>,
       return useMutation(getBuildRouteMutationOptions(options));
     }
 
+export const getListRouteSessionsUrl = (params?: ListRouteSessionsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/route/sessions?${stringifiedParams}` : `/api/route/sessions`
+}
+
+/**
+ * @summary List route sessions (paginated)
+ */
+export const listRouteSessions = async (params?: ListRouteSessionsParams, options?: RequestInit): Promise<RouteSessionList> => {
+
+  return customFetch<RouteSessionList>(getListRouteSessionsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListRouteSessionsQueryKey = (params?: ListRouteSessionsParams,) => {
+    return [
+    `/api/route/sessions`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListRouteSessionsQueryOptions = <TData = Awaited<ReturnType<typeof listRouteSessions>>, TError = ErrorType<unknown>>(params?: ListRouteSessionsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listRouteSessions>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListRouteSessionsQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listRouteSessions>>> = ({ signal }) => listRouteSessions(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listRouteSessions>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListRouteSessionsQueryResult = NonNullable<Awaited<ReturnType<typeof listRouteSessions>>>
+export type ListRouteSessionsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List route sessions (paginated)
+ */
+
+export function useListRouteSessions<TData = Awaited<ReturnType<typeof listRouteSessions>>, TError = ErrorType<unknown>>(
+ params?: ListRouteSessionsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listRouteSessions>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListRouteSessionsQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+
+
 export const getGetRouteSessionUrl = (id: number,) => {
 
 
@@ -936,20 +1026,27 @@ export function useGetAnalyticsSummary<TData = Awaited<ReturnType<typeof getAnal
 
 
 
-export const getGetAnalyticsDailyUrl = () => {
+export const getGetAnalyticsDailyUrl = (params?: GetAnalyticsDailyParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/analytics/daily`
+  return stringifiedParams.length > 0 ? `/api/analytics/daily?${stringifiedParams}` : `/api/analytics/daily`
 }
 
 /**
- * @summary Daily analytics (last 30 days)
+ * @summary Daily analytics (default last 30 days, or custom range)
  */
-export const getAnalyticsDaily = async ( options?: RequestInit): Promise<DailyStat[]> => {
+export const getAnalyticsDaily = async (params?: GetAnalyticsDailyParams, options?: RequestInit): Promise<DailyStat[]> => {
 
-  return customFetch<DailyStat[]>(getGetAnalyticsDailyUrl(),
+  return customFetch<DailyStat[]>(getGetAnalyticsDailyUrl(params),
   {
     ...options,
     method: 'GET'
@@ -962,23 +1059,23 @@ export const getAnalyticsDaily = async ( options?: RequestInit): Promise<DailySt
 
 
 
-export const getGetAnalyticsDailyQueryKey = () => {
+export const getGetAnalyticsDailyQueryKey = (params?: GetAnalyticsDailyParams,) => {
     return [
-    `/api/analytics/daily`
+    `/api/analytics/daily`, ...(params ? [params] : [])
     ] as const;
     }
 
 
-export const getGetAnalyticsDailyQueryOptions = <TData = Awaited<ReturnType<typeof getAnalyticsDaily>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAnalyticsDaily>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+export const getGetAnalyticsDailyQueryOptions = <TData = Awaited<ReturnType<typeof getAnalyticsDaily>>, TError = ErrorType<unknown>>(params?: GetAnalyticsDailyParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAnalyticsDaily>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 ) => {
 
 const {query: queryOptions, request: requestOptions} = options ?? {};
 
-  const queryKey =  queryOptions?.queryKey ?? getGetAnalyticsDailyQueryKey();
+  const queryKey =  queryOptions?.queryKey ?? getGetAnalyticsDailyQueryKey(params);
 
 
 
-    const queryFn: QueryFunction<Awaited<ReturnType<typeof getAnalyticsDaily>>> = ({ signal }) => getAnalyticsDaily({ signal, ...requestOptions });
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getAnalyticsDaily>>> = ({ signal }) => getAnalyticsDaily(params, { signal, ...requestOptions });
 
 
 
@@ -992,15 +1089,15 @@ export type GetAnalyticsDailyQueryError = ErrorType<unknown>
 
 
 /**
- * @summary Daily analytics (last 30 days)
+ * @summary Daily analytics (default last 30 days, or custom range)
  */
 
 export function useGetAnalyticsDaily<TData = Awaited<ReturnType<typeof getAnalyticsDaily>>, TError = ErrorType<unknown>>(
-  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAnalyticsDaily>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+ params?: GetAnalyticsDailyParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAnalyticsDaily>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
-  const queryOptions = getGetAnalyticsDailyQueryOptions(options)
+  const queryOptions = getGetAnalyticsDailyQueryOptions(params,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 
@@ -1013,20 +1110,27 @@ export function useGetAnalyticsDaily<TData = Awaited<ReturnType<typeof getAnalyt
 
 
 
-export const getGetAnalyticsMonthlyUrl = () => {
+export const getGetAnalyticsMonthlyUrl = (params?: GetAnalyticsMonthlyParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/analytics/monthly`
+  return stringifiedParams.length > 0 ? `/api/analytics/monthly?${stringifiedParams}` : `/api/analytics/monthly`
 }
 
 /**
- * @summary Monthly analytics (last 12 months)
+ * @summary Monthly analytics (default last 12 months, or custom range)
  */
-export const getAnalyticsMonthly = async ( options?: RequestInit): Promise<MonthlyStat[]> => {
+export const getAnalyticsMonthly = async (params?: GetAnalyticsMonthlyParams, options?: RequestInit): Promise<MonthlyStat[]> => {
 
-  return customFetch<MonthlyStat[]>(getGetAnalyticsMonthlyUrl(),
+  return customFetch<MonthlyStat[]>(getGetAnalyticsMonthlyUrl(params),
   {
     ...options,
     method: 'GET'
@@ -1039,23 +1143,23 @@ export const getAnalyticsMonthly = async ( options?: RequestInit): Promise<Month
 
 
 
-export const getGetAnalyticsMonthlyQueryKey = () => {
+export const getGetAnalyticsMonthlyQueryKey = (params?: GetAnalyticsMonthlyParams,) => {
     return [
-    `/api/analytics/monthly`
+    `/api/analytics/monthly`, ...(params ? [params] : [])
     ] as const;
     }
 
 
-export const getGetAnalyticsMonthlyQueryOptions = <TData = Awaited<ReturnType<typeof getAnalyticsMonthly>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAnalyticsMonthly>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+export const getGetAnalyticsMonthlyQueryOptions = <TData = Awaited<ReturnType<typeof getAnalyticsMonthly>>, TError = ErrorType<unknown>>(params?: GetAnalyticsMonthlyParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAnalyticsMonthly>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 ) => {
 
 const {query: queryOptions, request: requestOptions} = options ?? {};
 
-  const queryKey =  queryOptions?.queryKey ?? getGetAnalyticsMonthlyQueryKey();
+  const queryKey =  queryOptions?.queryKey ?? getGetAnalyticsMonthlyQueryKey(params);
 
 
 
-    const queryFn: QueryFunction<Awaited<ReturnType<typeof getAnalyticsMonthly>>> = ({ signal }) => getAnalyticsMonthly({ signal, ...requestOptions });
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getAnalyticsMonthly>>> = ({ signal }) => getAnalyticsMonthly(params, { signal, ...requestOptions });
 
 
 
@@ -1069,15 +1173,99 @@ export type GetAnalyticsMonthlyQueryError = ErrorType<unknown>
 
 
 /**
- * @summary Monthly analytics (last 12 months)
+ * @summary Monthly analytics (default last 12 months, or custom range)
  */
 
 export function useGetAnalyticsMonthly<TData = Awaited<ReturnType<typeof getAnalyticsMonthly>>, TError = ErrorType<unknown>>(
-  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAnalyticsMonthly>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+ params?: GetAnalyticsMonthlyParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAnalyticsMonthly>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
-  const queryOptions = getGetAnalyticsMonthlyQueryOptions(options)
+  const queryOptions = getGetAnalyticsMonthlyQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+
+
+export const getGetAnalyticsVehicleLoadUrl = (params?: GetAnalyticsVehicleLoadParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/analytics/vehicle-load?${stringifiedParams}` : `/api/analytics/vehicle-load`
+}
+
+/**
+ * @summary Average points per vehicle per day
+ */
+export const getAnalyticsVehicleLoad = async (params?: GetAnalyticsVehicleLoadParams, options?: RequestInit): Promise<VehicleLoadItem[]> => {
+
+  return customFetch<VehicleLoadItem[]>(getGetAnalyticsVehicleLoadUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetAnalyticsVehicleLoadQueryKey = (params?: GetAnalyticsVehicleLoadParams,) => {
+    return [
+    `/api/analytics/vehicle-load`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetAnalyticsVehicleLoadQueryOptions = <TData = Awaited<ReturnType<typeof getAnalyticsVehicleLoad>>, TError = ErrorType<unknown>>(params?: GetAnalyticsVehicleLoadParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAnalyticsVehicleLoad>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetAnalyticsVehicleLoadQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getAnalyticsVehicleLoad>>> = ({ signal }) => getAnalyticsVehicleLoad(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getAnalyticsVehicleLoad>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetAnalyticsVehicleLoadQueryResult = NonNullable<Awaited<ReturnType<typeof getAnalyticsVehicleLoad>>>
+export type GetAnalyticsVehicleLoadQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Average points per vehicle per day
+ */
+
+export function useGetAnalyticsVehicleLoad<TData = Awaited<ReturnType<typeof getAnalyticsVehicleLoad>>, TError = ErrorType<unknown>>(
+ params?: GetAnalyticsVehicleLoadParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAnalyticsVehicleLoad>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetAnalyticsVehicleLoadQueryOptions(params,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

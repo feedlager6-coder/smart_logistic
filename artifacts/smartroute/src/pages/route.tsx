@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useListStores, useBuildRoute } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -8,7 +8,17 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Search, Loader2, MapPin, Truck, Route as RouteIcon, Plus, X, Copy, Save, AlertCircle, Warehouse, ExternalLink, Link } from "lucide-react";
+import { Search, Loader2, MapPin, Truck, Route as RouteIcon, Plus, X, Copy, Save, AlertCircle, Warehouse, ExternalLink, Link, Filter } from "lucide-react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useLocation } from "wouter";
 
@@ -48,7 +58,9 @@ export function RoutePage() {
   const [, setLocation] = useLocation();
 
   const [search, setSearch] = useState("");
+  const [cityFilter, setCityFilter] = useState("all");
   const [selectedStores, setSelectedStores] = useState<Set<number>>(new Set());
+  const [showNotFoundConfirm, setShowNotFoundConfirm] = useState(false);
 
   // Depot state — persisted in localStorage
   const savedDepot = loadDepot() as { address: string; lat: string; lon: string; yandexUrl?: string };
@@ -68,10 +80,24 @@ export function RoutePage() {
     localStorage.setItem(DEPOT_KEY, JSON.stringify({ address: depotAddress, yandexUrl: depotYandexUrl, lat: depotLat, lon: depotLon }));
   }, [depotAddress, depotYandexUrl, depotLat, depotLon]);
 
-  const filteredStores = stores.filter(s =>
-    s.name.toLowerCase().includes(search.toLowerCase()) ||
-    s.address.toLowerCase().includes(search.toLowerCase())
-  );
+  // Unique cities extracted from store addresses (first token before comma)
+  const cities = useMemo(() => {
+    const citySet = new Set<string>();
+    stores.forEach(s => {
+      if (s.address) {
+        const city = s.address.split(",")[0].trim();
+        if (city) citySet.add(city);
+      }
+    });
+    return Array.from(citySet).sort();
+  }, [stores]);
+
+  const filteredStores = stores.filter(s => {
+    const q = search.toLowerCase();
+    const matchesSearch = s.name.toLowerCase().includes(q) || s.address.toLowerCase().includes(q);
+    const matchesCity = cityFilter === "all" || (s.address ?? "").split(",")[0].trim() === cityFilter;
+    return matchesSearch && matchesCity;
+  });
 
   const handleToggleStore = (id: number) => {
     const next = new Set(selectedStores);
@@ -149,19 +175,9 @@ export function RoutePage() {
     ? `https://yandex.ru/maps/?pt=${depotLon},${depotLat}&z=16&l=map`
     : null;
 
-  const handleBuild = () => {
-    if (selectedStores.size === 0) {
-      toast({ title: "Ошибка", description: "Выберите хотя бы один магазин", variant: "destructive" });
-      return;
-    }
-    if (vehicles.length === 0) {
-      toast({ title: "Ошибка", description: "Добавьте хотя бы один автомобиль", variant: "destructive" });
-      return;
-    }
-
+  const executeBuild = () => {
     const depotLatNum = depotLat ? parseFloat(depotLat) : undefined;
     const depotLonNum = depotLon ? parseFloat(depotLon) : undefined;
-
     buildRoute.mutate({
       data: {
         store_ids: Array.from(selectedStores),
@@ -188,6 +204,27 @@ export function RoutePage() {
         toast({ title: "Ошибка", description: "Не удалось построить маршрут", variant: "destructive" });
       }
     });
+  };
+
+  const handleBuild = () => {
+    if (selectedStores.size === 0) {
+      toast({ title: "Ошибка", description: "Выберите хотя бы один магазин", variant: "destructive" });
+      return;
+    }
+    if (vehicles.length === 0) {
+      toast({ title: "Ошибка", description: "Добавьте хотя бы один автомобиль", variant: "destructive" });
+      return;
+    }
+    // Warn if any selected stores have no coordinates
+    const notFoundCount = Array.from(selectedStores).filter(id => {
+      const s = stores.find(st => st.id === id);
+      return s?.geocode_status === "not_found";
+    }).length;
+    if (notFoundCount > 0) {
+      setShowNotFoundConfirm(true);
+      return;
+    }
+    executeBuild();
   };
 
   return (
@@ -273,7 +310,30 @@ export function RoutePage() {
                 onChange={e => setSearch(e.target.value)}
               />
             </div>
-            <div className="flex gap-2 mt-4">
+            {/* City filter — only shown when stores span multiple cities */}
+            {cities.length > 1 && (
+              <div className="flex gap-1 flex-wrap mt-2">
+                <span className="flex items-center gap-1 text-xs text-muted-foreground mr-1">
+                  <Filter className="w-3 h-3" /> Город:
+                </span>
+                <button
+                  onClick={() => setCityFilter("all")}
+                  className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${cityFilter === "all" ? "bg-primary text-primary-foreground border-primary" : "bg-background border-border hover:bg-muted"}`}
+                >
+                  Все
+                </button>
+                {cities.map(city => (
+                  <button
+                    key={city}
+                    onClick={() => setCityFilter(city)}
+                    className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${cityFilter === city ? "bg-primary text-primary-foreground border-primary" : "bg-background border-border hover:bg-muted"}`}
+                  >
+                    {city}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="flex gap-2 mt-2">
               <Button variant="outline" size="sm" onClick={handleSelectAll} className="flex-1">Выбрать все</Button>
               <Button variant="outline" size="sm" onClick={handleDeselectAll} className="flex-1">Снять все</Button>
             </div>
@@ -445,6 +505,38 @@ export function RoutePage() {
         </div>
 
       </div>
+
+      {/* Confirmation dialog: not_found stores will be skipped */}
+      <AlertDialog open={showNotFoundConfirm} onOpenChange={setShowNotFoundConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertCircle className="w-5 h-5 text-destructive" />
+              Некоторые точки без координат
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {(() => {
+                const count = Array.from(selectedStores).filter(id => {
+                  const s = stores.find(st => st.id === id);
+                  return s?.geocode_status === "not_found";
+                }).length;
+                return `${count} ${count === 1 ? "точка не имеет" : count < 5 ? "точки не имеют" : "точек не имеют"} координат и будут пропущены при построении маршрута. Остальные точки будут обработаны в штатном режиме.`;
+              })()}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Отмена</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setShowNotFoundConfirm(false);
+                executeBuild();
+              }}
+            >
+              Всё равно построить
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

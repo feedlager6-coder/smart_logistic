@@ -1419,6 +1419,46 @@ def get_route_session(id: int):
     return json.loads(row["result_json"])
 
 
+@app.get("/api/route/sessions")
+def list_route_sessions(page: int = 1, page_size: int = 20):
+    """Список сессий маршрутов с пагинацией."""
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute("SELECT COUNT(*) as total FROM route_sessions")
+        total = int(cur.fetchone()["total"])
+        offset = (page - 1) * page_size
+        cur.execute(
+            """SELECT id, date, num_vehicles, total_km, saved_km, saved_rub, num_points, created_at
+               FROM route_sessions
+               ORDER BY created_at DESC
+               LIMIT %s OFFSET %s""",
+            (page_size, offset),
+        )
+        rows = cur.fetchall()
+        return {
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "items": [
+                {
+                    "id": r["id"],
+                    "date": r["date"],
+                    "num_vehicles": r["num_vehicles"] or 0,
+                    "total_km": round(float(r["total_km"] or 0), 1),
+                    "saved_km": round(float(r["saved_km"] or 0), 1),
+                    "saved_rub": int(r["saved_rub"] or 0),
+                    "num_points": r["num_points"] or 0,
+                    "created_at": str(r["created_at"]) if r["created_at"] else None,
+                }
+                for r in rows
+            ],
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+
 @app.get("/api/analytics/summary")
 def get_analytics_summary():
     conn = get_db()
@@ -1445,10 +1485,21 @@ def get_analytics_summary():
 
 
 @app.get("/api/analytics/daily")
-def get_analytics_daily():
+def get_analytics_daily(date_from: Optional[str] = None, date_to: Optional[str] = None):
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("""
+    params: list = []
+    conditions: list = []
+    if date_from:
+        conditions.append("date >= %s")
+        params.append(date_from)
+    else:
+        conditions.append("date >= (CURRENT_DATE - INTERVAL '30 days')::TEXT")
+    if date_to:
+        conditions.append("date <= %s")
+        params.append(date_to)
+    where = "WHERE " + " AND ".join(conditions)
+    cur.execute(f"""
         SELECT
             date,
             COUNT(*) as routes,
@@ -1456,10 +1507,10 @@ def get_analytics_daily():
             COALESCE(SUM(saved_km), 0) as saved_km,
             COALESCE(SUM(saved_rub), 0) as saved_rub
         FROM route_sessions
-        WHERE date >= (CURRENT_DATE - INTERVAL '30 days')::TEXT
+        {where}
         GROUP BY date
         ORDER BY date
-    """)
+    """, params)
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -1476,20 +1527,31 @@ def get_analytics_daily():
 
 
 @app.get("/api/analytics/monthly")
-def get_analytics_monthly():
+def get_analytics_monthly(date_from: Optional[str] = None, date_to: Optional[str] = None):
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("""
+    params: list = []
+    conditions: list = []
+    if date_from:
+        conditions.append("date >= %s")
+        params.append(date_from)
+    else:
+        conditions.append("created_at >= NOW() - INTERVAL '12 months'")
+    if date_to:
+        conditions.append("date <= %s")
+        params.append(date_to)
+    where = "WHERE " + " AND ".join(conditions)
+    cur.execute(f"""
         SELECT
             TO_CHAR(created_at, 'YYYY-MM') as month,
             COUNT(*) as routes,
             COALESCE(SUM(total_km), 0) as total_km,
             COALESCE(SUM(saved_rub), 0) as saved_rub
         FROM route_sessions
-        WHERE created_at >= NOW() - INTERVAL '12 months'
+        {where}
         GROUP BY month
         ORDER BY month
-    """)
+    """, params)
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -1499,6 +1561,47 @@ def get_analytics_monthly():
             "routes": r["routes"],
             "total_km": round(float(r["total_km"]), 1),
             "saved_rub": int(r["saved_rub"]),
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/analytics/vehicle-load")
+def get_analytics_vehicle_load(date_from: Optional[str] = None, date_to: Optional[str] = None):
+    """Среднее количество точек на машину по дням."""
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    params: list = []
+    conditions = ["num_vehicles > 0", "num_points > 0"]
+    if date_from:
+        conditions.append("date >= %s")
+        params.append(date_from)
+    else:
+        conditions.append("date >= (CURRENT_DATE - INTERVAL '30 days')::TEXT")
+    if date_to:
+        conditions.append("date <= %s")
+        params.append(date_to)
+    where = "WHERE " + " AND ".join(conditions)
+    cur.execute(f"""
+        SELECT
+            date,
+            ROUND(AVG(num_points::float / NULLIF(num_vehicles, 0))::numeric, 1) as avg_points_per_vehicle,
+            SUM(num_points) as total_points,
+            SUM(num_vehicles) as total_vehicles
+        FROM route_sessions
+        {where}
+        GROUP BY date
+        ORDER BY date
+    """, params)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [
+        {
+            "date": r["date"],
+            "avg_points_per_vehicle": float(r["avg_points_per_vehicle"] or 0),
+            "total_points": int(r["total_points"] or 0),
+            "total_vehicles": int(r["total_vehicles"] or 0),
         }
         for r in rows
     ]

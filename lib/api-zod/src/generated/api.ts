@@ -215,6 +215,34 @@ export const BuildRouteResponse = zod.object({
 
 
 /**
+ * @summary List route sessions (paginated)
+ */
+export const listRouteSessionsQueryPageDefault = 1;
+export const listRouteSessionsQueryPageSizeDefault = 20;
+
+export const ListRouteSessionsQueryParams = zod.object({
+  "page": zod.coerce.number().default(listRouteSessionsQueryPageDefault),
+  "page_size": zod.coerce.number().default(listRouteSessionsQueryPageSizeDefault)
+})
+
+export const ListRouteSessionsResponse = zod.object({
+  "total": zod.number(),
+  "page": zod.number(),
+  "page_size": zod.number(),
+  "items": zod.array(zod.object({
+  "id": zod.number(),
+  "date": zod.string(),
+  "num_vehicles": zod.number(),
+  "total_km": zod.number(),
+  "saved_km": zod.number(),
+  "saved_rub": zod.number(),
+  "num_points": zod.number(),
+  "created_at": zod.string().nullish()
+}))
+})
+
+
+/**
  * @summary Get a saved route session by ID
  */
 export const GetRouteSessionParams = zod.object({
@@ -265,8 +293,13 @@ export const GetAnalyticsSummaryResponse = zod.object({
 
 
 /**
- * @summary Daily analytics (last 30 days)
+ * @summary Daily analytics (default last 30 days, or custom range)
  */
+export const GetAnalyticsDailyQueryParams = zod.object({
+  "date_from": zod.coerce.string().optional(),
+  "date_to": zod.coerce.string().optional()
+})
+
 export const GetAnalyticsDailyResponseItem = zod.object({
   "date": zod.string(),
   "routes": zod.number(),
@@ -278,8 +311,13 @@ export const GetAnalyticsDailyResponse = zod.array(GetAnalyticsDailyResponseItem
 
 
 /**
- * @summary Monthly analytics (last 12 months)
+ * @summary Monthly analytics (default last 12 months, or custom range)
  */
+export const GetAnalyticsMonthlyQueryParams = zod.object({
+  "date_from": zod.coerce.string().optional(),
+  "date_to": zod.coerce.string().optional()
+})
+
 export const GetAnalyticsMonthlyResponseItem = zod.object({
   "month": zod.string(),
   "routes": zod.number(),
@@ -287,6 +325,23 @@ export const GetAnalyticsMonthlyResponseItem = zod.object({
   "saved_rub": zod.number()
 })
 export const GetAnalyticsMonthlyResponse = zod.array(GetAnalyticsMonthlyResponseItem)
+
+
+/**
+ * @summary Average points per vehicle per day
+ */
+export const GetAnalyticsVehicleLoadQueryParams = zod.object({
+  "date_from": zod.coerce.string().optional(),
+  "date_to": zod.coerce.string().optional()
+})
+
+export const GetAnalyticsVehicleLoadResponseItem = zod.object({
+  "date": zod.string(),
+  "avg_points_per_vehicle": zod.number(),
+  "total_points": zod.number(),
+  "total_vehicles": zod.number()
+})
+export const GetAnalyticsVehicleLoadResponse = zod.array(GetAnalyticsVehicleLoadResponseItem)
 
 
 /**

@@ -197,6 +197,30 @@ paths:
               schema:
                 $ref: "#/components/schemas/RouteResult"
 
+  /route/sessions:
+    get:
+      operationId: listRouteSessions
+      tags: [routes]
+      summary: List route sessions (paginated)
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: Paginated list of route sessions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteSessionList"
+
   /route/sessions/{id}:
     get:
       operationId: getRouteSession
@@ -235,7 +259,18 @@ paths:
     get:
       operationId: getAnalyticsDaily
       tags: [analytics]
-      summary: Daily analytics (last 30 days)
+      summary: Daily analytics (default last 30 days, or custom range)
+      parameters:
+        - name: date_from
+          in: query
+          schema:
+            type: string
+            description: "Start date YYYY-MM-DD (inclusive)"
+        - name: date_to
+          in: query
+          schema:
+            type: string
+            description: "End date YYYY-MM-DD (inclusive)"
       responses:
         "200":
           description: Daily stats
@@ -250,7 +285,18 @@ paths:
     get:
       operationId: getAnalyticsMonthly
       tags: [analytics]
-      summary: Monthly analytics (last 12 months)
+      summary: Monthly analytics (default last 12 months, or custom range)
+      parameters:
+        - name: date_from
+          in: query
+          schema:
+            type: string
+            description: "Start date YYYY-MM-DD (inclusive)"
+        - name: date_to
+          in: query
+          schema:
+            type: string
+            description: "End date YYYY-MM-DD (inclusive)"
       responses:
         "200":
           description: Monthly stats
@@ -260,6 +306,30 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/MonthlyStat"
+
+  /analytics/vehicle-load:
+    get:
+      operationId: getAnalyticsVehicleLoad
+      tags: [analytics]
+      summary: Average points per vehicle per day
+      parameters:
+        - name: date_from
+          in: query
+          schema:
+            type: string
+        - name: date_to
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Vehicle load data
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/VehicleLoadItem"
 
   /analytics/top-stores:
     get:
@@ -597,3 +667,67 @@ components:
         - store_id
         - store_name
         - visit_count
+
+    RouteSessionItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        date:
+          type: string
+        num_vehicles:
+          type: integer
+        total_km:
+          type: number
+        saved_km:
+          type: number
+        saved_rub:
+          type: integer
+        num_points:
+          type: integer
+        created_at:
+          type: ["string", "null"]
+      required:
+        - id
+        - date
+        - num_vehicles
+        - total_km
+        - saved_km
+        - saved_rub
+        - num_points
+
+    RouteSessionList:
+      type: object
+      properties:
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteSessionItem"
+      required:
+        - total
+        - page
+        - page_size
+        - items
+
+    VehicleLoadItem:
+      type: object
+      properties:
+        date:
+          type: string
+        avg_points_per_vehicle:
+          type: number
+        total_points:
+          type: integer
+        total_vehicles:
+          type: integer
+      required:
+        - date
+        - avg_points_per_vehicle
+        - total_points
+        - total_vehicles

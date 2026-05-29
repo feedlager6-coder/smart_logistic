@@ -11,7 +11,7 @@ import {
   SidebarHeader,
 } from "@/components/ui/sidebar";
 import { Link, useLocation } from "wouter";
-import { Home, Store, Map, BarChart3, Truck } from "lucide-react";
+import { Home, Store, Map, BarChart3, Truck, History } from "lucide-react";
 import React from "react";
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
@@ -49,6 +49,7 @@ function AppSidebar() {
     { title: "Магазины", url: "/stores", icon: Store },
     { title: "Новый маршрут", url: "/route", icon: Map },
     { title: "Аналитика", url: "/analytics", icon: BarChart3 },
+    { title: "История", url: "/history", icon: History },
   ];
 
   return (

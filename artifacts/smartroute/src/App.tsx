@@ -10,6 +10,7 @@ import { StoresPage } from "@/pages/stores";
 import { RoutePage } from "@/pages/route";
 import { ResultPage } from "@/pages/result";
 import { AnalyticsPage } from "@/pages/analytics";
+import { HistoryPage } from "@/pages/history";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -29,6 +30,7 @@ function Router() {
       <Route path="/result/:id" component={ResultPage} />
       <Route path="/result" component={ResultPage} />
       <Route path="/analytics" component={AnalyticsPage} />
+      <Route path="/history" component={HistoryPage} />
       <Route component={NotFound} />
     </Switch>
   );
