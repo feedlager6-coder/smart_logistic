@@ -84,7 +84,14 @@ OSRM_RATE_LIMIT_TTL = 30      # seconds to suppress OSRM calls after error/timeo
 
 # OR-Tools TSP time budget per cluster (seconds).
 # Increase for larger clusters on a dedicated server; lower for test environments.
-ORTOOLS_TIME_LIMIT_SECONDS: int = int(os.environ.get("ORTOOLS_TIME_LIMIT_SECONDS", "2"))
+ORTOOLS_TIME_LIMIT_SECONDS: float = float(os.environ.get("ORTOOLS_TIME_LIMIT_SECONDS", "2"))
+
+# Post-assignment centroid refinement for _cluster_by_sweep().
+# Number of nearest-centroid reassignment iterations (0 = sweep-only, no refinement).
+# Each iteration moves border-point stores to the geometrically nearest cluster centroid.
+CLUSTER_CENTROID_REFINEMENT_ROUNDS: int = int(
+    os.environ.get("CLUSTER_CENTROID_REFINEMENT_ROUNDS", "3")
+)
 
 _osrm_rate_limited_until: float = 0.0
 _osrm_call_successes: int = 0
@@ -504,7 +511,31 @@ def _cluster_by_sweep(store_indices: list, all_coords: list, num_vehicles: int,
                 merged.append(extra)
         chunks = merged
 
-    return [c for c in chunks if c]
+    # ── Post-assignment: nearest-centroid border-point refinement ──────────────
+    # After the initial equal-angle sweep, stores near sector boundaries may be
+    # geographically closer to a neighbouring cluster's centroid than their own.
+    # We iterate (up to CLUSTER_CENTROID_REFINEMENT_ROUNDS times) reassigning each
+    # store to its nearest cluster centroid, which reduces cross-boundary detours.
+    active = [c for c in chunks if c]
+    for _iter in range(CLUSTER_CENTROID_REFINEMENT_ROUNDS):
+        centroids = []
+        for cluster in active:
+            lats = [all_coords[n][0] for n in cluster]
+            lons = [all_coords[n][1] for n in cluster]
+            centroids.append((sum(lats) / len(lats), sum(lons) / len(lons)))
+
+        new_active = [[] for _ in range(len(active))]
+        for node in store_indices:
+            coord = all_coords[node]
+            best = min(range(len(centroids)),
+                       key=lambda i: haversine_meters(coord, centroids[i]))
+            new_active[best].append(node)
+
+        if new_active == active:
+            break  # converged
+        active = new_active
+
+    return [c for c in active if c]
 
 
 def _ortools_solve_group(depot_coord: tuple, group_node_indices: list,
