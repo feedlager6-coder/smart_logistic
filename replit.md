@@ -19,7 +19,7 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 - **API codegen**: Orval (OpenAPI → React Query hooks + Zod)
 - **Геокодинг**: Yandex Geocoder API (primary), Nominatim (fallback, 1 req/sec)
 - **VRP**: Google OR-Tools (equal-angle sweep sectors, TSP per sector) с fallback на greedy если не установлен
-- **Дистанции**: Haversine NxN матрица (гарантированный fallback, мгновенно); GraphHopper Matrix API per-cluster с in-memory кэшем и авто-калибровкой плана (Free план = 5 точек → авто-fallback)
+- **Дистанции**: Haversine NxN матрица (гарантированный fallback, мгновенно); GraphHopper Matrix API per-cluster с in-memory кэшем и авто-калибровкой плана (Free план = 5 точек → авто-fallback); **OSRM** (router.project-osrm.org, без API-ключа, реальные дороги OSM, до 100 точек/кластер)
 
 ## Where things live
 

@@ -1,3 +1,5 @@
 - [Vite proxy for API](vite-proxy.md) — Vite dev server MUST proxy `/api` to port 8080; without it browser gets HTML from Vite SPA fallback.
 - [Excel download pattern](excel-download.md) — Excel files must be returned as base64 JSON `{data, filename}`; StreamingResponse/binary breaks through Replit proxy.
 - [Depot geocoding](depot-geocoding.md) — Frontend must NEVER call Nominatim/Yandex directly (CORS); always use `/api/geocode` backend endpoint.
+- [OSRM lon-lat order](osrm-lon-lat.md) — OSRM Table API URL uses lon,lat order (opposite of Python lat,lon tuples); easy to reverse silently.
+- [OR-Tools float time limit](ortools-time-limit.md) — params.time_limit requires both .seconds (int) and .nanos (int) for sub-second limits; use ORTOOLS_TIME_LIMIT_SECONDS global (float) patched in tests to 0.5.

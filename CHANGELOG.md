@@ -1,5 +1,41 @@
 # CHANGELOG
 
+## [Unreleased] — 2026-05-31 (OSRM Integration + Stress Tests)
+
+### Новая функция `get_cluster_matrix_osrm(coords)`
+
+Добавлен второй слой в цепочку маршрутизации: **GH → OSRM → Haversine**.
+
+- OSRM использует реальные дороги OpenStreetMap (односторонние улицы, мосты, объезды)
+- Публичный сервер `router.project-osrm.org`: бесплатный, без API-ключа, до 100 точек
+- Конфигурируется через `OSRM_BASE_URL` (для self-hosted инсталляции) и `OSRM_MAX_LOCATIONS`
+- Координаты в OSRM URL передаются в порядке **lon,lat** (не lat,lon!)
+- Кэш: единый `_matrix_cache` с префиксом `("osrm",)` во избежание коллизий с GH
+- Rate-limit TTL: 30 сек при HTTP 429/503 или таймауте ≥ 14 сек
+- Счётчики: `_osrm_call_successes`, `_osrm_cache_hits`
+
+### Изменения в `solve_vrp()` Step 3
+
+До: GH → Haversine
+После: **GH → OSRM → Haversine** (приоритет по каждому кластеру независимо)
+
+Обновлены счётчики: `gh_clusters`, `osrm_clusters`, `hv_clusters` (был только `gh`/`hv`).
+Обновлён `matrix_source`: добавлено значение `"osrm"` и корректный `"mixed (gh=N, osrm=M, hv=K)"`.
+
+### Startup logging
+
+Теперь при запуске логируется полная цепочка:
+```
+Routing chain: GH[disabled (no API key)] → OSRM[https://router.project-osrm.org] → Haversine[always]
+```
+
+### Тест-скрипты
+
+- `scripts/test_vrp_stress.py` — 16 сценариев (20/50/100/200 точек × 2/4/6/10 машин)
+- `scripts/test_vrp_makhachkala.py` — 25 реальных адресов Махачкалы, сравнение OSRM vs Haversine
+
+---
+
 ## [Unreleased] — 2026-05-31 (GraphHopper Per-Cluster Matrices)
 
 ### Архитектура

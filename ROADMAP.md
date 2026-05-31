@@ -36,6 +36,16 @@
 - [x] Тест: 3 сценария, экономия 62–71% vs наивный baseline, все проверки PASS
 - [x] `scripts/test_vrp_scenarios.py` — тест VRP с тремя сценариями
 
+## ✅ Выполнено (OSRM Integration, 31.05.2026)
+
+- [x] `get_cluster_matrix_osrm()`: публичный сервер OSRM, без API-ключа, до 100 точек
+- [x] Цепочка GH → OSRM → Haversine в `solve_vrp()` Step 3
+- [x] `ORTOOLS_TIME_LIMIT_SECONDS`: конфигурируемый лимит OR-Tools (default 2s)
+- [x] `OSRM_BASE_URL`, `OSRM_MAX_LOCATIONS` env-vars для кастомного сервера
+- [x] Startup log: полная цепочка маршрутизации
+- [x] `scripts/test_vrp_stress.py` — 16 сценариев (20/50/100/200 × 2/4/6/10 машин)
+- [x] `scripts/test_vrp_makhachkala.py` — 25 реальных координат Махачкалы
+
 ## 🔜 Следующие шаги
 
 - [ ] Аутентификация пользователей (Replit Auth или Clerk)

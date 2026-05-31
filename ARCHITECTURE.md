@@ -118,10 +118,11 @@ smartroute/                         ← корень проекта
   → Плотный клин → больше точек; разреженный → меньше
   → Нет round-robin; нет SetGlobalSpanCostCoefficient
 
-Шаг 3: GraphHopper per-cluster + OR-Tools TSP (Этапы B + C)
-  → Для каждого кластера: get_cluster_matrix_gh(depot + cluster)
-  → Если GH успешен → sub_matrix = дорожные расстояния
-  → Если нет (free plan / 429 / timeout) → sub_matrix = Haversine
+Шаг 3: Дорожная матрица per-cluster + OR-Tools TSP (Этапы B + C)
+  → Приоритетная цепочка для каждого кластера:
+  →   1) GraphHopper (платный, точные данные ОСМ + пробки)
+  →   2) OSRM (бесплатный, реальные дороги OSM, без API-ключа, до 100 точек)
+  →   3) Haversine (прямая линия, всегда доступен, мгновенно)
   → OR-Tools TSP находит оптимальный порядок объезда внутри клина
 
 Шаг 4: Заполнение пустых машин
@@ -129,38 +130,44 @@ smartroute/                         ← корень проекта
   → Все машины всегда получают работу
 ```
 
-### GraphHopper per-cluster — `get_cluster_matrix_gh()`
+### Цепочка дорожных матриц (GH → OSRM → Haversine)
+
+Три слоя, проверяются по порядку для каждого кластера независимо:
+
+#### GraphHopper — `get_cluster_matrix_gh()`
 
 | Возможность | Описание |
 |---|---|
+| Требует | `GRAPHHOPPER_API_KEY` |
 | In-memory кэш | `_matrix_cache[(lat,lon)...]` — повторные вызовы = 0 API запросов |
 | Авто-калибровка | 400 "Too many points, allowed: N" → `_gh_plan_limit = N` автоматически |
 | Счётчики | `_gh_call_successes`, `_matrix_cache_hits`, `_matrix_cache_misses` |
-| Логирование | latency ms, размер матрицы, cache stats на каждый вызов |
-| Graceful fallback | Любая ошибка → None → вызывающий использует Haversine |
+| Graceful fallback | Любая ошибка → None → следующий слой (OSRM) |
 
-**При Free плане** (max 5 точек/запрос): система авто-детектирует лимит, все реальные
-кластеры (8–15+ точек) используют Haversine. Маршруты оптимальны географически.  
-**При платном плане**: установить `GRAPHHOPPER_CLUSTER_MAX=25` (или выше) в env — GH начнёт
-применяться per-cluster, OR-Tools получит реальные дорожные расстояния.
+#### OSRM — `get_cluster_matrix_osrm()`
 
----
+| Возможность | Описание |
+|---|---|
+| Требует | Ничего — публичный сервер без ключа |
+| Сервер по умолчанию | `router.project-osrm.org` (fair use, до 100 точек/запрос) |
+| Self-hosted | `OSRM_BASE_URL` env-var для собственного сервера |
+| Данные | OpenStreetMap — реальные дороги, односторонние улицы, мосты |
+| Кэш | Тот же `_matrix_cache` с префиксом `("osrm",)` |
+| Счётчики | `_osrm_call_successes`, `_osrm_cache_hits` |
+| Координаты | **lon, lat** порядок в URL (OSRM-специфика!) |
+| Graceful fallback | Любая ошибка/таймаут → None → Haversine |
 
-## Где GraphHopper
+#### Haversine — всегда доступен
 
-**GraphHopper** используется внутри `solve_vrp()` через `get_cluster_matrix_gh()` — по одному
-запросу на каждый географический кластер (Этап B). Матрица кэшируется на весь лайфтайм процесса.
-
-Функции: `get_cluster_matrix_gh()` и `get_matrix_from_graphhopper()` в `main.py`.
-
-**Без GH API ключа**: система работает полноценно на Haversine. Маршруты оптимальны географически,
-но не учитывают реальные дороги (односторонние улицы, мосты, объезды).
-
-**С Free планом GH**: см. выше — авто-fallback на Haversine для кластеров > 5 точек.
+Прямолинейное расстояние по формуле Haversine. Без API, без сети, мгновенно.
+Используется для кластеров, которые не вошли в GH и OSRM.
 
 **Переменные конфигурации**:
-- `GRAPHHOPPER_API_KEY` — ключ API
+- `GRAPHHOPPER_API_KEY` — ключ GH API
 - `GRAPHHOPPER_CLUSTER_MAX` — максимальный размер кластера для GH (default 25)
+- `OSRM_BASE_URL` — URL OSRM сервера (default: публичный router.project-osrm.org)
+- `OSRM_MAX_LOCATIONS` — лимит точек на кластер для OSRM (default 100)
+- `ORTOOLS_TIME_LIMIT_SECONDS` — лимит OR-Tools TSP per кластер (default 2, float)
 
 ---
 

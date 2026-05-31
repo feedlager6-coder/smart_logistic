@@ -1,3 +1,50 @@
+# SESSION_NOTES.md — Сессия 31.05.2026 (OSRM Integration + Stress Tests)
+
+## Задача
+
+Добавить OSRM как второй слой маршрутизации: GH → OSRM → Haversine.
+Написать stress-тесты (20/50/100 × 2/4/6/10 машин) и тест на реальных координатах Махачкалы.
+
+## Сделано
+
+### Backend (`artifacts/api-server/main.py`)
+
+1. **OSRM конфиг** (строки ~80–95):
+   - `OSRM_BASE_URL` — URL сервера (default: `https://router.project-osrm.org`)
+   - `OSRM_MAX_LOCATIONS` — лимит точек per кластер (default 100)
+   - `_osrm_rate_limited_until`, `_osrm_call_successes`, `_osrm_cache_hits`
+
+2. **`get_cluster_matrix_osrm(coords)`** — полная реализация:
+   - OSRM Table API: `GET /table/v1/driving/{lon,lat;...}?annotations=duration,distance`
+   - Внимание: OSRM принимает **lon,lat** (не lat,lon!)
+   - Кэш: `_matrix_cache[("osrm",) + tuple(coords)]` (не пересекается с GH)
+   - Rate-limit: 30с при 429/503 или таймауте ≥ 14с
+   - Graceful fallback: любая ошибка → return None
+
+3. **`solve_vrp()` Step 3** обновлён: GH → OSRM → Haversine per кластер
+   - Новый счётчик `osrm_clusters`
+   - `matrix_source` теперь включает `"osrm"` и `"mixed (osrm=N, hv=K)"`
+
+4. **`ORTOOLS_TIME_LIMIT_SECONDS`** — глобальная переменная (default 2, поддерживает float):
+   - `params.time_limit.seconds = int(_tl)` + `params.time_limit.nanos = int(...)`
+
+5. **Startup logging**: `Routing chain: GH[...] → OSRM[...] → Haversine[always]`
+
+### Тест-скрипты
+
+- `scripts/test_vrp_stress.py` — 12 сценариев (20/50/100 × 2/4/6/10), OR-Tools 0.5s в тесте
+- `scripts/test_vrp_makhachkala.py` — 25 реальных адресов Махачкалы
+
+### Результаты
+
+| Тест | Итог |
+|---|---|
+| `test_vrp_scenarios.py` (регрессия) | ✅ ALL PASS (63.3% / 68.8% / 54.3%) |
+| `test_vrp_makhachkala.py` | ✅ OSRM 4/4 кластеров, 61.5% savings |
+| `test_vrp_stress.py` (12 сцен.) | ✅ ALL PASS, 100% OSRM, 8.9s для 100s/10v |
+
+---
+
 # SESSION_NOTES.md — Сессия 28.05.2026 (Яндекс URL + упрощённая форма)
 
 ## Задача

@@ -74,6 +74,22 @@ _gh_call_successes: int = 0    # live API calls that returned a valid matrix
 # Starts at GRAPHHOPPER_CLUSTER_MAX; reduced if the API key plan allows fewer.
 _gh_plan_limit: int = GRAPHHOPPER_CLUSTER_MAX
 
+# ── OSRM Matrix API ────────────────────────────────────────────────────────────
+# OSRM (Open Source Routing Machine) uses real OpenStreetMap road data.
+# Public demo server: free, no API key, fair-use policy (≤ 100 locations/request).
+# Override OSRM_BASE_URL env-var to point at a self-hosted instance.
+OSRM_BASE_URL: str = os.environ.get("OSRM_BASE_URL", "https://router.project-osrm.org")
+OSRM_MAX_LOCATIONS: int = int(os.environ.get("OSRM_MAX_LOCATIONS", "100"))
+OSRM_RATE_LIMIT_TTL = 30      # seconds to suppress OSRM calls after error/timeout
+
+# OR-Tools TSP time budget per cluster (seconds).
+# Increase for larger clusters on a dedicated server; lower for test environments.
+ORTOOLS_TIME_LIMIT_SECONDS: int = int(os.environ.get("ORTOOLS_TIME_LIMIT_SECONDS", "2"))
+
+_osrm_rate_limited_until: float = 0.0
+_osrm_call_successes: int = 0
+_osrm_cache_hits: int = 0
+
 
 def get_matrix_from_graphhopper(coords: list) -> Optional[tuple]:
     """
@@ -294,6 +310,131 @@ def get_cluster_matrix_gh(coords: list) -> Optional[tuple]:
     return None
 
 
+def get_cluster_matrix_osrm(coords: list) -> Optional[tuple]:
+    """
+    Fetch a road distance + time matrix for a geographic cluster via OSRM.
+
+    OSRM uses real OpenStreetMap road network data — handles one-way streets,
+    tunnels, bridges, and actual road detours that Haversine cannot model.
+
+    The public demo server (router.project-osrm.org) is:
+    • Free with no API key required
+    • Supports up to ~100 locations per matrix request (OSRM_MAX_LOCATIONS)
+    • Subject to fair-use policy (avoid high-frequency batching)
+
+    Coordinate order in OSRM URL: longitude,latitude (opposite of (lat,lon) tuples).
+
+    Results are cached in ``_matrix_cache`` with an ``("osrm",)`` prefix key to
+    avoid collisions with the GraphHopper cache entries.
+
+    Returns:
+        (distance_matrix, time_matrix) with values in metres / seconds,
+        or None on any failure so the caller can fall back to Haversine.
+    """
+    global _osrm_rate_limited_until, _osrm_call_successes, _osrm_cache_hits
+
+    if not coords or len(coords) < 2:
+        return None
+
+    if len(coords) > OSRM_MAX_LOCATIONS:
+        logger.info(
+            "OSRM: cluster size %d exceeds max %d — using Haversine",
+            len(coords), OSRM_MAX_LOCATIONS,
+        )
+        return None
+
+    if time.time() < _osrm_rate_limited_until:
+        remaining = int(_osrm_rate_limited_until - time.time())
+        logger.info("OSRM rate-limited (%ds remaining) — using Haversine", remaining)
+        return None
+
+    # ── Cache lookup ──────────────────────────────────────────────────────────
+    # Key uses "osrm" prefix tuple to avoid collision with GH cache entries.
+    cache_key = ("osrm",) + tuple((round(lat, 6), round(lon, 6)) for lat, lon in coords)
+    if cache_key in _matrix_cache:
+        _osrm_cache_hits += 1
+        logger.info(
+            "OSRM matrix cache HIT (size=%d, hits=%d, successes=%d)",
+            len(coords), _osrm_cache_hits, _osrm_call_successes,
+        )
+        return _matrix_cache[cache_key]
+
+    # ── Live API call ─────────────────────────────────────────────────────────
+    # OSRM URL uses lon,lat order (not lat,lon)
+    coord_str = ";".join(f"{lon},{lat}" for lat, lon in coords)
+    url = (
+        f"{OSRM_BASE_URL}/table/v1/driving/{coord_str}"
+        "?annotations=duration,distance"
+    )
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "SmartRoute/1.0 (delivery-route-optimizer)"},
+    )
+
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        if data.get("code") != "Ok":
+            logger.warning("OSRM non-Ok response code: %s", data.get("code"))
+            return None
+
+        durations = data.get("durations")    # seconds (always present on Ok)
+        distances = data.get("distances")    # metres (present with ?annotations=distance)
+
+        if not durations:
+            logger.warning("OSRM response missing durations")
+            return None
+
+        n = len(durations)
+
+        # Build time matrix (seconds); None values → 0 (unreachable)
+        time_matrix = [[int(t) if t is not None else 0 for t in row] for row in durations]
+
+        # Build distance matrix (metres)
+        if distances:
+            dist_matrix = [[int(d) if d is not None else 0 for d in row] for row in distances]
+        else:
+            # Approximate from duration at average city speed (30 km/h)
+            avg_ms = AVG_SPEED_KMH / 3.6
+            dist_matrix = [
+                [int(t * avg_ms) if t is not None else 0 for t in row]
+                for row in durations
+            ]
+
+        elapsed_ms = int((time.time() - t0) * 1000)
+        _osrm_call_successes += 1
+        logger.info(
+            "OSRM matrix OK: %dx%d in %dms (successes=%d, cache_hits=%d, cache_size=%d)",
+            n, n, elapsed_ms,
+            _osrm_call_successes, _osrm_cache_hits, len(_matrix_cache),
+        )
+        _matrix_cache[cache_key] = (dist_matrix, time_matrix)
+        return dist_matrix, time_matrix
+
+    except urllib.error.HTTPError as exc:
+        logger.warning("OSRM HTTP %d: %s", exc.code, exc.reason)
+        if exc.code in (429, 503):
+            _osrm_rate_limited_until = time.time() + OSRM_RATE_LIMIT_TTL
+            logger.warning(
+                "OSRM throttled (HTTP %d) — suppressing for %ds",
+                exc.code, OSRM_RATE_LIMIT_TTL,
+            )
+    except Exception as exc:
+        elapsed = time.time() - t0
+        if elapsed >= 14.0:
+            _osrm_rate_limited_until = time.time() + OSRM_RATE_LIMIT_TTL
+            logger.warning(
+                "OSRM timeout (%.1fs) — suppressing for %ds",
+                elapsed, OSRM_RATE_LIMIT_TTL,
+            )
+        else:
+            logger.warning("OSRM cluster matrix call failed: %s", exc)
+
+    return None
+
+
 def _build_haversine_matrix(coords: list) -> list:
     """Build a full NxN distance matrix (metres) using Haversine."""
     n = len(coords)
@@ -391,8 +532,11 @@ def _ortools_solve_group(depot_coord: tuple, group_node_indices: list,
     params = pywrapcp.DefaultRoutingSearchParameters()
     params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
     params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    # 2 seconds is enough for single-vehicle TSP with up to ~20 nodes
-    params.time_limit.seconds = 2
+    # Budget is controlled by ORTOOLS_TIME_LIMIT_SECONDS (default 2s, float supported).
+    # Tests can lower it to 0.5 via `M.ORTOOLS_TIME_LIMIT_SECONDS = 0.5` before calling solve_vrp.
+    _tl = float(ORTOOLS_TIME_LIMIT_SECONDS)
+    params.time_limit.seconds = int(_tl)
+    params.time_limit.nanos = int((_tl - int(_tl)) * 1_000_000_000)
 
     solution = routing.SolveWithParameters(params)
     if not solution:
@@ -543,13 +687,14 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
     all_store_nodes = list(range(1, n))
     clusters = _cluster_by_sweep(all_store_nodes, all_coords, num_vehicles)
 
-    # ── Step 3: per-cluster GraphHopper matrix → OR-Tools TSP ─────────────────
-    # For each geographic cluster we try to get real road distances from
-    # GraphHopper (with in-memory caching).  If GH is unavailable, rate-limited,
-    # or the cluster exceeds GRAPHHOPPER_CLUSTER_MAX, we silently fall back to
-    # the Haversine sub-matrix.
+    # ── Step 3: per-cluster road matrix → OR-Tools TSP ────────────────────────
+    # Routing priority per cluster:
+    #   GH   (paid plan, precise road distances)     → if GH key set + fits plan limit
+    #   OSRM (free, real OSM roads, no key needed)   → public demo server fallback
+    #   Haversine (instant math, always available)   → final fallback
     routes = []
     gh_clusters = 0
+    osrm_clusters = 0
     hv_clusters = 0
     t_vrp_start = time.time()
 
@@ -564,32 +709,45 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
         group_indices = [0] + cluster_nodes
         group_coords = [all_coords[i] for i in group_indices]
 
-        # ── Stage B: per-cluster road matrix from GraphHopper ────────────────
+        # ── Stage B: per-cluster road matrix ─────────────────────────────────
         gh_result = get_cluster_matrix_gh(group_coords)
         if gh_result:
             sub_matrix, _ = gh_result
             gh_clusters += 1
         else:
-            sub_matrix = [[full_matrix[r][c] for c in group_indices] for r in group_indices]
-            hv_clusters += 1
+            osrm_result = get_cluster_matrix_osrm(group_coords)
+            if osrm_result:
+                sub_matrix, _ = osrm_result
+                osrm_clusters += 1
+            else:
+                sub_matrix = [[full_matrix[r][c] for c in group_indices] for r in group_indices]
+                hv_clusters += 1
 
         # ── Stage C: OR-Tools TSP with the chosen matrix ─────────────────────
         ordered = _ortools_solve_group(all_coords[0], cluster_nodes, group_coords, sub_matrix)
         routes.append(ordered if ordered else cluster_nodes)
 
     # Determine reported matrix source
-    if gh_clusters > 0 and hv_clusters == 0:
+    total_clusters = gh_clusters + osrm_clusters + hv_clusters
+    if osrm_clusters == total_clusters:
+        matrix_source = "osrm"
+    elif gh_clusters == total_clusters:
         matrix_source = "graphhopper"
-    elif gh_clusters > 0:
-        matrix_source = f"mixed (gh={gh_clusters}, hv={hv_clusters})"
-    else:
+    elif hv_clusters == total_clusters:
         matrix_source = "haversine"
+    else:
+        parts = []
+        if gh_clusters:   parts.append(f"gh={gh_clusters}")
+        if osrm_clusters: parts.append(f"osrm={osrm_clusters}")
+        if hv_clusters:   parts.append(f"hv={hv_clusters}")
+        matrix_source = "mixed (" + ", ".join(parts) + ")"
 
     logger.info(
-        "solve_vrp clusters: total=%d, graphhopper=%d, haversine=%d, "
+        "solve_vrp clusters: total=%d, graphhopper=%d, osrm=%d, haversine=%d, "
         "elapsed=%.1fs, cache_hits=%d, cache_total=%d",
-        gh_clusters + hv_clusters, gh_clusters, hv_clusters,
-        time.time() - t_vrp_start, _matrix_cache_hits, len(_matrix_cache),
+        total_clusters, gh_clusters, osrm_clusters, hv_clusters,
+        time.time() - t_vrp_start,
+        _matrix_cache_hits + _osrm_cache_hits, len(_matrix_cache),
     )
 
     if not routes:
@@ -855,9 +1013,17 @@ class RouteRequest(BaseModel):
 
 @app.on_event("startup")
 async def startup():
+    # ── Routing chain status ──────────────────────────────────────────────────
+    gh_status = f"enabled (plan_limit={_gh_plan_limit})" if GRAPHHOPPER_API_KEY else "disabled (no API key)"
+    logger.info(
+        "Routing chain: GH[%s] → OSRM[%s] → Haversine[always]",
+        gh_status, OSRM_BASE_URL,
+    )
     if not GRAPHHOPPER_API_KEY:
         logger.warning(
-            "GRAPHHOPPER_API_KEY not set — GraphHopper Matrix API disabled, Haversine will be used"
+            "GRAPHHOPPER_API_KEY not set — GraphHopper disabled. "
+            "OSRM (%s) will be used for real road distances.",
+            OSRM_BASE_URL,
         )
     if not YANDEX_GEOCODER_API_KEY:
         logger.warning(
