@@ -146,24 +146,31 @@ def _build_haversine_matrix(coords: list) -> list:
     return [[haversine_meters(coords[i], coords[j]) for j in range(n)] for i in range(n)]
 
 
-def _cluster_by_sweep(store_indices: list, all_coords: list, num_vehicles: int) -> list:
+def _cluster_by_sweep(store_indices: list, all_coords: list, num_vehicles: int,
+                      max_cluster_size: int = None) -> list:
     """
     Partition store node-indices into geographic clusters using the
-    polar-angle sweep algorithm (sectors around the depot).
+    polar-angle sweep algorithm (contiguous sectors around the depot).
 
-    Each cluster is guaranteed to contain at most GRAPHHOPPER_FREE_LIMIT-1
-    stops so that a single GraphHopper Matrix API call (depot + cluster)
-    never exceeds the Free Plan limit.  When `num_vehicles` alone would
-    produce oversized clusters, the function automatically increases the
-    number of clusters and merges extras onto the last vehicle group.
+    Each vehicle receives a contiguous angular wedge — denser wedges get
+    more stops, sparser wedges get fewer.  This is the primary mechanism
+    for unequal but geographically efficient stop distribution.
 
-    Returns a list of lists: each sub-list contains the node indices assigned
-    to one vehicle.  Indices refer to positions in `all_coords` (0 = depot).
+    Args:
+        store_indices:   node indices of stores (0 = depot in all_coords)
+        all_coords:      full coordinate list (depot at index 0)
+        num_vehicles:    desired number of vehicles / clusters
+        max_cluster_size: optional hard cap per cluster (used only when
+                          GraphHopper Free Plan limits apply); None = no cap.
+
+    Returns a list of lists: each sub-list holds the node indices for one
+    vehicle.  Length ≤ num_vehicles (some may be absent if dataset is tiny).
     """
-    max_stops_per_cluster = GRAPHHOPPER_FREE_LIMIT - 1  # depot takes one slot
-    # Minimum number of clusters needed to keep each ≤ max_stops_per_cluster
-    min_clusters = math.ceil(len(store_indices) / max_stops_per_cluster)
-    effective_vehicles = max(num_vehicles, min_clusters)
+    if max_cluster_size is not None:
+        min_clusters = math.ceil(len(store_indices) / max_cluster_size)
+        effective_vehicles = max(num_vehicles, min_clusters)
+    else:
+        effective_vehicles = num_vehicles
 
     depot = all_coords[0]
 
@@ -171,12 +178,23 @@ def _cluster_by_sweep(store_indices: list, all_coords: list, num_vehicles: int) 
         lat, lon = all_coords[node_idx]
         return math.atan2(lon - depot[1], lat - depot[0])
 
-    sorted_nodes = sorted(store_indices, key=angle_from_depot)
+    # ── Equal-angle sector partition ──────────────────────────────────────────
+    # Divide the full 360° circle into effective_vehicles equal angular wedges.
+    # Stores are assigned to whichever wedge their angle falls into.
+    # Dense wedges naturally collect more stores; sparse wedges get fewer.
+    # This is the key mechanism for unequal (geography-driven) distribution.
+    all_angles = [(node, angle_from_depot(node)) for node in store_indices]
+    if not all_angles:
+        return []
 
-    # Distribute evenly round-robin across effective_vehicles buckets
+    min_angle = min(a for _, a in all_angles)
+    sector_width = 2 * math.pi / effective_vehicles
+
     chunks = [[] for _ in range(effective_vehicles)]
-    for i, node in enumerate(sorted_nodes):
-        chunks[i % effective_vehicles].append(node)
+    for node, angle in all_angles:
+        normalized = (angle - min_angle) % (2 * math.pi)
+        sector = min(int(normalized / sector_width), effective_vehicles - 1)
+        chunks[sector].append(node)
 
     # If we created more clusters than vehicles, merge extra clusters back into
     # the last num_vehicles bucket so the caller gets exactly num_vehicles routes
@@ -220,7 +238,8 @@ def _ortools_solve_group(depot_coord: tuple, group_node_indices: list,
     params = pywrapcp.DefaultRoutingSearchParameters()
     params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
     params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    params.time_limit.seconds = 5
+    # 2 seconds is enough for single-vehicle TSP with up to ~20 nodes
+    params.time_limit.seconds = 2
 
     solution = routing.SolveWithParameters(params)
     if not solution:
@@ -315,147 +334,109 @@ def haversine_meters(c1: tuple, c2: tuple) -> int:
 
 def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None) -> list:
     """
-    Solve the Vehicle Routing Problem with a three-tier strategy:
+    Solve VRP with efficiency as the primary objective (min total km / time).
 
-    Tier 1 — Small dataset (≤ GRAPHHOPPER_FREE_LIMIT points total):
-        Send ONE GraphHopper Matrix request for the full matrix, then run
-        OR-Tools on the precise road distances/times.
+    Strategy
+    ────────
+    1. Build a full NxN Haversine distance matrix once (instant, no API).
+       For small datasets (≤ GH_FREE_LIMIT) attempt GraphHopper first.
 
-    Tier 2 — Large dataset (> GRAPHHOPPER_FREE_LIMIT points):
-        a) Pre-cluster stores into `num_vehicles` geographic groups using the
-           polar-angle sweep algorithm (Haversine-based, no API calls).
-        b) For each cluster (guaranteed ≤ FREE_LIMIT-1 stops), send ONE precise
-           GraphHopper Matrix request (depot + cluster stops).
-        c) Run OR-Tools on the precise per-cluster matrix to polish the order.
+    2. Partition stores into `num_vehicles` contiguous geographic SECTORS using
+       the polar-angle sweep around the depot.  Contiguous sectors (not
+       round-robin) mean each vehicle is assigned a geographic wedge, so
+       denser areas naturally get more stops and sparse areas fewer stops.
+       This is the principal mechanism for unequal-but-efficient distribution.
 
-    Tier 3 — Fallback (GraphHopper unavailable / 429 / OR-Tools missing):
-        Pure Haversine distance matrix fed into OR-Tools (or simple greedy
-        split when OR-Tools is also unavailable).  Activated transparently so
-        the user never sees an error.
+    3. For each sector, extract the relevant sub-matrix and run a single-vehicle
+       OR-Tools TSP to polish the visit order within the sector.
+
+    Why this approach
+    ─────────────────
+    • All vehicles are used (each non-empty sector → one vehicle).
+    • Stop counts per vehicle reflect geographic density, NOT a count target.
+      A dense north cluster → 12 stops; a sparse south sector → 5 stops.
+    • No GlobalSpanCostCoefficient — no artificial balancing penalty.
+    • Fast: single-vehicle TSPs are much cheaper than full multi-vehicle VRP.
+
+    Fallback chain (transparent to caller):
+      OR-Tools per-sector  →  sector order as-is  →  greedy round-robin
     """
     n = len(all_coords)
     store_count = n - 1  # node 0 is depot
 
     if store_count == 0:
-        return []
+        return [], "haversine"
 
-    # ── Tier 3a: no OR-Tools — round-robin fallback ───────────────────────────
+    # ── No OR-Tools: geographic sectors, then greedy ordering ─────────────────
     if not ORTOOLS_AVAILABLE:
+        if store_count >= 1:
+            all_store_nodes = list(range(1, n))
+            clusters = _cluster_by_sweep(all_store_nodes, all_coords, num_vehicles)
+            return [c for c in clusters if c], "haversine"
         return _fallback_distribution(list(range(1, n)), num_vehicles), "haversine"
 
-    # ── Helper: run full OR-Tools VRP on an NxN matrix (all vehicles) ─────────
-    def _ortools_full(matrix: list) -> list:
-        manager = pywrapcp.RoutingIndexManager(len(matrix), num_vehicles, 0)
-        routing = pywrapcp.RoutingModel(manager)
+    # ── Step 1: build distance matrix ─────────────────────────────────────────
+    matrix_source = "haversine"
+    full_matrix = _build_haversine_matrix(all_coords)
 
-        int_mat = [[int(v) for v in row] for row in matrix]
-
-        def dist_cb(fi, ti):
-            return int_mat[manager.IndexToNode(fi)][manager.IndexToNode(ti)]
-
-        transit_idx = routing.RegisterTransitCallback(dist_cb)
-        routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
-
-        # ── Workload balancing: penalise gap between shortest and longest route ──
-        # This forces OR-Tools to spread stops more evenly across vehicles
-        # instead of leaving some idle while one vehicle takes all the work.
-        routing.AddDimension(transit_idx, 0, 10_000_000, True, "Distance")
-        distance_dim = routing.GetDimensionOrDie("Distance")
-        distance_dim.SetGlobalSpanCostCoefficient(100)
-
-        if capacities and demands and len(capacities) == num_vehicles:
-            def demand_cb(fi):
-                node = manager.IndexToNode(fi)
-                return demands[node] if 0 < node < len(demands) else 0
-            demand_idx = routing.RegisterUnaryTransitCallback(demand_cb)
-            routing.AddDimensionWithVehicleCapacity(demand_idx, 0, capacities, True, "Capacity")
-
-        params = pywrapcp.DefaultRoutingSearchParameters()
-        params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-        params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-        # Adaptive time limit based on problem size
-        n_nodes = len(matrix)
-        if n_nodes > 20:
-            params.time_limit.seconds = 30
-        elif n_nodes > 10:
-            params.time_limit.seconds = 15
-        else:
-            params.time_limit.seconds = 10
-
-        try:
-            sol = routing.SolveWithParameters(params)
-        except Exception as e:
-            logger.error("OR-Tools solve error: %s", e, exc_info=True)
-            sol = None
-
-        result = []
-        if sol:
-            for v in range(num_vehicles):
-                route = []
-                idx = routing.Start(v)
-                while not routing.IsEnd(idx):
-                    node = manager.IndexToNode(idx)
-                    if node != 0:
-                        route.append(node)
-                    idx = sol.Value(routing.NextVar(idx))
-                if route:
-                    result.append(route)
-        if not result:
-            # Fallback: round-robin distribution across vehicles
-            result = _fallback_distribution(list(range(1, len(matrix))), num_vehicles)
-        return result
-
-    # ── Tier 1: small dataset — one GraphHopper call for the whole matrix ─────
+    # For small datasets attempt GraphHopper for precise road distances
     if store_count < GRAPHHOPPER_FREE_LIMIT:
         gh_result = get_matrix_from_graphhopper(all_coords)
         if gh_result:
-            dist_matrix, _time_matrix = gh_result
-            logger.info("Tier 1: GraphHopper full matrix used (%d nodes)", n)
-            return _ortools_full(dist_matrix), "graphhopper"
+            full_matrix, _ = gh_result
+            matrix_source = "graphhopper"
+            logger.info("GraphHopper full matrix used (%d nodes)", n)
 
-        # GraphHopper unavailable / rate-limited — fall back to Haversine
-        logger.info("Tier 1 fallback: Haversine matrix (%d nodes)", n)
-        return _ortools_full(_build_haversine_matrix(all_coords)), "haversine"
-
-    # ── Tier 2: large dataset — sweep cluster → per-cluster GraphHopper ───────
     logger.info(
-        "Tier 2: %d stores > limit %d — sweep clustering into %d vehicles",
-        store_count, GRAPHHOPPER_FREE_LIMIT - 1, num_vehicles,
+        "solve_vrp: %d stores / %d vehicles — matrix=%s",
+        store_count, num_vehicles, matrix_source,
     )
 
+    # ── Step 2: geographic sector partition (contiguous sweep) ────────────────
+    # Each vehicle receives a contiguous angular sector around the depot.
+    # Denser sectors have more stores → vehicle gets more stops naturally.
     all_store_nodes = list(range(1, n))
     clusters = _cluster_by_sweep(all_store_nodes, all_coords, num_vehicles)
 
+    # ── Step 3: OR-Tools TSP per sector to optimise visit order ───────────────
     routes = []
-    gh_used = False
     for cluster_nodes in clusters:
-        # Build coordinate list: depot first, then this cluster's stores
-        group_coords = [all_coords[0]] + [all_coords[node] for node in cluster_nodes]
+        if not cluster_nodes:
+            continue
+        if len(cluster_nodes) == 1:
+            routes.append(cluster_nodes)
+            continue
 
-        # Attempt precise GraphHopper call for this cluster (≤ FREE_LIMIT pts)
-        gh_result = get_matrix_from_graphhopper(group_coords)
+        # Extract sub-matrix: row/column 0 = depot, then cluster stores
+        group_indices = [0] + cluster_nodes
+        sub_matrix = [[full_matrix[r][c] for c in group_indices] for r in group_indices]
+        group_coords = [all_coords[i] for i in group_indices]
 
-        if gh_result:
-            dist_matrix, _time_matrix = gh_result
-            gh_used = True
-            logger.info(
-                "Tier 2 cluster: GraphHopper matrix used (%d nodes)", len(group_coords)
-            )
-        else:
-            # 429 or network error — seamlessly fall back to Haversine
-            logger.info(
-                "Tier 2 cluster fallback: Haversine matrix (%d nodes)", len(group_coords)
-            )
-            dist_matrix = _build_haversine_matrix(group_coords)
+        ordered = _ortools_solve_group(all_coords[0], cluster_nodes, group_coords, sub_matrix)
+        routes.append(ordered if ordered else cluster_nodes)
 
-        # Polish the order within this cluster using OR-Tools (single vehicle)
-        ordered_local = _ortools_solve_group(
-            all_coords[0], cluster_nodes, group_coords, dist_matrix
-        )
-        if ordered_local:
-            routes.append(ordered_local)
+    if not routes:
+        routes = _fallback_distribution(all_store_nodes, num_vehicles)
 
-    return routes, "graphhopper" if gh_used else "haversine"
+    # ── Step 4: fill unused vehicles by splitting oversized routes ────────────
+    # If equal-angle sectors left some vehicles idle (empty angular wedge),
+    # break the largest route in half by polar angle until all vehicles are used.
+    while len(routes) < num_vehicles and any(len(r) > 1 for r in routes):
+        largest_idx = max(range(len(routes)), key=lambda i: len(routes[i]))
+        largest = routes[largest_idx]
+        if len(largest) < 2:
+            break
+        # Sort by angle and split at midpoint — each half stays geographic
+        depot = all_coords[0]
+        def _angle(node):
+            lat, lon = all_coords[node]
+            return math.atan2(lon - depot[1], lat - depot[0])
+        sorted_half = sorted(largest, key=_angle)
+        mid = len(sorted_half) // 2
+        routes[largest_idx] = sorted_half[:mid]
+        routes.append(sorted_half[mid:])
+
+    return routes, matrix_source
 
 
 def geocode_address_yandex(address: str) -> Optional[tuple]:

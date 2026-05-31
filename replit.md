@@ -18,8 +18,8 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 - **Frontend**: React 19, Vite, TypeScript, Tailwind CSS, shadcn/ui, Leaflet, Recharts, wouter
 - **API codegen**: Orval (OpenAPI → React Query hooks + Zod)
 - **Геокодинг**: Yandex Geocoder API (primary), Nominatim (fallback, 1 req/sec)
-- **VRP**: Google OR-Tools с fallback на greedy если не установлен
-- **Дистанции**: GraphHopper Matrix API (primary) → Haversine fallback
+- **VRP**: Google OR-Tools (equal-angle sweep sectors, TSP per sector) с fallback на greedy если не установлен
+- **Дистанции**: Haversine NxN матрица (primary, мгновенно); GraphHopper Matrix API только для малых датасетов (≤ GH_FREE_LIMIT точек)
 
 ## Where things live
 

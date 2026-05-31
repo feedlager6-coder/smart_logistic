@@ -4,12 +4,12 @@
 
 SmartRoute — веб-приложение для оптимизации маршрутов доставки. Диспетчер загружает список магазинов, указывает автомобили, нажимает одну кнопку — и получает готовые маршруты на карте с Яндекс Навигатором и WhatsApp-шарингом.
 
-## Текущее состояние (на 27.05.2026)
+## Текущее состояние (на 31.05.2026)
 
-- **Статус:** Production-Ready — Стабилизация stores-потока завершена
+- **Статус:** Production-Ready — VRP efficiency-first routing завершён
 - **Backend:** FastAPI (Python) + PostgreSQL
 - **Frontend:** React + Vite + TanStack Query + shadcn/ui
-- **Оптимизация:** OR-Tools VRP + GraphHopper Matrix API (fallback: Haversine)
+- **Оптимизация:** OR-Tools VRP (equal-angle sweep sectors) + Haversine матрица; GraphHopper — только для малых датасетов
 
 ## Ключевые функции
 
