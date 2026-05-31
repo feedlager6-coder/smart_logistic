@@ -51,11 +51,28 @@ geocode_cache: dict = {}
 
 GRAPHHOPPER_API_KEY: str = os.environ.get("GRAPHHOPPER_API_KEY", "")
 YANDEX_GEOCODER_API_KEY: str = os.environ.get("YANDEX_GEOCODER_API_KEY", "")
-GRAPHHOPPER_FREE_LIMIT = 5           # max locations per single Matrix API request (Free Plan)
+
+# Max locations per single GH Matrix request.  Free plan = 5; Starter = 25+.
+# Override via GRAPHHOPPER_CLUSTER_MAX env-var if you are on a higher-tier plan.
+GRAPHHOPPER_FREE_LIMIT = 5           # legacy constant kept for compatibility
+GRAPHHOPPER_CLUSTER_MAX: int = int(os.environ.get("GRAPHHOPPER_CLUSTER_MAX", "25"))
 GRAPHHOPPER_RATE_LIMIT_TTL = 60      # seconds to suppress GH calls after a 429
 
 # Epoch-seconds timestamp; GH calls are suppressed while time.time() < this value
 _gh_rate_limited_until: float = 0.0
+
+# ── In-memory GraphHopper matrix cache ────────────────────────────────────────
+# Key: tuple of (lat, lon) pairs (ordered: depot first, then stores).
+# Value: (distance_matrix, time_matrix) from GH API.
+# Lives for the process lifetime; cleared on server restart.
+_matrix_cache: dict = {}
+_matrix_cache_hits: int = 0    # cache lookups that returned a cached result
+_matrix_cache_misses: int = 0  # cache lookups that triggered a live API call
+_gh_call_successes: int = 0    # live API calls that returned a valid matrix
+
+# Auto-calibrated from the first GH 400 "Too many points" response.
+# Starts at GRAPHHOPPER_CLUSTER_MAX; reduced if the API key plan allows fewer.
+_gh_plan_limit: int = GRAPHHOPPER_CLUSTER_MAX
 
 
 def get_matrix_from_graphhopper(coords: list) -> Optional[tuple]:
@@ -140,6 +157,143 @@ def get_matrix_from_graphhopper(coords: list) -> Optional[tuple]:
     return None
 
 
+def get_cluster_matrix_gh(coords: list) -> Optional[tuple]:
+    """
+    Fetch a GraphHopper distance + time matrix for a geographic cluster.
+
+    Key differences from the legacy ``get_matrix_from_graphhopper``:
+    • Accepts up to ``GRAPHHOPPER_CLUSTER_MAX`` locations (default 25) instead of
+      the old hard-coded free-plan limit of 5.
+    • Results are stored in ``_matrix_cache`` keyed by the ordered coordinate
+      tuple (rounded to 6 decimals).  Repeated calls for the same cluster
+      (e.g. when rebuilding a route with the same stores) cost 0 extra API calls.
+    • Logs every cache hit, cache miss, and the latency of every live API call.
+    • Falls back transparently to ``None`` on any failure so the caller can
+      switch to Haversine without surfacing an error.
+
+    Args:
+        coords: ordered list of (lat, lon) tuples; index 0 should be the depot.
+
+    Returns:
+        (distance_matrix, time_matrix) with values in metres / seconds,
+        or None when GH is unavailable, rate-limited, or the cluster is too large.
+    """
+    global _gh_rate_limited_until, _matrix_cache_hits, _matrix_cache_misses
+    global _gh_call_successes, _gh_plan_limit
+    import re as _re
+
+    if not GRAPHHOPPER_API_KEY:
+        return None
+
+    if time.time() < _gh_rate_limited_until:
+        remaining = int(_gh_rate_limited_until - time.time())
+        logger.info("GH rate-limited (%ds remaining) — using Haversine", remaining)
+        return None
+
+    if not coords or len(coords) < 2:
+        return None
+
+    if len(coords) > _gh_plan_limit:
+        logger.info(
+            "GH cluster size %d exceeds plan limit %d — using Haversine "
+            "(set GRAPHHOPPER_CLUSTER_MAX env-var to increase for higher-tier plans)",
+            len(coords), _gh_plan_limit,
+        )
+        return None
+
+    # ── Cache lookup ──────────────────────────────────────────────────────────
+    cache_key = tuple((round(lat, 6), round(lon, 6)) for lat, lon in coords)
+    if cache_key in _matrix_cache:
+        _matrix_cache_hits += 1
+        logger.info(
+            "GH matrix cache HIT (size=%d, hits=%d, misses=%d, successes=%d)",
+            len(coords), _matrix_cache_hits, _matrix_cache_misses, _gh_call_successes,
+        )
+        return _matrix_cache[cache_key]
+
+    # ── Live API call ─────────────────────────────────────────────────────────
+    _matrix_cache_misses += 1
+    gh_points = [[lon, lat] for lat, lon in coords]
+    payload = json.dumps({
+        "from_points": gh_points,
+        "to_points": gh_points,
+        "out_arrays": ["distances", "times"],
+        "vehicle": "car",
+    }).encode("utf-8")
+
+    url = f"https://graphhopper.com/api/1/matrix?key={GRAPHHOPPER_API_KEY}"
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        distances = data.get("distances")
+        times = data.get("times")
+
+        if distances and times:
+            elapsed_ms = int((time.time() - t0) * 1000)
+            _gh_call_successes += 1
+            logger.info(
+                "GH matrix OK: %dx%d in %dms "
+                "(successes=%d, cache_hits=%d, cache_size=%d)",
+                len(distances), len(distances[0]), elapsed_ms,
+                _gh_call_successes, _matrix_cache_hits, len(_matrix_cache),
+            )
+            _matrix_cache[cache_key] = (distances, times)
+            return distances, times
+
+        logger.warning("GH response missing distances/times: %s", data)
+
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            _gh_rate_limited_until = time.time() + GRAPHHOPPER_RATE_LIMIT_TTL
+            logger.warning(
+                "GH 429 rate-limit hit — Haversine for next %ds",
+                GRAPHHOPPER_RATE_LIMIT_TTL,
+            )
+        elif exc.code == 400:
+            try:
+                body_str = exc.read(512).decode("utf-8", errors="replace")
+                body = json.loads(body_str)
+                msg = body.get("message", body_str)
+            except Exception:
+                msg = "(unparseable 400 body)"
+            # Auto-calibrate plan limit from "Too many points, allowed: N"
+            m = _re.search(r"allowed[:\s]+(\d+)", msg)
+            if m:
+                detected = int(m.group(1))
+                if detected < _gh_plan_limit:
+                    old = _gh_plan_limit
+                    _gh_plan_limit = detected
+                    logger.warning(
+                        "GH 400: plan limit detected — auto-set _gh_plan_limit %d→%d. "
+                        "Upgrade GH subscription for larger clusters. Falling back to Haversine.",
+                        old, _gh_plan_limit,
+                    )
+                else:
+                    logger.warning("GH 400: %s", msg)
+            else:
+                logger.warning("GH 400: %s", msg)
+        else:
+            try:
+                body_preview = exc.read(256).decode("utf-8", errors="replace")
+            except Exception:
+                body_preview = ""
+            logger.warning("GH HTTP %d: %s | %s", exc.code, exc.reason, body_preview)
+
+    except Exception as exc:
+        logger.warning("GH cluster matrix call failed: %s", exc)
+
+    return None
+
+
 def _build_haversine_matrix(coords: list) -> list:
     """Build a full NxN distance matrix (metres) using Haversine."""
     n = len(coords)
@@ -201,13 +355,12 @@ def _cluster_by_sweep(store_indices: list, all_coords: list, num_vehicles: int,
     if effective_vehicles > num_vehicles:
         merged = chunks[:num_vehicles]
         for extra in chunks[num_vehicles:]:
-            # Append extra stops to the smallest existing bucket
             smallest = min(range(len(merged)), key=lambda k: len(merged[k]))
-            # Only merge if it stays within the per-cluster limit
-            if len(merged[smallest]) + len(extra) <= max_stops_per_cluster:
+            # Respect max_cluster_size cap if provided, otherwise always merge
+            if max_cluster_size is None or len(merged[smallest]) + len(extra) <= max_cluster_size:
                 merged[smallest].extend(extra)
             else:
-                merged.append(extra)  # keep as separate cluster (extra vehicle)
+                merged.append(extra)
         chunks = merged
 
     return [c for c in chunks if c]
@@ -375,21 +528,13 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
             return [c for c in clusters if c], "haversine"
         return _fallback_distribution(list(range(1, n)), num_vehicles), "haversine"
 
-    # ── Step 1: build distance matrix ─────────────────────────────────────────
-    matrix_source = "haversine"
+    # ── Step 1: full Haversine matrix (always-available baseline) ─────────────
+    # Used as fallback when GraphHopper is unavailable for a given cluster.
     full_matrix = _build_haversine_matrix(all_coords)
 
-    # For small datasets attempt GraphHopper for precise road distances
-    if store_count < GRAPHHOPPER_FREE_LIMIT:
-        gh_result = get_matrix_from_graphhopper(all_coords)
-        if gh_result:
-            full_matrix, _ = gh_result
-            matrix_source = "graphhopper"
-            logger.info("GraphHopper full matrix used (%d nodes)", n)
-
     logger.info(
-        "solve_vrp: %d stores / %d vehicles — matrix=%s",
-        store_count, num_vehicles, matrix_source,
+        "solve_vrp: %d stores / %d vehicles — building clusters",
+        store_count, num_vehicles,
     )
 
     # ── Step 2: geographic sector partition (contiguous sweep) ────────────────
@@ -398,22 +543,54 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
     all_store_nodes = list(range(1, n))
     clusters = _cluster_by_sweep(all_store_nodes, all_coords, num_vehicles)
 
-    # ── Step 3: OR-Tools TSP per sector to optimise visit order ───────────────
+    # ── Step 3: per-cluster GraphHopper matrix → OR-Tools TSP ─────────────────
+    # For each geographic cluster we try to get real road distances from
+    # GraphHopper (with in-memory caching).  If GH is unavailable, rate-limited,
+    # or the cluster exceeds GRAPHHOPPER_CLUSTER_MAX, we silently fall back to
+    # the Haversine sub-matrix.
     routes = []
+    gh_clusters = 0
+    hv_clusters = 0
+    t_vrp_start = time.time()
+
     for cluster_nodes in clusters:
         if not cluster_nodes:
             continue
         if len(cluster_nodes) == 1:
             routes.append(cluster_nodes)
+            hv_clusters += 1
             continue
 
-        # Extract sub-matrix: row/column 0 = depot, then cluster stores
         group_indices = [0] + cluster_nodes
-        sub_matrix = [[full_matrix[r][c] for c in group_indices] for r in group_indices]
         group_coords = [all_coords[i] for i in group_indices]
 
+        # ── Stage B: per-cluster road matrix from GraphHopper ────────────────
+        gh_result = get_cluster_matrix_gh(group_coords)
+        if gh_result:
+            sub_matrix, _ = gh_result
+            gh_clusters += 1
+        else:
+            sub_matrix = [[full_matrix[r][c] for c in group_indices] for r in group_indices]
+            hv_clusters += 1
+
+        # ── Stage C: OR-Tools TSP with the chosen matrix ─────────────────────
         ordered = _ortools_solve_group(all_coords[0], cluster_nodes, group_coords, sub_matrix)
         routes.append(ordered if ordered else cluster_nodes)
+
+    # Determine reported matrix source
+    if gh_clusters > 0 and hv_clusters == 0:
+        matrix_source = "graphhopper"
+    elif gh_clusters > 0:
+        matrix_source = f"mixed (gh={gh_clusters}, hv={hv_clusters})"
+    else:
+        matrix_source = "haversine"
+
+    logger.info(
+        "solve_vrp clusters: total=%d, graphhopper=%d, haversine=%d, "
+        "elapsed=%.1fs, cache_hits=%d, cache_total=%d",
+        gh_clusters + hv_clusters, gh_clusters, hv_clusters,
+        time.time() - t_vrp_start, _matrix_cache_hits, len(_matrix_cache),
+    )
 
     if not routes:
         routes = _fallback_distribution(all_store_nodes, num_vehicles)

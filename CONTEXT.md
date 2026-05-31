@@ -9,7 +9,7 @@ SmartRoute — веб-приложение для оптимизации мар�
 - **Статус:** Production-Ready — VRP efficiency-first routing завершён
 - **Backend:** FastAPI (Python) + PostgreSQL
 - **Frontend:** React + Vite + TanStack Query + shadcn/ui
-- **Оптимизация:** OR-Tools VRP (equal-angle sweep sectors) + Haversine матрица; GraphHopper — только для малых датасетов
+- **Оптимизация:** OR-Tools VRP (equal-angle sweep sectors, TSP per cluster) + Haversine baseline; GraphHopper per-cluster матрицы с in-memory кэшем, авто-калибровкой плана и graceful fallback
 
 ## Ключевые функции
 

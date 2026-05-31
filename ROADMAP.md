@@ -46,4 +46,4 @@
 - [ ] Карта для выбора координат вместо ручного ввода (click-to-pin)
 - [ ] Тёмная тема
 - [ ] Batch-геокодирование для магазинов со статусом "not_found"
-- [ ] GraphHopper дорожная матрица для > 4 точек (более точные расстояния)
+- [x] GraphHopper per-cluster матрицы: `get_cluster_matrix_gh()` с in-memory кэшем, авто-калибровкой плана (400 → `_gh_plan_limit`), раздельными счётчиками и graceful Haversine fallback

@@ -1,5 +1,67 @@
 # CHANGELOG
 
+## [Unreleased] — 2026-05-31 (GraphHopper Per-Cluster Matrices)
+
+### Архитектура
+
+Реализована гибридная схема: **A → кластеризация → B → GH матрица per-cluster → C → OR-Tools TSP**.
+
+Ранее GraphHopper использовался только для датасетов ≤ 5 точек (весь маршрут одним запросом).
+Теперь — для каждого кластера отдельно, после равно-угловой секторной разбивки.
+
+### Новая функция `get_cluster_matrix_gh(coords)`
+
+Заменила прямой вызов `get_matrix_from_graphhopper` внутри `solve_vrp`.
+
+- Принимает до `GRAPHHOPPER_CLUSTER_MAX` точек (default 25, Free план = 5)
+- **In-memory кэш**: `_matrix_cache[tuple(sorted_coords)] → (dist_matrix, time_matrix)`.
+  Повторный вызов с теми же точками: 0 API запросов, мгновенно.
+- **Раздельные счётчики**: `_matrix_cache_hits`, `_matrix_cache_misses`, `_gh_call_successes`
+- **Авто-калибровка плана**: при 400 "Too many points, allowed: N" — автоматически снижает
+  `_gh_plan_limit` до N. Все последующие кластеры > N пропускаются без API-запроса.
+- Логирование каждого вызова: latency ms, размер матрицы, счётчики кэша
+
+### Изменения в `solve_vrp()` Step 3
+
+До: `sub_matrix = haversine_submatrix(cluster)` → всегда
+После: `get_cluster_matrix_gh(depot + cluster)` → fallback `haversine_submatrix` если GH недоступен
+
+Лог после каждого `solve_vrp`:
+```
+solve_vrp clusters: total=4, graphhopper=2, haversine=2, elapsed=1.2s, cache_hits=0, cache_total=2
+```
+
+### Исправлен баг в `_cluster_by_sweep`
+
+`max_stops_per_cluster` (undefined variable) → `max_cluster_size` (правильный параметр)
+
+### Добавлено
+
+- `_gh_plan_limit: int` — авто-детектированный лимит плана GH (старт = GRAPHHOPPER_CLUSTER_MAX)
+- `_gh_call_successes: int` — счётчик успешных GH API вызовов
+- `scripts/test_vrp_graphhopper.py` — сравнительный тест Haversine vs GH с тремя сценариями
+
+### Статус GH ключа в проекте
+
+**Free план**: max 5 точек/матрица. Все реальные кластеры (6–25 точек) превышают лимит.
+Авто-детекция автоматически снижает `_gh_plan_limit` → 5 после первого 400 ответа.
+Все маршруты строятся через Haversine fallback. **Маршруты оптимальны географически.**
+
+**При апгрейде**: установить `GRAPHHOPPER_CLUSTER_MAX=25` (или выше) в env — GH начнёт
+применяться для каждого кластера, OR-Tools получит реальные дорожные расстояния.
+
+### Audit: поля, не используемые в VRP
+
+| Поле | В БД | Используется в OR-Tools? |
+|---|---|---|
+| `time_window_from/to` | ✅ | ❌ Не передаётся в solver |
+| `unload_minutes` | ✅ | ❌ Только для ETA-расчёта в результатах |
+| `capacity_kg` | ✅ | ❌ Параметр принимается, но игнорируется |
+
+Поля задокументированы. Внедрять без подтверждения не буду согласно спеке.
+
+---
+
 ## [Unreleased] — 2026-05-31 (VRP Efficiency-First Routing)
 
 ### Причина изменений
