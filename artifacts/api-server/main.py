@@ -538,17 +538,40 @@ def _cluster_by_sweep(store_indices: list, all_coords: list, num_vehicles: int,
     return [c for c in active if c]
 
 
+def _parse_time_to_minutes(time_str: str) -> int:
+    """Parse 'HH:MM' string to integer minutes from midnight.  Defaults to 09:00."""
+    try:
+        h, m = str(time_str).strip().split(":")
+        return int(h) * 60 + int(m)
+    except Exception:
+        return 9 * 60
+
+
 def _ortools_solve_group(depot_coord: tuple, group_node_indices: list,
-                         group_coords: list, dist_matrix: list) -> list:
+                         group_coords: list, dist_matrix: list,
+                         time_windows: list = None) -> list:
     """
-    Run OR-Tools VRP on a single vehicle's group of stops using a pre-built
-    distance matrix.  Returns the stop nodes in optimised visit order
-    (values from group_node_indices, NOT positional indices).
+    Run OR-Tools TSP on a single vehicle's cluster of stops.
+
+    Args:
+        depot_coord:        (lat, lon) of the depot (unused directly; coord is at
+                            group_coords[0]).
+        group_node_indices: global node indices of the stores in this cluster
+                            (1-based: node 1 = store_list[0]).
+        group_coords:       coordinate list [depot, store_a, store_b, ...].
+        dist_matrix:        NxN distance matrix (metres) matching group_coords order.
+        time_windows:       optional list of (tw_from_min, tw_to_min, service_min)
+                            for each store in group_node_indices order.
+                            When provided OR-Tools adds a Time dimension and enforces
+                            the windows.  When None, pure distance optimisation.
+
+    Returns the stores in optimised visit order (values from group_node_indices).
+    Falls back to the original order on any solver failure.
     """
     if not ORTOOLS_AVAILABLE or len(group_node_indices) <= 1:
-        return group_node_indices  # nothing to optimise
+        return group_node_indices
 
-    n = len(group_coords)  # includes depot at position 0
+    n = len(group_coords)  # includes depot at index 0
     manager = pywrapcp.RoutingIndexManager(n, 1, 0)
     routing = pywrapcp.RoutingModel(manager)
 
@@ -560,18 +583,70 @@ def _ortools_solve_group(depot_coord: tuple, group_node_indices: list,
     transit_idx = routing.RegisterTransitCallback(dist_cb)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
 
+    # ── Time dimension (enforced only when caller supplies time_windows) ──────
+    if time_windows and len(time_windows) == len(group_node_indices):
+        speed_m_per_min = AVG_SPEED_KMH * 1000 / 60  # ~500 m/min at 30 km/h
+
+        # tw_data[0] = depot (full day), tw_data[k] = store k-1
+        tw_data = [(5 * 60, 23 * 60, 0)] + list(time_windows)
+
+        def time_cb(from_idx, to_idx):
+            from_node = manager.IndexToNode(from_idx)
+            to_node = manager.IndexToNode(to_idx)
+            travel_min = int(int_matrix[from_node][to_node] / max(speed_m_per_min, 1))
+            service_min = tw_data[from_node][2] if from_node > 0 else 0
+            return travel_min + service_min
+
+        time_transit_idx = routing.RegisterTransitCallback(time_cb)
+        routing.AddDimension(
+            time_transit_idx,
+            60,       # max slack (early arrival wait) per stop: 60 min
+            24 * 60,  # max cumulative time horizon
+            False,    # do NOT force start cumul to zero
+            "Time",
+        )
+        time_dim = routing.GetDimensionOrDie("Time")
+        time_dim.SetGlobalSpanCostCoefficient(0)
+
+        # Depot departs exactly at 09:00
+        time_dim.CumulVar(routing.Start(0)).SetRange(9 * 60, 9 * 60)
+
+        # Enforce time window on each store node
+        for local_node in range(1, n):
+            tw_from, tw_to, _ = tw_data[local_node]
+            routing_idx = manager.NodeToIndex(local_node)
+            time_dim.CumulVar(routing_idx).SetRange(tw_from, tw_to)
+
+        logger.info(
+            "OR-Tools time-windows enabled for cluster of %d stops",
+            len(group_node_indices),
+        )
+
+    # ── Adaptive time limit based on cluster size ─────────────────────────────
+    # Small clusters (≤5 stops) are trivial TSPs — 0.3 s is more than enough.
+    # Medium clusters (≤10) need ~1 s.  Large clusters get the full budget.
+    cluster_size = len(group_node_indices)
+    if cluster_size <= 5:
+        adaptive_tl = min(0.3, float(ORTOOLS_TIME_LIMIT_SECONDS))
+    elif cluster_size <= 10:
+        adaptive_tl = min(1.0, float(ORTOOLS_TIME_LIMIT_SECONDS))
+    else:
+        adaptive_tl = float(ORTOOLS_TIME_LIMIT_SECONDS)
+
     params = pywrapcp.DefaultRoutingSearchParameters()
     params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
     params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    # Budget is controlled by ORTOOLS_TIME_LIMIT_SECONDS (default 2s, float supported).
-    # Tests can lower it to 0.5 via `M.ORTOOLS_TIME_LIMIT_SECONDS = 0.5` before calling solve_vrp.
-    _tl = float(ORTOOLS_TIME_LIMIT_SECONDS)
-    params.time_limit.seconds = int(_tl)
-    params.time_limit.nanos = int((_tl - int(_tl)) * 1_000_000_000)
+    params.time_limit.seconds = int(adaptive_tl)
+    params.time_limit.nanos = int((adaptive_tl - int(adaptive_tl)) * 1_000_000_000)
 
     solution = routing.SolveWithParameters(params)
     if not solution:
-        return group_node_indices  # fallback: return as-is
+        logger.warning(
+            "OR-Tools found no solution for cluster of %d stops "
+            "(time_windows=%s) — keeping original order",
+            len(group_node_indices), time_windows is not None,
+        )
+        return group_node_indices
 
     ordered = []
     idx = routing.Start(0)
@@ -660,7 +735,8 @@ def haversine_meters(c1: tuple, c2: tuple) -> int:
     return int(R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
 
 
-def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None) -> list:
+def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None,
+              store_time_windows: list = None) -> list:
     """
     Solve VRP with efficiency as the primary objective (min total km / time).
 
@@ -677,6 +753,8 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
 
     3. For each sector, extract the relevant sub-matrix and run a single-vehicle
        OR-Tools TSP to polish the visit order within the sector.
+       If store_time_windows is provided, OR-Tools also enforces arrival time
+       windows (TSPTW) so deliveries respect opening-hour constraints.
 
     Why this approach
     ─────────────────
@@ -685,6 +763,15 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
       A dense north cluster → 12 stops; a sparse south sector → 5 stops.
     • No GlobalSpanCostCoefficient — no artificial balancing penalty.
     • Fast: single-vehicle TSPs are much cheaper than full multi-vehicle VRP.
+
+    Args:
+        all_coords:          list of (lat, lon); index 0 is the depot.
+        num_vehicles:        number of vehicles / routes to generate.
+        capacities:          optional list of vehicle capacity (kg).
+        demands:             optional list of store demands (index 0 = depot = 0).
+        store_time_windows:  optional list of (tw_from_min, tw_to_min, service_min)
+                             for each store, 0-indexed matching all_coords[1:].
+                             When supplied, OR-Tools TSPTW is used per cluster.
 
     Fallback chain (transparent to caller):
       OR-Tools per-sector  →  sector order as-is  →  greedy round-robin
@@ -755,7 +842,16 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
                 hv_clusters += 1
 
         # ── Stage C: OR-Tools TSP with the chosen matrix ─────────────────────
-        ordered = _ortools_solve_group(all_coords[0], cluster_nodes, group_coords, sub_matrix)
+        # Extract per-store time windows for this cluster (0-indexed in store_time_windows).
+        cluster_tw = None
+        if store_time_windows:
+            try:
+                cluster_tw = [store_time_windows[node - 1] for node in cluster_nodes]
+            except IndexError:
+                cluster_tw = None  # defensive: skip TW if index out of range
+
+        ordered = _ortools_solve_group(all_coords[0], cluster_nodes, group_coords, sub_matrix,
+                                       time_windows=cluster_tw)
         routes.append(ordered if ordered else cluster_nodes)
 
     # Determine reported matrix source
@@ -1619,13 +1715,32 @@ def build_route(body: RouteRequest):
         capacities = [int(v.capacity_kg) if v.capacity_kg else 99999 for v in body.vehicles]
         demands = [0] + [1] * len(store_list)  # 1 unit per store
 
+    # ── Time windows (TSPTW) ─────────────────────────────────────────────────
+    # When use_time_windows is True, pass (tw_from_min, tw_to_min, service_min)
+    # per store to solve_vrp so OR-Tools enforces arrival constraints.
+    store_time_windows = None
+    if body.use_time_windows:
+        store_time_windows = []
+        for s in store_list:
+            tw_from = _parse_time_to_minutes(s.get("time_window_from") or "09:00")
+            tw_to   = _parse_time_to_minutes(s.get("time_window_to")   or "18:00")
+            service = int(s.get("unload_minutes") or 15) if body.use_unload_time else 0
+            store_time_windows.append((tw_from, tw_to, service))
+        logger.info(
+            "build_route: time windows enabled for %d stores (use_unload=%s)",
+            len(store_time_windows), body.use_unload_time,
+        )
+
     logger.info(
-        "solve_vrp: %d stores, %d vehicles, capacities=%s",
+        "solve_vrp: %d stores, %d vehicles, capacities=%s, time_windows=%s",
         len(store_list), num_vehicles, capacities,
+        "yes" if store_time_windows else "no",
     )
 
     try:
-        vehicle_routes_indices, matrix_source = solve_vrp(all_coords, num_vehicles, capacities, demands)
+        vehicle_routes_indices, matrix_source = solve_vrp(
+            all_coords, num_vehicles, capacities, demands, store_time_windows
+        )
     except Exception as vrp_exc:
         logger.error("solve_vrp failed:\n%s", traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"VRP solver error: {vrp_exc}")

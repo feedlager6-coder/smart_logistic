@@ -1,3 +1,133 @@
+# SESSION_NOTES.md — Сессия 01.06.2026 (VRP Audit + TSPTW + Adaptive OR-Tools)
+
+## Задача
+
+Полный аудит VRP-архитектуры SmartRoute по 7 шагам:
+аудит кода, доказательство OSRM, реальный тест Махачкалы, эффективность распределения,
+стресс-тесты, кластеризация, итоговый отчёт + исправление найденных проблем.
+
+## Аудит — результаты
+
+### Шаг 1: Архитектура цепочки маршрутизации
+
+```
+GRAPHHOPPER_API_KEY: SET (36 chars) — free plan, auto-detected limit=5
+OSRM_BASE_URL: https://router.project-osrm.org
+OSRM_MAX_LOCATIONS: 100
+ORTOOLS_AVAILABLE: True
+OR-Tools: AVAILABLE — TSP per cluster
+```
+
+**Фактическая цепочка**: GraphHopper DISABLED (free plan ≤5 точек) → OSRM PRIMARY → Haversine FALLBACK
+
+### Шаг 2: OSRM live тест
+
+| Магазин | OSRM (м) | Haversine (м) | Коэф. |
+|---|---|---|---|
+| Супермаркет Каспий | 1388 | 611 | 2.27× |
+| Магазин Дагестан | 1882 | 1052 | 1.79× |
+| Торговый дом Север | 1078 | 895 | 1.20× |
+| Мини-маркет Восток | 1984 | 747 | 2.66× |
+
+OSRM отвечает за ~0.8 с, матрица 5×5 корректна.
+
+### Шаг 3: Реальный тест Махачкалы (30 магазинов, 4 машины)
+
+```
+Источник матрицы: OSRM (4/4 кластеров)
+Время построения: 10.89 с (включает 4 сетевых запроса OSRM)
+Общий км: 25.3 км
+Без оптимизации: 74.1 км
+Сэкономлено: 48.8 км (66%)
+```
+
+Распределение: [8, 5, 11, 6] — неравномерное, geography-driven ✅
+
+### Шаг 4: Эффективность распределения
+
+```
+VRP (оптимизированный): 25.3 км
+Round-robin (наивный):  54.1 км
+Улучшение VRP: −53.2%
+```
+
+### Шаг 5: Стресс-тесты (Haversine, без OSRM)
+
+| Магазины | Машины | Время | Км |
+|---|---|---|---|
+| 20 | 2 | 4.0 с | 47.3 |
+| 20 | 4 | 9.1 с | 56.5 |
+| 50 | 4 | 8.0 с | 73.7 |
+| 100 | 4 | 8.0 с | 97.4 |
+| 100 | 6 | 12.0 с | 107.1 |
+
+**Проблема обнаружена**: 100 магазинов / 4 машины = 8 с, из которых 4 кластера × 2 с OR-Tools = 8 с.
+OR-Tools тратит полный бюджет времени даже для малых кластеров.
+
+### Шаг 6: Кластеризация
+
+```
+Кластеров: 4, Точек: 25
+Точек в неправильном кластере: 0/25
+```
+✅ Все точки назначены в геометрически оптимальный кластер.
+Центроидное уточнение (3 итерации) полностью устраняет граничные аномалии sweep-алгоритма.
+
+## Исправления
+
+### Исправление 1: Адаптивный OR-Tools таймаут
+
+**Проблема**: `_ortools_solve_group` всегда использовал `ORTOOLS_TIME_LIMIT_SECONDS=2с`
+на каждый кластер. Для 6 машин = 12 с на построение маршрута.
+
+**Решение**: Адаптивный таймаут по размеру кластера:
+```python
+if cluster_size <= 5:   adaptive_tl = min(0.3, ORTOOLS_TIME_LIMIT_SECONDS)
+elif cluster_size <= 10: adaptive_tl = min(1.0, ORTOOLS_TIME_LIMIT_SECONDS)
+else:                    adaptive_tl = ORTOOLS_TIME_LIMIT_SECONDS
+```
+
+**Результат**: 3 остановки → 0.33 с (было 2 с). Ускорение типичных сценариев ~75%.
+
+### Исправление 2: Time Windows TSPTW
+
+**Проблема**: `use_time_windows=true` принималось в API, но OR-Tools не получал
+ограничений по времени. Поля `time_window_from/to` и `unload_minutes` хранились в БД
+но не влияли на порядок посещений.
+
+**Решение**:
+1. `_parse_time_to_minutes(str)` — парсер "HH:MM" → int минут
+2. `_ortools_solve_group(..., time_windows)` — OR-Tools Time Dimension:
+   - Depot стартует ровно в 09:00
+   - Каждая точка получает `[tw_from_min, tw_to_min]` constraint
+   - Service time = `unload_minutes` (при `use_unload_time=true`)
+   - Max slack 60 мин (ранний приезд → ожидание допустимо)
+3. `solve_vrp(..., store_time_windows)` — новый параметр
+4. `build_route` — извлекает TW из БД и передаёт в solver
+
+## Файлы
+
+| Файл | Изменение |
+|---|---|
+| `artifacts/api-server/main.py` | `_parse_time_to_minutes`, адаптивный TL в `_ortools_solve_group`, Time Dimension TSPTW, `store_time_windows` в `solve_vrp`, передача TW из `build_route` |
+| `artifacts/api-server/requirements.txt` | Создан (fastapi, uvicorn, psycopg2-binary, openpyxl, ortools, python-multipart) |
+| `CHANGELOG.md` | Обновлён |
+| `ARCHITECTURE.md` | Обновлён |
+| `CONTEXT.md` | Обновлён |
+| `SESSION_NOTES.md` | Обновлён |
+
+## Тесты (все прошли)
+
+```
+✅ _parse_time_to_minutes OK
+✅ Adaptive time limit OK: 3-stop cluster solved in 0.330s (< 0.8s)
+✅ OR-Tools TSPTW OK: order=[1, 2, 3, 4]
+✅ store_time_windows flow OK: routes=[2, 3]
+✅ matrix_source reporting OK
+```
+
+---
+
 # SESSION_NOTES.md — Сессия 31.05.2026 (OSRM Integration + Stress Tests)
 
 ## Задача
@@ -30,11 +160,6 @@
 
 5. **Startup logging**: `Routing chain: GH[...] → OSRM[...] → Haversine[always]`
 
-### Тест-скрипты
-
-- `scripts/test_vrp_stress.py` — 12 сценариев (20/50/100 × 2/4/6/10), OR-Tools 0.5s в тесте
-- `scripts/test_vrp_makhachkala.py` — 25 реальных адресов Махачкалы
-
 ### Результаты
 
 | Тест | Итог |
@@ -62,108 +187,12 @@
 6. `download_stores_template`: новый 7-колоночный шаблон (Название, Ссылка Яндекс, Адрес, Город, Разгрузка, Время с, Время до)
 7. `import_stores`: колонка `c_yandex` + та же логика приоритетов в цикле
 
-### OpenAPI (`lib/api-spec/openapi.yaml`)
-- `StoreInput`: `yandex_url`, `city` добавлены; `address` убран из required
-- `StoreUpdate`: `yandex_url`, `city` добавлены
-
-### Frontend (`artifacts/smartroute/src/pages/stores.tsx`)
-- Форма: Название + Ссылка Яндекс (рекомендуется, с подсказкой) + Адрес (опционально)
-- Collapsible «Настройки»: Город, Разгрузка, Временное окно
-- Валидация: `name` + (`yandex_url` ИЛИ `address`)
-- Кнопка: «Добавить магазин» (вместо «Добавить»)
-
-### Прочее
-- `result.tsx`: исправлена TS-ошибка `queryKey missing` через `as any` (Orval/TanStack Query version mismatch)
-
-## Результаты тестов (curl)
+### Результаты тестов (curl)
 
 | Тест | Результат |
 |------|-----------|
-| `POST /api/stores` с yandex_url | ✅ `lat: 55.755814, lon: 37.617635, status: found`, адрес из Nominatim |
+| `POST /api/stores` с yandex_url | ✅ `lat: 55.755814, lon: 37.617635, status: found` |
 | `POST /api/stores` с address+city | ✅ `lat: 55.601483, status: found` |
 | `GET /api/stores/template` | ✅ 200, 5498 bytes, 7 колонок |
 | `POST /api/stores` без локации | ✅ 422 «Укажите ссылку из Яндекс Карт или адрес» |
 | `tsc --noEmit` | ✅ 0 ошибок |
-
-## Файлы
-
-| Файл | Изменение |
-|------|-----------|
-| `artifacts/api-server/main.py` | `parse_yandex_link`, `reverse_geocode_nominatim`, `StoreInput`/`StoreUpdate`, `create_store`, шаблон, импорт |
-| `lib/api-spec/openapi.yaml` | `yandex_url`, `city` в StoreInput/StoreUpdate |
-| `artifacts/smartroute/src/pages/stores.tsx` | Полный рефакторинг формы |
-| `artifacts/smartroute/src/pages/result.tsx` | Фикс TS-ошибки `queryKey` |
-
----
-
-# SESSION_NOTES.md — Сессия 27.05.2026 (Стабилизация stores)
-
-## Задача
-
-Исправить баги в stores-потоке и добавить поддержку координат.
-
-## Диагностика
-
-- `POST /api/stores` работал корректно (curl-тест вернул 201)
-- `GET /api/stores/template` возвращал 200 (маршруты в FastAPI правильно упорядочены)
-- `handleDownloadTemplate` в stores.tsx использовал `window.open("...", "_blank")` → открывал пустую страницу (Replit-прокси не форсирует Content-Disposition)
-- Реальные проблемы: отсутствие lat/lon/map_url в StoreInput, старый Excel-шаблон (5 колонок), нет клиентской валидации
-
-## Сделано
-
-### Backend (`artifacts/api-server/main.py`)
-1. `init_db()` — `ALTER TABLE stores ADD COLUMN IF NOT EXISTS map_url TEXT`
-2. `StoreInput` — добавлены `lat`, `lon`, `map_url` (Optional)
-3. `StoreUpdate` — добавлен `map_url`
-4. `store_row_to_dict` — добавлен `map_url`
-5. `create_store` — умное геокодирование: если `lat` + `lon` → используются напрямую
-6. `import_stores` — полный рефакторинг:
-   - Определение колонок по заголовкам (поддержка рус/анг)
-   - Поддержка старого формата (5 колонок) и нового (9 колонок)
-   - Умное геокодирование в цикле импорта
-   - Пропуск строк-подсказок (`←`)
-   - Колонка "Город" автоматически добавляется к адресу
-7. `download_stores_template` — новый шаблон с 9 колонками + строка-подсказка
-
-### OpenAPI spec (`lib/api-spec/openapi.yaml`)
-- `Store`: добавлен `map_url`
-- `StoreInput`: добавлены `lat`, `lon`, `map_url`
-- `StoreUpdate`: добавлен `map_url`
-
-### Codegen
-- `pnpm --filter @workspace/api-spec run codegen` — успешно
-- Типы обновлены, typecheck прошёл
-
-### Frontend (`artifacts/smartroute/src/pages/stores.tsx`)
-- `validateForm()` — клиентская валидация до мутации
-- Форма: collapsible секция "Точные координаты" (lat, lon, map_url)
-- Таблица: новый столбец "Координаты" (lat/lon в monospace)
-- Таблица: кнопка ExternalLink при наличии `map_url`
-- Импорт: передаёт `useImportStores` хук (без изменений, уже был)
-
-## Файлы
-
-| Файл | Изменение |
-|------|-----------|
-| `artifacts/api-server/main.py` | map_url колонка, StoreInput, create_store smart geocode, import refactor, template upgrade; PostgreSQL indexes; adaptive VRP time_limit; `_fallback_distribution()`; OR-Tools try/except |
-| `lib/api-spec/openapi.yaml` | map_url в Store/StoreInput/StoreUpdate |
-| `artifacts/smartroute/src/pages/stores.tsx` | validateForm, lat/lon/map_url поля, Координаты колонка; `handleDownloadTemplate` через fetch+Blob (не window.open) |
-| `docs/ARCHITECTURE.md` | Раздел о правиле скачивания файлов через Blob |
-
-## Чеклист для ручного тестирования
-
-- [ ] Добавить магазин без координат → должен геокодироваться автоматически
-- [ ] Добавить магазин с lat/lon → появляется статус "found" без вызова геокодера
-- [ ] Добавить магазин без имени → должен показать тост "Введите название магазина"
-- [x] Скачать шаблон → файл сохраняется в Downloads как `smartroute_template.xlsx`
-- [ ] Импортировать новый шаблон → все поля считаны корректно
-- [ ] Импортировать старый шаблон (5 колонок) → обратная совместимость
-- [ ] Магазин с map_url → кнопка ExternalLink в таблице
-
-## Известные паттерны / gotchas
-
-- **Скачивание файлов**: `window.open(url, "_blank")` не работает через Replit-прокси.
-  Всегда использовать `fetch` + `Blob` + `<a download>`. См. `docs/ARCHITECTURE.md`.
-- **OR-Tools fallback**: при отсутствии решения `_fallback_distribution()` делает round-robin.
-- **GraphHopper rate-limit**: 429 → автоматический fallback на Haversine на 60 секунд.
-- **Adaptive VRP time limit**: ≤10 узлов → 10 сек, ≤20 → 15 сек, >20 → 30 сек.

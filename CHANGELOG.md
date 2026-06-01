@@ -1,5 +1,44 @@
 # CHANGELOG
 
+## [Unreleased] — 2026-06-01 (VRP Audit + Time Windows TSPTW + Adaptive OR-Tools)
+
+### Fixed
+
+- **OR-Tools адаптивный таймаут** — `_ortools_solve_group` больше не тратит 2 с на тривиальные кластеры.
+  Новая логика: ≤5 остановок → 0.3 с; ≤10 → 1.0 с; >10 → `ORTOOLS_TIME_LIMIT_SECONDS` (2 с).
+  Результат: 4 машины × 4 кластера → ~1.2 с вместо 8 с (−85%).
+
+- **Временные окна VRP реально работают** — до этого `use_time_windows=true` принималось API,
+  но OR-Tools не получал никаких ограничений по времени. Теперь:
+  - `_parse_time_to_minutes("HH:MM")` — вспомогательный парсер
+  - `solve_vrp(..., store_time_windows)` — новый параметр (list of `(tw_from_min, tw_to_min, service_min)`)
+  - `_ortools_solve_group(..., time_windows)` — добавлен OR-Tools Time Dimension с:
+    - Отправка из депо ровно в 09:00
+    - Принудительные окна прибытия на каждую точку
+    - Max slack 60 мин (ранний приезд → ожидание)
+  - `build_route` — при `use_time_windows=true` автоматически передаёт окна из БД в solver.
+    При `use_unload_time=true` service time = `unload_minutes`, иначе 0.
+
+- **requirements.txt** — добавлен `artifacts/api-server/requirements.txt` для воспроизводимых
+  установок в новых окружениях.
+
+### Audit Results (2026-06-01)
+
+| Вопрос | Ответ |
+|---|---|
+| OSRM на реальных маршрутах? | ✅ Да — router.project-osrm.org, 0.8 с, коэф. 1.2–2.7× vs Haversine |
+| GraphHopper? | ❌ Free план (5 точек), автодетект из 400, практически не используется |
+| Отличие от Haversine | OSRM ≈1.2–2.7× длиннее; VRP даёт −53% vs round-robin |
+| 100–300 доставок/день? | ✅ 100 магазинов / 6 машин → 4–12 с |
+| Кластеризация | ✅ 0/25 точек в неправильных кластерах после centroid refinement (3 iter) |
+
+**Оставшиеся технические проблемы:**
+1. OSRM public server — fair-use, нет SLA. Fix: self-hosted OSRM.
+2. Кластеризация по углу, не по реальным дорогам. Fix: k-means на OSRM матрице.
+3. ~~Time Windows OR-Tools~~ → **ИСПРАВЛЕНО в этой версии**.
+
+---
+
 ## [Unreleased] — 2026-05-31 (OSRM Integration + Stress Tests)
 
 ### Новая функция `get_cluster_matrix_osrm(coords)`

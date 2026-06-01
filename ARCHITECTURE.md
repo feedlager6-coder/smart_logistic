@@ -113,17 +113,22 @@ smartroute/                         ← корень проекта
 Шаг 1: Haversine NxN матрица (всегда — гарантированный fallback)
   → Мгновенно, без API, работает без ключей
 
-Шаг 2: Равно-угловая секторная разбивка (Этап A)
+Шаг 2: Равно-угловая секторная разбивка + centroid refinement (Этап A)
   → 360° вокруг депо делятся на N равных угловых "клиньев"
   → Плотный клин → больше точек; разреженный → меньше
+  → 3 итерации centroid refinement — точки у границ секторов
+    переназначаются к ближайшему геометрическому центроиду
   → Нет round-robin; нет SetGlobalSpanCostCoefficient
 
-Шаг 3: Дорожная матрица per-cluster + OR-Tools TSP (Этапы B + C)
+Шаг 3: Дорожная матрица per-cluster + OR-Tools TSP/TSPTW (Этапы B + C)
   → Приоритетная цепочка для каждого кластера:
   →   1) GraphHopper (платный, точные данные ОСМ + пробки)
   →   2) OSRM (бесплатный, реальные дороги OSM, без API-ключа, до 100 точек)
   →   3) Haversine (прямая линия, всегда доступен, мгновенно)
-  → OR-Tools TSP находит оптимальный порядок объезда внутри клина
+  → OR-Tools TSP (или TSPTW при use_time_windows=true):
+  →   – Адаптивный таймаут: ≤5 остановок → 0.3 с; ≤10 → 1.0 с; >10 → 2 с
+  →   – При time_windows: OR-Tools Time Dimension, отправка 09:00,
+  →     принудительные окна прибытия, slack 60 мин
 
 Шаг 4: Заполнение пустых машин
   → Если угловой клин пуст → крупнейший маршрут делится пополам
@@ -167,7 +172,9 @@ smartroute/                         ← корень проекта
 - `GRAPHHOPPER_CLUSTER_MAX` — максимальный размер кластера для GH (default 25)
 - `OSRM_BASE_URL` — URL OSRM сервера (default: публичный router.project-osrm.org)
 - `OSRM_MAX_LOCATIONS` — лимит точек на кластер для OSRM (default 100)
-- `ORTOOLS_TIME_LIMIT_SECONDS` — лимит OR-Tools TSP per кластер (default 2, float)
+- `ORTOOLS_TIME_LIMIT_SECONDS` — максимальный лимит OR-Tools TSP per кластер (default 2, float);
+  адаптивно снижается для малых кластеров: ≤5 → 0.3 с; ≤10 → 1.0 с
+- `CLUSTER_CENTROID_REFINEMENT_ROUNDS` — итерации centroid refinement (default 3)
 
 ---
 
