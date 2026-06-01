@@ -321,9 +321,9 @@ export function ResultPage() {
                         <div className="w-6 h-6 rounded-full bg-secondary text-secondary-foreground text-xs font-bold flex items-center justify-center shrink-0 z-10 border-2 border-background">
                           {stop.order}
                         </div>
-                        <div className="space-y-1 pb-2">
-                          <p className="font-medium text-sm leading-none">{stop.store_name}</p>
-                          <p className="text-xs text-muted-foreground">{stop.address}</p>
+                        <div className="space-y-1 pb-2 min-w-0">
+                          <p className="font-medium text-sm leading-none truncate">{stop.store_name}</p>
+                          <p className="text-xs text-muted-foreground truncate">{stop.address}</p>
                           {stop.arrive_by && (
                             <p className="text-xs text-emerald-600 font-medium mt-1">
                               Прибытие: {stop.arrive_by}

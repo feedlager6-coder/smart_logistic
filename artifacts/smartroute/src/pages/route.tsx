@@ -351,18 +351,18 @@ export function RoutePage() {
                         onCheckedChange={() => handleToggleStore(store.id)}
                         className="mt-1"
                       />
-                      <div className="flex-1 space-y-1">
+                      <div className="flex-1 min-w-0 space-y-1">
                         <p className="font-medium text-sm leading-none flex items-center gap-1.5">
-                          {store.name}
+                          <span className="truncate">{store.name}</span>
                           {store.geocode_status === 'not_found' && (
                             <span title="Координаты не найдены — точка будет пропущена">
                               <AlertCircle className="w-3.5 h-3.5 text-destructive shrink-0" />
                             </span>
                           )}
                         </p>
-                        <p className="text-xs text-muted-foreground flex items-center gap-1">
-                          <MapPin className="w-3 h-3" />
-                          {store.address}
+                        <p className="text-xs text-muted-foreground flex items-center gap-1 min-w-0">
+                          <MapPin className="w-3 h-3 shrink-0" />
+                          <span className="truncate">{store.address}</span>
                         </p>
                         <p className="text-xs text-muted-foreground">
                           Окно: {store.time_window_from}-{store.time_window_to} | {store.unload_minutes} мин

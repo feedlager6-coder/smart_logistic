@@ -1276,7 +1276,7 @@ def create_store(body: StoreInput):
         if lat is not None and lon is not None:
             status = "found"
             if not address:
-                address = reverse_geocode_nominatim(lat, lon) or body.yandex_url
+                address = reverse_geocode_nominatim(lat, lon) or f"{lat:.5f}, {lon:.5f}"
             logger.info("create_store: coords from yandex_url → (%.5f, %.5f)", lat, lon)
         elif geocode_query:
             coords = geocode_address(geocode_query)
@@ -1294,7 +1294,7 @@ def create_store(body: StoreInput):
         logger.info("create_store: geocoded '%s' → %s", geocode_query, status)
 
     if not address:
-        address = geocode_query or body.yandex_url or "Адрес не указан"
+        address = geocode_query or (f"{lat:.5f}, {lon:.5f}" if lat is not None else "Адрес не указан")
 
     # Store yandex_url as map_url if no explicit map_url provided
     map_url = body.map_url or body.yandex_url
@@ -1521,7 +1521,7 @@ async def import_stores(file: UploadFile = File(...)):
             if lat is not None and lon is not None:
                 status = "found"
                 if not address:
-                    address = reverse_geocode_nominatim(lat, lon) or yandex_url
+                    address = reverse_geocode_nominatim(lat, lon) or f"{lat:.5f}, {lon:.5f}"
                 logger.info("Import %d/%d — %s → yandex_url (%.4f, %.4f)", i, total_rows, name, lat, lon)
             elif address:
                 coords = geocode_address(address)
@@ -1543,7 +1543,7 @@ async def import_stores(file: UploadFile = File(...)):
                 time.sleep(1.1)
 
         if not address:
-            address = yandex_url or "Адрес не указан"
+            address = (f"{lat:.5f}, {lon:.5f}" if lat is not None else "Адрес не указан")
 
         final_map_url = map_url or yandex_url
 

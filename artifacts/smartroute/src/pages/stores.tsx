@@ -435,7 +435,9 @@ export function StoresPage() {
                   {filteredStores.map((store) => (
                     <TableRow key={store.id}>
                       <TableCell className="font-medium">{store.name}</TableCell>
-                      <TableCell className="text-muted-foreground text-sm">{store.address}</TableCell>
+                      <TableCell className="text-muted-foreground text-sm max-w-[260px]">
+                        <span className="block truncate" title={store.address ?? ""}>{store.address}</span>
+                      </TableCell>
                       <TableCell>
                         <StatusBadge status={store.geocode_status as "found" | "pending" | "not_found"} />
                       </TableCell>
