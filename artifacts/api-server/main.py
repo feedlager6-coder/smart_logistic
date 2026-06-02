@@ -666,6 +666,75 @@ def _fallback_distribution(store_nodes: list, num_vehicles: int) -> list:
     return [r for r in routes if r]
 
 
+def _inter_route_relocate(routes: list, full_matrix: list, max_iter: int = 5) -> list:
+    """
+    Post-process routes with inter-route Or-opt relocate moves.
+
+    For each stop in each route, tries removing it and inserting it into every
+    position in every other route.  Applies the best move (highest km saving)
+    if it reduces total distance.  Repeats up to max_iter passes or until no
+    improvement is found.
+
+    This equalises route quality across all vehicles — the first route solved
+    by TSP is typically the best; relocate spreads good stops more evenly.
+
+    Complexity: O(max_iter * stops * routes * max_route_len) — fast for ≤ 50 stops.
+    Uses the pre-built full Haversine matrix (metres).
+    """
+    if len(routes) <= 1:
+        return routes
+
+    def route_cost(route):
+        if not route:
+            return 0
+        cost = full_matrix[0][route[0]] + full_matrix[route[-1]][0]
+        for a, b in zip(route, route[1:]):
+            cost += full_matrix[a][b]
+        return cost
+
+    for iteration in range(max_iter):
+        improved = False
+        for i in range(len(routes)):
+            si = 0
+            while si < len(routes[i]):
+                stop = routes[i][si]
+                r_i_without = routes[i][:si] + routes[i][si + 1:]
+                removal_gain = route_cost(routes[i]) - route_cost(r_i_without)
+
+                best_gain = 1  # minimum threshold: 1 metre improvement
+                best_j = -1
+                best_pos = -1
+
+                for j in range(len(routes)):
+                    if i == j:
+                        continue
+                    base_j = route_cost(routes[j])
+                    for pos in range(len(routes[j]) + 1):
+                        r_j_with = routes[j][:pos] + [stop] + routes[j][pos:]
+                        insertion_cost = route_cost(r_j_with) - base_j
+                        net_gain = removal_gain - insertion_cost
+                        if net_gain > best_gain:
+                            best_gain = net_gain
+                            best_j = j
+                            best_pos = pos
+
+                if best_j >= 0:
+                    routes[i] = r_i_without
+                    routes[best_j] = (
+                        routes[best_j][:best_pos] + [stop] + routes[best_j][best_pos:]
+                    )
+                    improved = True
+                    # Do NOT increment si — routes[i] shrank, next element is at si
+                else:
+                    si += 1
+
+        if not improved:
+            logger.info("inter_route_relocate: converged after %d iteration(s)", iteration + 1)
+            break
+
+    return [r for r in routes if r]
+
+
 def get_db():
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = False
@@ -897,6 +966,28 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
         mid = len(sorted_half) // 2
         routes[largest_idx] = sorted_half[:mid]
         routes.append(sorted_half[mid:])
+
+    # ── Step 5: inter-route relocate post-processing ──────────────────────────
+    # Move individual stops between routes if it reduces total Haversine distance.
+    # This equalises quality across all vehicles: TSP sectors are optimised in
+    # isolation, so route 1 can end up much shorter than route 2.  Relocate fixes
+    # this by shifting misplaced stops to the route where they cost the least.
+    if len(routes) > 1 and store_count <= 80:
+        before_km = sum(
+            sum(full_matrix[r[k]][r[k + 1]] for k in range(len(r) - 1))
+            + (full_matrix[0][r[0]] + full_matrix[r[-1]][0] if r else 0)
+            for r in routes
+        ) / 1000
+        routes = _inter_route_relocate(routes, full_matrix)
+        after_km = sum(
+            sum(full_matrix[r[k]][r[k + 1]] for k in range(len(r) - 1))
+            + (full_matrix[0][r[0]] + full_matrix[r[-1]][0] if r else 0)
+            for r in routes
+        ) / 1000
+        logger.info(
+            "inter_route_relocate: %.1f km → %.1f km (saved %.1f km across all vehicles)",
+            before_km, after_km, before_km - after_km,
+        )
 
     return routes, matrix_source
 
