@@ -10,6 +10,8 @@ export interface Savings {
   optimized_km: number;
   unoptimized_km: number;
   saved_km: number;
+  saved_pct: number;
   saved_rub_day: number;
   saved_rub_month: number;
+  saved_fuel_l: number;
 }

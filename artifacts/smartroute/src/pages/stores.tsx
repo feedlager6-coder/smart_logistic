@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useListStores, useCreateStore, useDeleteStore, useGeocodeStore, useImportStores, useUpdateStore, getListStoresQueryKey } from "@workspace/api-client-react";
+import { useState, useCallback } from "react";
+import { useListStores, useCreateStore, useDeleteStore, useGeocodeStore, useUpdateStore, getListStoresQueryKey } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -31,6 +31,14 @@ export function StoresPage() {
   // Import progress state
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [importLoading, setImportLoading] = useState(false);
+  const [importProgress, setImportProgress] = useState<{ total: number; processed: number; imported: number; failed: number } | null>(null);
+
+  // Duplicate warning state
+  const [dupWarning, setDupWarning] = useState<{
+    message: string;
+    existing: { id: number; name: string; address: string; dist_m: number };
+    pendingData: any;
+  } | null>(null);
 
   // Edit modal state
   const [editOpen, setEditOpen] = useState(false);
@@ -45,7 +53,6 @@ export function StoresPage() {
   const createStore = useCreateStore();
   const deleteStore = useDeleteStore();
   const geocodeStore = useGeocodeStore();
-  const importStores = useImportStores();
   const updateStore = useUpdateStore();
 
   const validateForm = (): string | null => {
@@ -71,38 +78,59 @@ export function StoresPage() {
       toast({ title: "Ошибка валидации", description: err, variant: "destructive" });
       return;
     }
+    const storeData = {
+      name: name.trim(),
+      yandex_url: yandexUrl.trim() || null,
+      address: address.trim() || null,
+      city: city.trim() || null,
+      time_window_from: timeFrom,
+      time_window_to: timeTo,
+      unload_minutes: parseInt(unloadMinutes) || 15,
+    };
+    doCreateStore(storeData, false);
+  };
 
-    createStore.mutate(
-      {
-        data: {
-          name: name.trim(),
-          yandex_url: yandexUrl.trim() || null,
-          address: address.trim() || null,
-          city: city.trim() || null,
-          time_window_from: timeFrom,
-          time_window_to: timeTo,
-          unload_minutes: parseInt(unloadMinutes) || 15,
-        } as any,
-      },
-      {
-        onSuccess: () => {
-          const source = yandexUrl.trim() ? "из ссылки Яндекс Карт" : "геокодированием адреса";
-          toast({
-            title: "Магазин добавлен",
-            description: `Координаты определены ${source}.`,
-          });
+  const doCreateStore = (data: any, force: boolean) => {
+    if (!force) {
+      createStore.mutate(
+        { data: data as any },
+        {
+          onSuccess: () => {
+            const source = data.yandex_url ? "из ссылки Яндекс Карт" : "геокодированием адреса";
+            toast({ title: "Магазин добавлен", description: `Координаты определены ${source}.` });
+            queryClient.invalidateQueries({ queryKey: getListStoresQueryKey() });
+            resetForm();
+          },
+          onError: (err: any) => {
+            const detail = err?.response?.data?.detail || err?.detail;
+            if (detail?.type === "duplicate_warning") {
+              setDupWarning({ message: detail.message, existing: detail.existing, pendingData: data });
+              return;
+            }
+            toast({ title: "Ошибка", description: err?.message || "Не удалось добавить магазин.", variant: "destructive" });
+          },
+        }
+      );
+    } else {
+      fetch("/api/stores?force=true", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      })
+        .then((res) => {
+          if (!res.ok) throw new Error("Ошибка создания магазина");
+          return res.json();
+        })
+        .then(() => {
+          toast({ title: "Магазин добавлен" });
           queryClient.invalidateQueries({ queryKey: getListStoresQueryKey() });
           resetForm();
-        },
-        onError: (err: any) => {
-          toast({
-            title: "Ошибка",
-            description: err?.message || "Не удалось добавить магазин.",
-            variant: "destructive",
-          });
-        },
-      }
-    );
+          setDupWarning(null);
+        })
+        .catch((err) => {
+          toast({ title: "Ошибка", description: err.message, variant: "destructive" });
+        });
+    }
   };
 
   const handleDelete = (id: number, name: string) => {
@@ -133,39 +161,63 @@ export function StoresPage() {
     );
   };
 
+  const pollImportJob = useCallback((job_id: string) => {
+    fetch(`/api/stores/import/progress/${job_id}`)
+      .then((r) => r.json())
+      .then((prog) => {
+        if (prog.total > 0) {
+          setImportProgress({ total: prog.total, processed: prog.processed, imported: prog.imported, failed: prog.failed });
+          setImportStatus(
+            `Обработано ${prog.processed} из ${prog.total}: ✓ ${prog.imported}${prog.failed > 0 ? `, ✗ ${prog.failed}` : ""}`
+          );
+        }
+        if (!prog.done) {
+          setTimeout(() => pollImportJob(job_id), 800);
+        } else {
+          fetch(`/api/stores/import/result/${job_id}`)
+            .then((r) => r.json())
+            .then((result) => {
+              setImportLoading(false);
+              setImportStatus(null);
+              setImportProgress(null);
+              const dupMsg = (result.duplicates?.length ?? 0) > 0
+                ? `, найдено ${result.duplicates.length} возможных дубликатов`
+                : "";
+              toast({
+                title: "Импорт завершён",
+                description: `Загружено ${result.imported} из ${result.total} строк${result.failed > 0 ? `, ошибок: ${result.failed}` : ""}${dupMsg}.`,
+              });
+              queryClient.invalidateQueries({ queryKey: getListStoresQueryKey() });
+            })
+            .catch(() => { setImportLoading(false); setImportStatus(null); setImportProgress(null); });
+        }
+      })
+      .catch(() => setTimeout(() => pollImportJob(job_id), 1500));
+  }, [queryClient, toast]);
+
   const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = "";
 
     setImportLoading(true);
-    setImportStatus("Геокодирую адреса (это займёт ~1 сек на строку без API-ключа)...");
+    setImportStatus("Загружаю файл...");
+    setImportProgress(null);
 
-    importStores.mutate(
-      { data: { file } },
-      {
-        onSuccess: (data) => {
-          const { imported, failed, total } = data;
-          setImportStatus(null);
-          toast({
-            title: "Импорт завершён",
-            description: `Загружено ${imported} из ${total} строк${failed > 0 ? `, ошибок: ${failed}` : ""}.`,
-          });
-          queryClient.invalidateQueries({ queryKey: getListStoresQueryKey() });
-        },
-        onError: (err: any) => {
-          setImportStatus(null);
-          toast({
-            title: "Ошибка импорта",
-            description: err?.message || "Не удалось загрузить файл.",
-            variant: "destructive",
-          });
-        },
-        onSettled: () => {
-          setImportLoading(false);
-        },
-      }
-    );
+    const formData = new FormData();
+    formData.append("file", file);
+
+    fetch("/api/stores/import/start", { method: "POST", body: formData })
+      .then((r) => r.json())
+      .then(({ job_id }) => {
+        setImportStatus("Геокодирую адреса...");
+        pollImportJob(job_id);
+      })
+      .catch(() => {
+        setImportLoading(false);
+        setImportStatus(null);
+        toast({ title: "Ошибка импорта", description: "Не удалось начать импорт", variant: "destructive" });
+      });
   };
 
   const handleDownloadTemplate = async () => {
@@ -279,9 +331,19 @@ export function StoresPage() {
 
       {/* Import progress banner */}
       {importStatus && (
-        <div className="flex items-center gap-3 rounded-lg border border-primary/30 bg-primary/5 px-4 py-3 text-sm text-primary">
-          <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-          {importStatus}
+        <div className="rounded-lg border border-primary/30 bg-primary/5 px-4 py-3 text-sm text-primary space-y-2">
+          <div className="flex items-center gap-3">
+            <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+            <span>{importStatus}</span>
+          </div>
+          {importProgress && importProgress.total > 0 && (
+            <div className="w-full bg-primary/20 rounded-full h-1.5 overflow-hidden">
+              <div
+                className="bg-primary h-1.5 rounded-full transition-all duration-500"
+                style={{ width: `${Math.round(importProgress.processed / importProgress.total * 100)}%` }}
+              />
+            </div>
+          )}
         </div>
       )}
 
@@ -500,6 +562,34 @@ export function StoresPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Duplicate warning dialog */}
+      <Dialog open={!!dupWarning} onOpenChange={(open) => { if (!open) setDupWarning(null); }}>
+        <DialogContent className="sm:max-w-[460px]">
+          <DialogHeader>
+            <DialogTitle>Возможный дубликат</DialogTitle>
+            <DialogDescription>
+              {dupWarning?.message}
+            </DialogDescription>
+          </DialogHeader>
+          {dupWarning?.existing && (
+            <div className="rounded-md border bg-muted/40 px-4 py-3 text-sm space-y-1">
+              <div className="font-medium">{dupWarning.existing.name}</div>
+              <div className="text-muted-foreground">{dupWarning.existing.address}</div>
+              <div className="text-xs text-muted-foreground">Расстояние: {dupWarning.existing.dist_m} м</div>
+            </div>
+          )}
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setDupWarning(null)}>Отмена</Button>
+            <Button
+              variant="destructive"
+              onClick={() => dupWarning && doCreateStore(dupWarning.pendingData, true)}
+            >
+              Создать всё равно
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Edit store dialog */}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>

@@ -235,13 +235,18 @@ export function ResultPage() {
           <CardContent className="pt-6">
             <div className="text-sm font-medium opacity-90 mb-1">Общий пробег</div>
             <div className="text-3xl font-bold">{Math.round(result.total_km)} км</div>
+            <div className="text-sm opacity-90 mt-1">
+              Без оптим.: {Math.round((result.savings as any).unoptimized_km ?? result.savings.unoptimized_km)} км
+            </div>
           </CardContent>
         </Card>
         <Card className="bg-emerald-500 text-white border-transparent">
           <CardContent className="pt-6">
-            <div className="text-sm font-medium opacity-90 mb-1">Сэкономлено (км)</div>
+            <div className="text-sm font-medium opacity-90 mb-1">Экономия маршрута</div>
             <div className="text-3xl font-bold">{Math.round(result.savings.saved_km)} км</div>
-            <div className="text-sm opacity-90 mt-1">Без VRP: {Math.round(result.savings.unoptimized_km)} км</div>
+            <div className="text-sm opacity-90 mt-1">
+              −{(result.savings as any).saved_pct ?? 0}% · ~{(result.savings as any).saved_fuel_l ?? 0} л топлива
+            </div>
           </CardContent>
         </Card>
         <Card className="bg-emerald-600 text-white border-transparent">

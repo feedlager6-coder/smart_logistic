@@ -586,16 +586,22 @@ components:
           type: number
         saved_km:
           type: number
+        saved_pct:
+          type: integer
         saved_rub_day:
           type: integer
         saved_rub_month:
           type: integer
+        saved_fuel_l:
+          type: number
       required:
         - optimized_km
         - unoptimized_km
         - saved_km
+        - saved_pct
         - saved_rub_day
         - saved_rub_month
+        - saved_fuel_l
 
     AnalyticsSummary:
       type: object

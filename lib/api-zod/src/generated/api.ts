@@ -205,8 +205,10 @@ export const BuildRouteResponse = zod.object({
   "optimized_km": zod.number(),
   "unoptimized_km": zod.number(),
   "saved_km": zod.number(),
+  "saved_pct": zod.number(),
   "saved_rub_day": zod.number(),
-  "saved_rub_month": zod.number()
+  "saved_rub_month": zod.number(),
+  "saved_fuel_l": zod.number()
 }),
   "total_km": zod.number(),
   "matrix_source": zod.enum(['graphhopper', 'haversine']).optional().describe('Distance matrix source used for optimization'),
@@ -271,8 +273,10 @@ export const GetRouteSessionResponse = zod.object({
   "optimized_km": zod.number(),
   "unoptimized_km": zod.number(),
   "saved_km": zod.number(),
+  "saved_pct": zod.number(),
   "saved_rub_day": zod.number(),
-  "saved_rub_month": zod.number()
+  "saved_rub_month": zod.number(),
+  "saved_fuel_l": zod.number()
 }),
   "total_km": zod.number(),
   "matrix_source": zod.enum(['graphhopper', 'haversine']).optional().describe('Distance matrix source used for optimization'),

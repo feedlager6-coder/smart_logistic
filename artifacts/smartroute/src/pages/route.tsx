@@ -215,6 +215,14 @@ export function RoutePage() {
       toast({ title: "Ошибка", description: "Добавьте хотя бы один автомобиль", variant: "destructive" });
       return;
     }
+    if (vehicles.length > selectedStores.size) {
+      toast({
+        title: "Слишком много машин",
+        description: `Выбрано ${selectedStores.size} магазинов, но ${vehicles.length} машин. Уменьшите число машин до ${selectedStores.size} или добавьте магазины.`,
+        variant: "destructive",
+      });
+      return;
+    }
     // Warn if any selected stores have no coordinates
     const notFoundCount = Array.from(selectedStores).filter(id => {
       const s = stores.find(st => st.id === id);

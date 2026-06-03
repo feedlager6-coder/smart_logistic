@@ -7,11 +7,13 @@ import urllib.parse
 import time
 import io
 import logging
+import threading
+import uuid as _uuid
 from datetime import date, datetime
 from typing import Optional
 import psycopg2
 import psycopg2.extras
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -46,6 +48,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 AVG_SPEED_KMH = 30
 TRAFFIC_MULTIPLIER = 1.2
 geocode_cache: dict = {}
+import_jobs: dict = {}  # job_id → progress/result dict (in-memory, TTL not needed for MVP)
 
 # ── GraphHopper Matrix API ────────────────────────────────────────────────────
 
@@ -1013,9 +1016,11 @@ def geocode_address_yandex(address: str) -> Optional[tuple]:
         if members:
             pos = members[0]["GeoObject"]["Point"]["pos"]
             lon_str, lat_str = pos.split()
-            return (float(lat_str), float(lon_str))
+            result = (float(lat_str), float(lon_str))
+            logger.info("geocode_yandex OK: '%s' → (%.5f, %.5f)", address, result[0], result[1])
+            return result
     except Exception as e:
-        logger.warning(f"Yandex geocoding failed for '{address}': {e}")
+        logger.warning("geocode_yandex FAILED for '%s': %s", address, e)
     return None
 
 
@@ -1055,6 +1060,44 @@ def geocode_address(address: str) -> Optional[tuple]:
 
     geocode_cache[cache_key] = result
     return result
+
+
+def find_nearby_stores(lat: float, lon: float, radius_m: float = 20, exclude_id: int = None) -> list:
+    """Return stores within radius_m metres of (lat, lon), sorted by distance.
+    Uses a degree-based bounding box pre-filter then exact Haversine check."""
+    try:
+        delta = radius_m / 111320.0
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        if exclude_id is not None:
+            cur.execute(
+                """SELECT id, name, address, lat, lon,
+                    SQRT(POWER((lat-%s)*111320.0,2)
+                         + POWER((lon-%s)*111320.0*COS(RADIANS(lat)),2)) AS dist_m
+                   FROM stores
+                   WHERE id != %s AND lat IS NOT NULL
+                     AND ABS(lat-%s) < %s AND ABS(lon-%s) < %s
+                   ORDER BY dist_m LIMIT 5""",
+                (lat, lon, exclude_id, lat, delta, lon, delta),
+            )
+        else:
+            cur.execute(
+                """SELECT id, name, address, lat, lon,
+                    SQRT(POWER((lat-%s)*111320.0,2)
+                         + POWER((lon-%s)*111320.0*COS(RADIANS(lat)),2)) AS dist_m
+                   FROM stores
+                   WHERE lat IS NOT NULL
+                     AND ABS(lat-%s) < %s AND ABS(lon-%s) < %s
+                   ORDER BY dist_m LIMIT 5""",
+                (lat, lon, lat, delta, lon, delta),
+            )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [dict(r) for r in rows if r["dist_m"] < radius_m]
+    except Exception as e:
+        logger.error("find_nearby_stores error: %s", e)
+        return []
 
 
 def parse_yandex_link(url: str) -> tuple:
@@ -1124,33 +1167,53 @@ def reverse_geocode_nominatim(lat: float, lon: float) -> Optional[str]:
 
 def calculate_savings(
     optimized_km: float,
-    num_points: int,
+    store_list: list,
     num_vehicles: int,
-    depot_coord: tuple = None,
-    store_coords: list = None,
+    depot_lat: float,
+    depot_lon: float,
 ) -> dict:
     """
-    Сравнение с «наивной» доставкой: каждый магазин — отдельный рейс туда-обратно от склада.
-    Если переданы координаты — вычисляем точно через Haversine, иначе оценка +35%.
+    Baseline: маршрут в порядке загрузки из Excel (как диспетчер без оптимизации),
+    распределённый по машинам round-robin.  Сравниваем с оптимизированным SmartRoute.
+
+    Методика прозрачна для клиента:
+      «Если бы водители ехали в том же порядке, в котором магазины загружены в систему»
     """
-    if depot_coord and store_coords:
-        unoptimized_km = sum(
-            2 * haversine_meters(depot_coord, sc) / 1000
-            for sc in store_coords
-        )
-    else:
-        unoptimized_km = optimized_km * 1.35
+    # Distribute stores round-robin across vehicles (same order as input)
+    n = max(num_vehicles, 1)
+    buckets: list = [[] for _ in range(n)]
+    for idx, store in enumerate(store_list):
+        buckets[idx % n].append(store)
+
+    unoptimized_km = 0.0
+    depot = (depot_lat, depot_lon)
+    for bucket in buckets:
+        if not bucket:
+            continue
+        prev = depot
+        for s in bucket:
+            if s.get("lat") and s.get("lon"):
+                curr = (float(s["lat"]), float(s["lon"]))
+                unoptimized_km += haversine_meters(prev, curr) / 1000.0
+                prev = curr
+        unoptimized_km += haversine_meters(prev, depot) / 1000.0
 
     unoptimized_km = max(float(unoptimized_km), optimized_km)
-    saved_km = round(unoptimized_km - optimized_km, 1)
-    cost_per_km = 12
+    saved_km = round(max(0.0, unoptimized_km - optimized_km), 1)
+    saved_pct = round(saved_km / unoptimized_km * 100) if unoptimized_km > 0 else 0
+    cost_per_km = 12          # руб./км
+    fuel_l_per_100km = 10     # средний расход
     saved_rub_day = round(saved_km * cost_per_km)
+    saved_fuel_l = round(saved_km * fuel_l_per_100km / 100.0, 1)
+
     return {
         "optimized_km": round(optimized_km, 1),
         "unoptimized_km": round(unoptimized_km, 1),
         "saved_km": saved_km,
+        "saved_pct": saved_pct,
         "saved_rub_day": saved_rub_day,
         "saved_rub_month": saved_rub_day * 30,
+        "saved_fuel_l": saved_fuel_l,
     }
 
 
@@ -1340,7 +1403,7 @@ def list_stores():
 
 
 @app.post("/api/stores", status_code=201)
-def create_store(body: StoreInput):
+def create_store(body: StoreInput, force: bool = Query(False, description="Пропустить предупреждение о дубликате")):
     if not body.name or not body.name.strip():
         raise HTTPException(status_code=422, detail="Название магазина не может быть пустым")
     if not body.yandex_url and not body.address and not body.city and body.lat is None:
@@ -1386,6 +1449,29 @@ def create_store(body: StoreInput):
 
     if not address:
         address = geocode_query or (f"{lat:.5f}, {lon:.5f}" if lat is not None else "Адрес не указан")
+
+    # Duplicate detection (skip if force=True)
+    if lat is not None and lon is not None and not force:
+        nearby = find_nearby_stores(lat, lon, radius_m=20)
+        if nearby:
+            near = nearby[0]
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "type": "duplicate_warning",
+                    "message": (
+                        f"Найден похожий магазин в {near['dist_m']:.0f} м: "
+                        f"«{near['name']}» ({near['address']}). "
+                        "Создать всё равно?"
+                    ),
+                    "existing": {
+                        "id": near["id"],
+                        "name": near["name"],
+                        "address": near["address"],
+                        "dist_m": round(float(near["dist_m"]), 1),
+                    },
+                },
+            )
 
     # Store yandex_url as map_url if no explicit map_url provided
     map_url = body.map_url or body.yandex_url
@@ -1549,6 +1635,7 @@ async def import_stores(file: UploadFile = File(...)):
     imported = 0
     failed = 0
     stores = []
+    duplicates = []
     # Skip header row and any trailing note rows (those with col A starting with ←)
     all_data_rows = [
         r for r in ws.iter_rows(min_row=2, values_only=True)
@@ -1638,6 +1725,22 @@ async def import_stores(file: UploadFile = File(...)):
 
         final_map_url = map_url or yandex_url
 
+        # Duplicate detection (non-blocking — warn only)
+        dup_warning = None
+        if lat is not None and lon is not None:
+            nearby = find_nearby_stores(lat, lon, radius_m=20)
+            if nearby:
+                near = nearby[0]
+                dup_warning = {
+                    "row": i,
+                    "name": name,
+                    "existing_id": near["id"],
+                    "existing_name": near["name"],
+                    "dist_m": round(float(near["dist_m"]), 1),
+                }
+                logger.info("Import row %d — possible duplicate: '%s' ≈ id=%d '%s' (%.1fm)",
+                            i, name, near["id"], near["name"], near["dist_m"])
+
         try:
             conn = get_db()
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -1652,11 +1755,229 @@ async def import_stores(file: UploadFile = File(...)):
             conn.close()
             stores.append(store_row_to_dict(db_row))
             imported += 1
+            if dup_warning:
+                duplicates.append(dup_warning)
         except Exception as e:
             logger.error(f"Failed to insert store row {i}: {e}")
             failed += 1
 
-    return {"total": imported + failed, "imported": imported, "failed": failed, "stores": stores}
+    return {
+        "total": imported + failed,
+        "imported": imported,
+        "failed": failed,
+        "stores": stores,
+        "duplicates": duplicates,
+    }
+
+
+def _import_process_content_sync(content_bytes: bytes, job: dict) -> None:
+    """Run Excel import synchronously, updating job dict for progress tracking.
+    Called from background thread by /api/stores/import/start endpoint."""
+    if not OPENPYXL_AVAILABLE:
+        job["error"] = "openpyxl not installed"
+        job["done"] = True
+        return
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(content_bytes))
+    except Exception as e:
+        job["error"] = f"Не удалось открыть Excel файл: {e}"
+        job["done"] = True
+        return
+
+    ws = wb.active
+    header_row = [str(c).strip().lower() if c else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True), [])]
+
+    def _col(candidates):
+        for name in candidates:
+            for i, h in enumerate(header_row):
+                if name in h:
+                    return i
+        return None
+
+    c_name   = _col(["назван", "name", "store_name"])
+    c_yandex = _col(["ссылка яндекс", "яндекс", "yandex", "ссылка"])
+    c_addr   = _col(["адрес", "address"])
+    c_city   = _col(["город", "city"])
+    c_lat    = _col(["широта", "lat", "latitude"])
+    c_lon    = _col(["долгота", "lon", "longitude"])
+    c_mapurl = _col(["map_url", "ссылка на карт"])
+    c_unload = _col(["разгрузка", "unload"])
+    c_from   = _col(["время с", "open_time", "с (", "time_from"])
+    c_to     = _col(["время до", "close_time", "до (", "time_to"])
+
+    if c_name is None:
+        c_name = 0
+    if c_addr is None and c_yandex is None:
+        c_addr = 1
+
+    def _get(row, idx, default=""):
+        if idx is None or idx >= len(row):
+            return default
+        v = row[idx]
+        return v if v is not None else default
+
+    all_rows = [
+        r for r in ws.iter_rows(min_row=2, values_only=True)
+        if r and r[0] and not str(r[0]).strip().startswith("←")
+    ]
+    total_rows = len(all_rows)
+    job["total"] = total_rows
+    imported, failed = 0, 0
+    stores_out: list = []
+    duplicates: list = []
+
+    for i, row in enumerate(all_rows, start=1):
+        name      = str(_get(row, c_name, "")).strip()
+        yandex_url = str(_get(row, c_yandex, "")).strip() or None
+        city      = str(_get(row, c_city, "")).strip()
+        raw_addr  = str(_get(row, c_addr, "")).strip()
+        address   = f"{raw_addr}, {city}" if city and city not in raw_addr else raw_addr
+        if not address:
+            address = city
+
+        if not name or (not yandex_url and not address):
+            failed += 1
+            job["processed"] = i; job["failed"] = failed
+            continue
+
+        raw_lat = _get(row, c_lat)
+        raw_lon = _get(row, c_lon)
+        map_url = str(_get(row, c_mapurl, "")).strip() or None
+
+        if c_from is None and len(row) > 2 and row[2] and ":" in str(row[2]):
+            tw_from = str(row[2]).strip()
+            tw_to   = str(row[3]).strip() if len(row) > 3 and row[3] else "18:00"
+            unload  = int(row[4]) if len(row) > 4 and row[4] else 15
+        else:
+            tw_from = str(_get(row, c_from, "09:00")).strip() or "09:00"
+            tw_to   = str(_get(row, c_to, "18:00")).strip() or "18:00"
+            try:
+                unload = int(_get(row, c_unload, 15))
+            except (ValueError, TypeError):
+                unload = 15
+
+        lat, lon, status = None, None, "not_found"
+        try:
+            pv_lat = float(raw_lat) if raw_lat not in (None, "", "None") else None
+            pv_lon = float(raw_lon) if raw_lon not in (None, "", "None") else None
+        except (ValueError, TypeError):
+            pv_lat = pv_lon = None
+
+        if pv_lat is not None and pv_lon is not None and (-90 <= pv_lat <= 90) and (-180 <= pv_lon <= 180):
+            lat, lon, status = pv_lat, pv_lon, "found"
+        elif yandex_url:
+            lat, lon = parse_yandex_link(yandex_url)
+            if lat is not None:
+                status = "found"
+                if not address:
+                    address = reverse_geocode_nominatim(lat, lon) or f"{lat:.5f}, {lon:.5f}"
+            elif address:
+                coords = geocode_address(address)
+                lat, lon = (coords[0], coords[1]) if coords else (None, None)
+                status = "found" if coords else "not_found"
+                if not YANDEX_GEOCODER_API_KEY:
+                    time.sleep(1.1)
+        elif address:
+            coords = geocode_address(address)
+            lat, lon = (coords[0], coords[1]) if coords else (None, None)
+            status = "found" if coords else "not_found"
+            if not YANDEX_GEOCODER_API_KEY:
+                time.sleep(1.1)
+
+        if not address:
+            address = f"{lat:.5f}, {lon:.5f}" if lat is not None else "Адрес не указан"
+
+        final_map_url = map_url or yandex_url
+
+        dup_warning = None
+        if lat is not None and lon is not None:
+            nearby = find_nearby_stores(lat, lon, radius_m=20)
+            if nearby:
+                near = nearby[0]
+                dup_warning = {
+                    "row": i, "name": name,
+                    "existing_id": near["id"], "existing_name": near["name"],
+                    "dist_m": round(float(near["dist_m"]), 1),
+                }
+
+        try:
+            conn2 = get_db()
+            cur2 = conn2.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur2.execute(
+                """INSERT INTO stores (name, address, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+                (name, address, lat, lon, final_map_url, status, tw_from, tw_to, unload),
+            )
+            db_row = cur2.fetchone()
+            conn2.commit(); cur2.close(); conn2.close()
+            stores_out.append(store_row_to_dict(db_row))
+            imported += 1
+            if dup_warning:
+                duplicates.append(dup_warning)
+        except Exception as e:
+            logger.error("Import job row %d failed: %s", i, e)
+            failed += 1
+
+        job["processed"] = i
+        job["imported"] = imported
+        job["failed"] = failed
+        job["duplicates"] = duplicates
+
+    job["stores"] = stores_out
+    job["done"] = True
+    logger.info("Import job done: %d imported, %d failed, %d duplicates", imported, failed, len(duplicates))
+
+
+@app.post("/api/stores/import/start", status_code=202)
+async def start_import_stores(file: UploadFile = File(...)):
+    """Start async background import. Returns job_id for progress polling."""
+    if not OPENPYXL_AVAILABLE:
+        raise HTTPException(status_code=500, detail="openpyxl not installed")
+    content = await file.read()
+    job_id = _uuid.uuid4().hex[:8]
+    job: dict = {
+        "total": 0, "processed": 0, "imported": 0, "failed": 0,
+        "done": False, "stores": [], "duplicates": [], "error": None,
+    }
+    import_jobs[job_id] = job
+    t = threading.Thread(target=_import_process_content_sync, args=(content, job), daemon=True)
+    t.start()
+    return {"job_id": job_id}
+
+
+@app.get("/api/stores/import/progress/{job_id}")
+def get_import_progress(job_id: str):
+    """Poll import job progress. Returns current counters + done flag."""
+    if job_id not in import_jobs:
+        raise HTTPException(status_code=404, detail="Import job not found")
+    job = import_jobs[job_id]
+    return {
+        "job_id": job_id,
+        "total": job["total"],
+        "processed": job["processed"],
+        "imported": job["imported"],
+        "failed": job["failed"],
+        "done": job["done"],
+        "duplicate_count": len(job.get("duplicates", [])),
+        "error": job.get("error"),
+    }
+
+
+@app.get("/api/stores/import/result/{job_id}")
+def get_import_result(job_id: str):
+    """Fetch final result of a completed import job."""
+    if job_id not in import_jobs:
+        raise HTTPException(status_code=404, detail="Import job not found")
+    job = import_jobs[job_id]
+    return {
+        "total": job["total"],
+        "imported": job["imported"],
+        "failed": job["failed"],
+        "stores": job.get("stores", []),
+        "duplicates": job.get("duplicates", []),
+        "done": job["done"],
+        "error": job.get("error"),
+    }
 
 
 @app.get("/api/stores/{id}")
@@ -1792,13 +2113,24 @@ def build_route(body: RouteRequest):
     depot_lat = body.depot_lat or 42.9849
     depot_lon = body.depot_lon or 47.5046
 
-    # Build coordinate list: depot first, then stores
+    # Build coordinate list: depot first, then stores (preserve input order for savings baseline)
     store_list = [stores_rows[sid] for sid in body.store_ids if sid in stores_rows and stores_rows[sid]["lat"]]
     if not store_list:
         raise HTTPException(status_code=400, detail="No geocoded stores found")
 
-    all_coords = [(depot_lat, depot_lon)] + [(s["lat"], s["lon"]) for s in store_list]
     num_vehicles = len(body.vehicles)
+
+    # ── Vehicle count validation ──────────────────────────────────────────────
+    if num_vehicles > len(store_list):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Количество машин ({num_vehicles}) превышает количество магазинов "
+                f"({len(store_list)}). Уменьшите число машин до {len(store_list)} или меньше."
+            ),
+        )
+
+    all_coords = [(depot_lat, depot_lon)] + [(s["lat"], s["lon"]) for s in store_list]
 
     capacities = None
     demands = None
@@ -1919,13 +2251,12 @@ def build_route(body: RouteRequest):
             "whatsapp_url": wurl,
         })
 
-    store_coords = [(s["lat"], s["lon"]) for s in store_list if s.get("lat") and s.get("lon")]
     savings = calculate_savings(
         total_km,
-        len(store_list),
+        store_list,      # passed in original input order — used as baseline
         num_vehicles,
-        depot_coord=(depot_lat, depot_lon),
-        store_coords=store_coords,
+        depot_lat,
+        depot_lon,
     )
 
     result = {
