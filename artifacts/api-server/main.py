@@ -1386,7 +1386,10 @@ async def startup():
             "YANDEX_GEOCODER_API_KEY not set — Yandex Geocoder disabled, falling back to Nominatim"
         )
     init_db()
-    migrate_moscow_stores()
+    # NOTE: migrate_moscow_stores() deliberately NOT called here.
+    # It was a one-time dev migration that ran when the DB held old Moscow demo data.
+    # Calling it on every startup is catastrophically dangerous for production clients
+    # in any Russian city with lat > 50 (Moscow, SPb, Novosibirsk, Yekaterinburg, etc.).
     seed_demo_data()
 
 
@@ -2175,6 +2178,12 @@ def build_route(body: RouteRequest):
     if not body.vehicles:
         raise HTTPException(status_code=400, detail="No vehicles provided")
 
+    # Validate depot coordinates
+    if body.depot_lat is not None and not (-90 <= body.depot_lat <= 90):
+        raise HTTPException(status_code=422, detail="Широта склада должна быть от -90 до 90")
+    if body.depot_lon is not None and not (-180 <= body.depot_lon <= 180):
+        raise HTTPException(status_code=422, detail="Долгота склада должна быть от -180 до 180")
+
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -2391,6 +2400,10 @@ def get_route_session(id: int):
 @app.get("/api/route/sessions")
 def list_route_sessions(page: int = 1, page_size: int = 20):
     """Список сессий маршрутов с пагинацией."""
+    if page < 1:
+        page = 1
+    if page_size < 1 or page_size > 200:
+        page_size = 20
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:

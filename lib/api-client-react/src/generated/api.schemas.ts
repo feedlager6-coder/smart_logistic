@@ -123,14 +123,16 @@ export interface RouteRequest {
 }
 
 /**
- * Distance matrix source used for optimization
+ * Distance matrix source used for optimization (mixed = combination of sources per cluster)
  */
 export type RouteResultMatrixSource = typeof RouteResultMatrixSource[keyof typeof RouteResultMatrixSource];
 
 
 export const RouteResultMatrixSource = {
   graphhopper: 'graphhopper',
+  osrm: 'osrm',
   haversine: 'haversine',
+  mixed: 'mixed',
 } as const;
 
 /**
@@ -177,7 +179,7 @@ export interface Savings {
   saved_fuel_l: number;
   /** Экономия только на топливе, руб. (saved_fuel_l × цена дизеля) */
   saved_fuel_cost_rub: number;
-  /** Полная экономия в день, руб. (топливо + водитель + обслуживание, 50 руб/км) */
+  /** Полная экономия в день, руб. (топливо + водитель + обслуживание, 31 руб/км × ROAD_FACTOR=1.4) */
   saved_rub_day: number;
   /** Полная экономия в месяц = saved_rub_day × 30 */
   saved_rub_month: number;
@@ -189,7 +191,7 @@ export interface RouteResult {
   routes: VehicleRoute[];
   savings: Savings;
   total_km: number;
-  /** Distance matrix source used for optimization */
+  /** Distance matrix source used for optimization (mixed = combination of sources per cluster) */
   matrix_source?: RouteResultMatrixSource;
   /** Geocoding service used for address resolution */
   geocoder_used?: RouteResultGeocoderUsed;

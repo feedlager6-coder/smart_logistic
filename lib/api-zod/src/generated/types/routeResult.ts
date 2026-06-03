@@ -16,7 +16,7 @@ export interface RouteResult {
   routes: VehicleRoute[];
   savings: Savings;
   total_km: number;
-  /** Distance matrix source used for optimization */
+  /** Distance matrix source used for optimization (mixed = combination of sources per cluster) */
   matrix_source?: RouteResultMatrixSource;
   /** Geocoding service used for address resolution */
   geocoder_used?: RouteResultGeocoderUsed;

@@ -7,12 +7,14 @@
  */
 
 /**
- * Distance matrix source used for optimization
+ * Distance matrix source used for optimization (mixed = combination of sources per cluster)
  */
 export type RouteResultMatrixSource = typeof RouteResultMatrixSource[keyof typeof RouteResultMatrixSource];
 
 
 export const RouteResultMatrixSource = {
   graphhopper: 'graphhopper',
+  osrm: 'osrm',
   haversine: 'haversine',
+  mixed: 'mixed',
 } as const;
