@@ -588,20 +588,26 @@ components:
           type: number
         saved_pct:
           type: integer
-        saved_rub_day:
-          type: integer
-        saved_rub_month:
-          type: integer
         saved_fuel_l:
           type: number
+        saved_fuel_cost_rub:
+          type: integer
+          description: "Экономия только на топливе, руб. (saved_fuel_l × цена дизеля)"
+        saved_rub_day:
+          type: integer
+          description: "Полная экономия в день, руб. (топливо + водитель + обслуживание, 50 руб/км)"
+        saved_rub_month:
+          type: integer
+          description: "Полная экономия в месяц = saved_rub_day × 30"
       required:
         - optimized_km
         - unoptimized_km
         - saved_km
         - saved_pct
+        - saved_fuel_l
+        - saved_fuel_cost_rub
         - saved_rub_day
         - saved_rub_month
-        - saved_fuel_l
 
     AnalyticsSummary:
       type: object

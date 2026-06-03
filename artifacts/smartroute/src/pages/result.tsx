@@ -245,7 +245,7 @@ export function ResultPage() {
             <div className="text-sm font-medium opacity-90 mb-1">Экономия маршрута</div>
             <div className="text-3xl font-bold">{Math.round(result.savings.saved_km)} км</div>
             <div className="text-sm opacity-90 mt-1">
-              −{(result.savings as any).saved_pct ?? 0}% · ~{(result.savings as any).saved_fuel_l ?? 0} л топлива
+              −{(result.savings as any).saved_pct ?? 0}% · ~{(result.savings as any).saved_fuel_l ?? 0} л топлива (~{(result.savings as any).saved_fuel_cost_rub ?? 0} ₽)
             </div>
           </CardContent>
         </Card>

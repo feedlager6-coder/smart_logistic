@@ -8,6 +8,7 @@ import time
 import io
 import logging
 import threading
+import concurrent.futures
 import uuid as _uuid
 from datetime import date, datetime
 from typing import Optional
@@ -700,6 +701,12 @@ def _inter_route_relocate(routes: list, full_matrix: list, max_iter: int = 5) ->
         for i in range(len(routes)):
             si = 0
             while si < len(routes[i]):
+                # Never remove the last stop from a route — that would leave a vehicle empty.
+                # Efficiency-first routing means we keep all vehicles active.
+                if len(routes[i]) <= 1:
+                    si += 1
+                    continue
+
                 stop = routes[i][si]
                 r_i_without = routes[i][:si] + routes[i][si + 1:]
                 removal_gain = route_cost(routes[i]) - route_cost(r_i_without)
@@ -882,45 +889,63 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
     #   GH   (paid plan, precise road distances)     → if GH key set + fits plan limit
     #   OSRM (free, real OSM roads, no key needed)   → public demo server fallback
     #   Haversine (instant math, always available)   → final fallback
+    #
+    # Matrix fetching is parallelised with ThreadPoolExecutor so that network-
+    # bound GH/OSRM requests for different clusters overlap.  OR-Tools TSP
+    # solving is run sequentially afterwards (CPU-bound, GIL-limited).
+    t_vrp_start = time.time()
+
+    non_empty_clusters = [c for c in clusters if c]
+    # Phase A: fetch matrices for all clusters in parallel -----------------------
+    def _fetch_matrix(cluster_nodes):
+        """Return (cluster_nodes, sub_matrix, source) for one cluster."""
+        if len(cluster_nodes) == 1:
+            return (cluster_nodes, None, "hv_single")
+        group_indices = [0] + cluster_nodes
+        group_coords = [all_coords[i] for i in group_indices]
+        gh_result = get_cluster_matrix_gh(group_coords)
+        if gh_result:
+            sub_matrix, _ = gh_result
+            return (cluster_nodes, sub_matrix, "gh")
+        osrm_result = get_cluster_matrix_osrm(group_coords)
+        if osrm_result:
+            sub_matrix, _ = osrm_result
+            return (cluster_nodes, sub_matrix, "osrm")
+        group_indices2 = [0] + cluster_nodes
+        sub_matrix = [[full_matrix[r][c] for c in group_indices2] for r in group_indices2]
+        return (cluster_nodes, sub_matrix, "hv")
+
+    max_workers = min(len(non_empty_clusters), 8)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(max_workers, 1)) as pool:
+        matrix_futures = [pool.submit(_fetch_matrix, c) for c in non_empty_clusters]
+        matrix_results = [f.result() for f in matrix_futures]
+
+    # Phase B: OR-Tools TSP per cluster (sequential; CPU-bound) -----------------
     routes = []
     gh_clusters = 0
     osrm_clusters = 0
     hv_clusters = 0
-    t_vrp_start = time.time()
 
-    for cluster_nodes in clusters:
-        if not cluster_nodes:
-            continue
-        if len(cluster_nodes) == 1:
+    for cluster_nodes, sub_matrix, source in matrix_results:
+        if source == "hv_single":
             routes.append(cluster_nodes)
             hv_clusters += 1
             continue
+        if source == "gh":
+            gh_clusters += 1
+        elif source == "osrm":
+            osrm_clusters += 1
+        else:
+            hv_clusters += 1
 
         group_indices = [0] + cluster_nodes
         group_coords = [all_coords[i] for i in group_indices]
-
-        # ── Stage B: per-cluster road matrix ─────────────────────────────────
-        gh_result = get_cluster_matrix_gh(group_coords)
-        if gh_result:
-            sub_matrix, _ = gh_result
-            gh_clusters += 1
-        else:
-            osrm_result = get_cluster_matrix_osrm(group_coords)
-            if osrm_result:
-                sub_matrix, _ = osrm_result
-                osrm_clusters += 1
-            else:
-                sub_matrix = [[full_matrix[r][c] for c in group_indices] for r in group_indices]
-                hv_clusters += 1
-
-        # ── Stage C: OR-Tools TSP with the chosen matrix ─────────────────────
-        # Extract per-store time windows for this cluster (0-indexed in store_time_windows).
         cluster_tw = None
         if store_time_windows:
             try:
                 cluster_tw = [store_time_windows[node - 1] for node in cluster_nodes]
             except IndexError:
-                cluster_tw = None  # defensive: skip TW if index out of range
+                cluster_tw = None
 
         ordered = _ortools_solve_group(all_coords[0], cluster_nodes, group_coords, sub_matrix,
                                        time_windows=cluster_tw)
@@ -1201,19 +1226,27 @@ def calculate_savings(
     unoptimized_km = max(float(unoptimized_km), optimized_km)
     saved_km = round(max(0.0, unoptimized_km - optimized_km), 1)
     saved_pct = round(saved_km / unoptimized_km * 100) if unoptimized_km > 0 else 0
-    cost_per_km = 12          # руб./км
-    fuel_l_per_100km = 10     # средний расход
-    saved_rub_day = round(saved_km * cost_per_km)
+
+    # Realistic cost model for a Russian delivery van (Газель) in 2026:
+    #   • Diesel ~70 руб/л, consumption 10 л/100 км → fuel = 7 руб/км
+    #   • Driver wage + vehicle maintenance ≈ 43 руб/км  → total ≈ 50 руб/км
+    fuel_l_per_100km: float = 10.0
+    fuel_price_rub: float = 70.0           # руб. за литр (дизель, 2026)
+    cost_per_km: float = 50.0              # полная стоимость, руб/км
+
     saved_fuel_l = round(saved_km * fuel_l_per_100km / 100.0, 1)
+    saved_fuel_cost_rub = round(saved_fuel_l * fuel_price_rub)
+    saved_rub_day = round(saved_km * cost_per_km)
 
     return {
         "optimized_km": round(optimized_km, 1),
         "unoptimized_km": round(unoptimized_km, 1),
         "saved_km": saved_km,
         "saved_pct": saved_pct,
+        "saved_fuel_l": saved_fuel_l,
+        "saved_fuel_cost_rub": saved_fuel_cost_rub,
         "saved_rub_day": saved_rub_day,
         "saved_rub_month": saved_rub_day * 30,
-        "saved_fuel_l": saved_fuel_l,
     }
 
 

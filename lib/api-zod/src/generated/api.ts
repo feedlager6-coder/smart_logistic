@@ -206,9 +206,10 @@ export const BuildRouteResponse = zod.object({
   "unoptimized_km": zod.number(),
   "saved_km": zod.number(),
   "saved_pct": zod.number(),
-  "saved_rub_day": zod.number(),
-  "saved_rub_month": zod.number(),
-  "saved_fuel_l": zod.number()
+  "saved_fuel_l": zod.number(),
+  "saved_fuel_cost_rub": zod.number().describe('Экономия только на топливе, руб. (saved_fuel_l × цена дизеля)'),
+  "saved_rub_day": zod.number().describe('Полная экономия в день, руб. (топливо + водитель + обслуживание, 50 руб\/км)'),
+  "saved_rub_month": zod.number().describe('Полная экономия в месяц = saved_rub_day × 30')
 }),
   "total_km": zod.number(),
   "matrix_source": zod.enum(['graphhopper', 'haversine']).optional().describe('Distance matrix source used for optimization'),
@@ -274,9 +275,10 @@ export const GetRouteSessionResponse = zod.object({
   "unoptimized_km": zod.number(),
   "saved_km": zod.number(),
   "saved_pct": zod.number(),
-  "saved_rub_day": zod.number(),
-  "saved_rub_month": zod.number(),
-  "saved_fuel_l": zod.number()
+  "saved_fuel_l": zod.number(),
+  "saved_fuel_cost_rub": zod.number().describe('Экономия только на топливе, руб. (saved_fuel_l × цена дизеля)'),
+  "saved_rub_day": zod.number().describe('Полная экономия в день, руб. (топливо + водитель + обслуживание, 50 руб\/км)'),
+  "saved_rub_month": zod.number().describe('Полная экономия в месяц = saved_rub_day × 30')
 }),
   "total_km": zod.number(),
   "matrix_source": zod.enum(['graphhopper', 'haversine']).optional().describe('Distance matrix source used for optimization'),

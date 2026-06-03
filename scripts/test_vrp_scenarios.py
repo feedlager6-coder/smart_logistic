@@ -141,13 +141,14 @@ if __name__ == "__main__":
     c_cluster_ok = c_max >= 7
     print(f"  C — east cluster consolidated (max≥7): {'PASS ✓' if c_cluster_ok else 'FAIL ✗'}  (max={c_max})")
 
-    # Verify all vehicles are used in each scenario
+    # All requested vehicles should be used (inter-route relocate no longer
+    # empties routes, so vehicle count must equal num_vehicles).
     a_all_used = len(r_a) == 4
     b_all_used = len(r_b) == 6
     c_all_used = len(r_c) == 4
-    print(f"  A — all 4 vehicles used: {'PASS ✓' if a_all_used else 'FAIL ✗'}")
-    print(f"  B — all 6 vehicles used: {'PASS ✓' if b_all_used else 'FAIL ✗'}")
-    print(f"  C — all 4 vehicles used: {'PASS ✓' if c_all_used else 'FAIL ✗'}")
+    print(f"  A — all 4 vehicles used: {'PASS ✓' if a_all_used else 'FAIL ✗'}  (got {len(r_a)})")
+    print(f"  B — all 6 vehicles used: {'PASS ✓' if b_all_used else 'FAIL ✗'}  (got {len(r_b)})")
+    print(f"  C — all 4 vehicles used: {'PASS ✓' if c_all_used else 'FAIL ✗'}  (got {len(r_c)})")
 
     print()
     all_pass = a_ok and b_ok and c_ok and c_cluster_ok and a_all_used and b_all_used and c_all_used

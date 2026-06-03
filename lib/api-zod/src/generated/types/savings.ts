@@ -11,7 +11,11 @@ export interface Savings {
   unoptimized_km: number;
   saved_km: number;
   saved_pct: number;
-  saved_rub_day: number;
-  saved_rub_month: number;
   saved_fuel_l: number;
+  /** Экономия только на топливе, руб. (saved_fuel_l × цена дизеля) */
+  saved_fuel_cost_rub: number;
+  /** Полная экономия в день, руб. (топливо + водитель + обслуживание, 50 руб/км) */
+  saved_rub_day: number;
+  /** Полная экономия в месяц = saved_rub_day × 30 */
+  saved_rub_month: number;
 }

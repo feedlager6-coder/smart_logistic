@@ -46,7 +46,9 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 - **Orval/TanStack Query mismatch**: `useGetRouteSession` в result.tsx использует `as any` для опции `enabled` из-за несовместимости версий
 - **Yandex URL → coords**: `parse_yandex_link()` парсит `whatshere[point]=LON,LAT` (не LAT,LON!). При импорте из Excel адрес = результат обратного геокодинга Nominatim, fallback = `"lat, lon"` строка (НЕ сам URL)
 - **2GIS тайлы**: Leaflet использует `tile{s}.maps.2gis.com/tiles?x={x}&y={y}&z={z}&v=1`, subdomains="0123". Тайлы загружаются как img — CORS не применяется
-- **Inter-route Or-opt**: `_inter_route_relocate()` запускается после всех TSP (шаг 5 в `solve_vrp`). Работает только при ≤80 точках. Логирует сохранение км. Не меняет распределение если уже оптимально
+- **Inter-route Or-opt**: `_inter_route_relocate()` запускается после всех TSP (шаг 5 в `solve_vrp`). Работает только при ≤80 точках. Логирует сохранение км. Не меняет распределение если уже оптимально. **Важно: не обнуляет маршруты** — если в маршруте остался 1 стоп, он не переносится (защита от исчезновения машин).
+- **Параллельные OSRM-запросы**: Step 3 в `solve_vrp` использует `concurrent.futures.ThreadPoolExecutor` для одновременного запроса матриц по всем кластерам (Phase A). OR-Tools TSP решается последовательно (Phase B). Выигрыш: −38% времени при 100 точках / 10 машинах.
+- **Модель стоимости**: `cost_per_km = 50 руб/км` (Газель, дизель 70 р/л × 10 л/100 км + водитель + ТО). `saved_fuel_cost_rub` — экономия только топлива. `saved_rub_day` — полная экономия. Оба поля в ответе `POST /api/route/build`.
 
 ## Product
 
