@@ -1227,16 +1227,35 @@ def calculate_savings(
     saved_km = round(max(0.0, unoptimized_km - optimized_km), 1)
     saved_pct = round(saved_km / unoptimized_km * 100) if unoptimized_km > 0 else 0
 
-    # Realistic cost model for a Russian delivery van (Газель) in 2026:
-    #   • Diesel ~70 руб/л, consumption 10 л/100 км → fuel = 7 руб/км
-    #   • Driver wage + vehicle maintenance ≈ 43 руб/км  → total ≈ 50 руб/км
+    # ── Реалистичная модель стоимости (Газель, РФ, 2026) ─────────────────────
+    #
+    # ROAD_FACTOR: средний коэффициент реальных дорог к Haversine-расстоянию.
+    # Оба сравниваемых маршрута (baseline и optimized_km) используют Haversine,
+    # поэтому saved_pct и saved_km честны как относительное сравнение.
+    # Однако для расчёта реальной экономии топлива и денег необходимо перевести
+    # прямолинейные км в фактический пробег по дорогам (OSRM показывает ×1.4–1.5
+    # для Махачкалы и аналогичных городов).
+    #
+    # Разбивка cost_per_km (руб/км по реальным дорогам):
+    #   • Топливо:     10 л × 70 руб/л / 100 км  =  7.0 руб/км
+    #   • Водитель:    65 000 руб/мес / 25 дн / 200 км/дн = 13.0 руб/км
+    #                  (50 000 зарплата + 30% страх.взносы)
+    #   • ТО + износ:  7.0 руб/км  (нормативы для Газели)
+    #   • Накладные:   4.0 руб/км  (ОСАГО, прочее)
+    #   ────────────────────────────────────────────────────────
+    #   ИТОГО:        31.0 руб/км  (реальных дорог)
+    #
+    ROAD_FACTOR: float = 1.4           # Haversine → реальный пробег
     fuel_l_per_100km: float = 10.0
-    fuel_price_rub: float = 70.0           # руб. за литр (дизель, 2026)
-    cost_per_km: float = 50.0              # полная стоимость, руб/км
+    fuel_price_rub: float = 70.0       # руб. за литр (дизель, 2026)
+    cost_per_km: float = 31.0          # руб/км реальных дорог (с разбивкой выше)
 
-    saved_fuel_l = round(saved_km * fuel_l_per_100km / 100.0, 1)
+    # Применяем ROAD_FACTOR только к монетарным метрикам, а не к saved_km,
+    # чтобы не искажать честное сравнение маршрутов.
+    saved_km_road = saved_km * ROAD_FACTOR
+    saved_fuel_l = round(saved_km_road * fuel_l_per_100km / 100.0, 1)
     saved_fuel_cost_rub = round(saved_fuel_l * fuel_price_rub)
-    saved_rub_day = round(saved_km * cost_per_km)
+    saved_rub_day = round(saved_km_road * cost_per_km)
 
     return {
         "optimized_km": round(optimized_km, 1),

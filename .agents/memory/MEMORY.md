@@ -5,3 +5,4 @@
 - [OR-Tools float time limit](ortools-time-limit.md) — params.time_limit requires both .seconds (int) and .nanos (int) for sub-second limits; use ORTOOLS_TIME_LIMIT_SECONDS global (float) patched in tests to 0.5.
 - [OR-Tools TSPTW time windows](ortools-tsptw.md) — Time Dimension added to _ortools_solve_group when time_windows param provided; depot fixed at 09:00, per-stop [tw_from,tw_to] range, slack 60min; adaptive time limit: ≤5 stops→0.3s, ≤10→1.0s, else full budget.
 - [Python deps no requirements.txt](python-deps.md) — artifacts/api-server had no requirements.txt; must pip install fastapi uvicorn psycopg2-binary openpyxl ortools python-multipart manually; requirements.txt now added.
+- [Savings metrics cost model](savings-cost-model.md) — cost_per_km=31 руб/км (audited breakdown); ROAD_FACTOR=1.4 applied only to monetary calcs (fuel_l, rub_day); saved_km/saved_pct use raw Haversine (both sides consistent).
