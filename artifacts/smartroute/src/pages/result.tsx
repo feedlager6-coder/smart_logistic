@@ -48,6 +48,7 @@ export function ResultPage() {
   const isMobile = useIsMobile();
   const { toast } = useToast();
   const [copied, setCopied] = useState(false);
+  const [copiedNav, setCopiedNav] = useState<number | null>(null);
   const [localResult, setLocalResult] = useState<RouteResult | null>(null);
   const [activeVehicleIndex, setActiveVehicleIndex] = useState(0);
 
@@ -82,6 +83,15 @@ export function ResultPage() {
       setCopied(true);
       toast({ title: "Ссылка скопирована", description: "Поделитесь ею с водителем." });
       setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  const handleCopyNav = (url: string, index: number) => {
+    if (!url) return;
+    navigator.clipboard.writeText(url).then(() => {
+      setCopiedNav(index);
+      toast({ title: "Ссылка Яндекс Навигатора скопирована", description: "Отправьте водителю для открытия маршрута." });
+      setTimeout(() => setCopiedNav(null), 2000);
     });
   };
 
@@ -158,13 +168,24 @@ export function ResultPage() {
         </div>
 
         {/* Footer actions */}
-        <div className="sticky bottom-0 border-t bg-background p-4 flex gap-3">
+        <div className="sticky bottom-0 border-t bg-background p-4 flex gap-2">
           <Button
             className="flex-1 h-12 gap-2"
             onClick={() => window.open(activeRoute?.yandex_url, "_blank")}
           >
             <Navigation className="w-5 h-5" />
             Я.Навигатор
+          </Button>
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-12 w-12 shrink-0"
+            title="Скопировать ссылку маршрута"
+            onClick={() => handleCopyNav(activeRoute?.yandex_url ?? '', activeVehicleIndex)}
+          >
+            {copiedNav === activeVehicleIndex
+              ? <Check className="w-5 h-5 text-emerald-500" />
+              : <Copy className="w-5 h-5" />}
           </Button>
           <Button
             variant="outline"
@@ -237,8 +258,10 @@ export function ResultPage() {
         <div className="h-[440px] w-full relative z-0">
           <MapContainer center={center} zoom={11} style={{ height: '100%', width: '100%' }}>
             <TileLayer
-              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
-              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+              attribution='&copy; <a href="https://2gis.ru" target="_blank">2ГИС</a>'
+              url="https://tile{s}.maps.2gis.com/tiles?x={x}&y={y}&z={z}&v=1"
+              subdomains="0123"
+              maxZoom={18}
             />
             <FitBoundsToRoutes routes={result.routes} />
             {result.routes.map((route, i) => {
@@ -339,6 +362,17 @@ export function ResultPage() {
                 <Button className="flex-1 gap-2" onClick={() => window.open(route.yandex_url, "_blank")}>
                   <Navigation className="w-4 h-4" />
                   Я.Навигатор
+                </Button>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="shrink-0"
+                  title="Скопировать ссылку маршрута в буфер"
+                  onClick={() => handleCopyNav(route.yandex_url ?? '', i)}
+                >
+                  {copiedNav === i
+                    ? <Check className="w-4 h-4 text-emerald-500" />
+                    : <Copy className="w-4 h-4" />}
                 </Button>
                 <Button variant="outline" className="flex-1 gap-2 text-emerald-600 border-emerald-200 hover:bg-emerald-50" onClick={() => window.open(route.whatsapp_url, "_blank")}>
                   <Share2 className="w-4 h-4" />
