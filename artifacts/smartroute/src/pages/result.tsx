@@ -4,7 +4,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
-import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check, AlertTriangle } from "lucide-react";
 import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap } from "react-leaflet";
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
@@ -21,6 +22,10 @@ L.Icon.Default.mergeOptions({
 });
 
 import type { RouteResult } from "@workspace/api-client-react";
+
+type VehicleRouteWithUrls = RouteResult["routes"][number] & {
+  yandex_urls?: string[];
+};
 
 const COLORS = ["#0ea5e9", "#f43f5e", "#8b5cf6", "#10b981", "#f59e0b", "#6366f1", "#ec4899", "#14b8a6", "#f97316", "#84cc16"];
 
@@ -41,6 +46,16 @@ function FitBoundsToRoutes({ routes }: { routes: RouteResult["routes"] }) {
   return null;
 }
 
+// Returns segments (array of yandex_urls) for a route
+function getNavSegments(route: VehicleRouteWithUrls): string[] {
+  if (route.yandex_urls && route.yandex_urls.length > 0) return route.yandex_urls;
+  if (route.yandex_url) return [route.yandex_url];
+  return [];
+}
+
+// Per-segment copy state key: `${routeIndex}-${segmentIndex}`
+type CopiedSegKey = `${number}-${number}`;
+
 export function ResultPage() {
   const [, setLocation] = useLocation();
   const params = useParams<{ id?: string }>();
@@ -49,6 +64,7 @@ export function ResultPage() {
   const { toast } = useToast();
   const [copied, setCopied] = useState(false);
   const [copiedNav, setCopiedNav] = useState<number | null>(null);
+  const [copiedSeg, setCopiedSeg] = useState<CopiedSegKey | null>(null);
   const [localResult, setLocalResult] = useState<RouteResult | null>(null);
   const [activeVehicleIndex, setActiveVehicleIndex] = useState(0);
 
@@ -95,6 +111,16 @@ export function ResultPage() {
     });
   };
 
+  const handleCopySeg = (url: string, routeIdx: number, segIdx: number) => {
+    if (!url) return;
+    const key: CopiedSegKey = `${routeIdx}-${segIdx}`;
+    navigator.clipboard.writeText(url).then(() => {
+      setCopiedSeg(key);
+      toast({ title: "Ссылка скопирована", description: `Часть ${segIdx + 1} маршрута скопирована.` });
+      setTimeout(() => setCopiedSeg(null), 2000);
+    });
+  };
+
   if (sessionId && sessionLoading) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
@@ -108,9 +134,16 @@ export function ResultPage() {
 
   if (!result) return null;
 
+  // Check if any route needs splitting
+  const hasSplitRoutes = result.routes.some(r => {
+    const segs = getNavSegments(r as VehicleRouteWithUrls);
+    return segs.length > 1;
+  });
+
   // ── Driver Mode (mobile) ─────────────────────────────────────────────────
   if (isMobile) {
-    const activeRoute = result.routes[activeVehicleIndex];
+    const activeRoute = result.routes[activeVehicleIndex] as VehicleRouteWithUrls;
+    const activeSegments = getNavSegments(activeRoute);
     return (
       <div className="min-h-screen bg-background flex flex-col">
         {/* Header */}
@@ -146,6 +179,16 @@ export function ResultPage() {
           </div>
         )}
 
+        {/* Split warning (mobile) */}
+        {activeSegments.length > 1 && (
+          <div className="mx-4 mt-3 mb-1 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 flex gap-2 items-start">
+            <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+            <p className="text-xs text-amber-800">
+              Маршрут разделён на {activeSegments.length} части из-за ограничений Яндекс.Навигатора (макс. 20 точек).
+            </p>
+          </div>
+        )}
+
         {/* Stop list */}
         <div className="flex-1 overflow-y-auto divide-y">
           {activeRoute?.stores.map((stop) => (
@@ -168,33 +211,75 @@ export function ResultPage() {
         </div>
 
         {/* Footer actions */}
-        <div className="sticky bottom-0 border-t bg-background p-4 flex gap-2">
-          <Button
-            className="flex-1 h-12 gap-2"
-            onClick={() => window.open(activeRoute?.yandex_url, "_blank")}
-          >
-            <Navigation className="w-5 h-5" />
-            Я.Навигатор
-          </Button>
-          <Button
-            variant="outline"
-            size="icon"
-            className="h-12 w-12 shrink-0"
-            title="Скопировать ссылку маршрута"
-            onClick={() => handleCopyNav(activeRoute?.yandex_url ?? '', activeVehicleIndex)}
-          >
-            {copiedNav === activeVehicleIndex
-              ? <Check className="w-5 h-5 text-emerald-500" />
-              : <Copy className="w-5 h-5" />}
-          </Button>
-          <Button
-            variant="outline"
-            className="flex-1 h-12 gap-2 text-emerald-600 border-emerald-200"
-            onClick={() => window.open(activeRoute?.whatsapp_url, "_blank")}
-          >
-            <Share2 className="w-5 h-5" />
-            WhatsApp
-          </Button>
+        <div className="sticky bottom-0 border-t bg-background p-4 space-y-2">
+          {activeSegments.length > 1 ? (
+            <>
+              {activeSegments.map((url, segIdx) => {
+                const segKey: CopiedSegKey = `${activeVehicleIndex}-${segIdx}`;
+                const stopFrom = segIdx * 20 + 1;
+                const stopTo = Math.min((segIdx + 1) * 20, activeRoute?.stores.length ?? 0);
+                return (
+                  <div key={segIdx} className="flex gap-2">
+                    <Button
+                      className="flex-1 h-11 gap-2"
+                      onClick={() => window.open(url, "_blank")}
+                    >
+                      <Navigation className="w-4 h-4" />
+                      Часть {segIdx + 1} (ост. {stopFrom}–{stopTo})
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-11 w-11 shrink-0"
+                      title="Скопировать ссылку"
+                      onClick={() => handleCopySeg(url, activeVehicleIndex, segIdx)}
+                    >
+                      {copiedSeg === segKey
+                        ? <Check className="w-4 h-4 text-emerald-500" />
+                        : <Copy className="w-4 h-4" />}
+                    </Button>
+                  </div>
+                );
+              })}
+              <Button
+                variant="outline"
+                className="w-full h-11 gap-2 text-emerald-600 border-emerald-200"
+                onClick={() => window.open(activeRoute?.whatsapp_url, "_blank")}
+              >
+                <Share2 className="w-4 h-4" />
+                WhatsApp
+              </Button>
+            </>
+          ) : (
+            <div className="flex gap-2">
+              <Button
+                className="flex-1 h-12 gap-2"
+                onClick={() => window.open(activeRoute?.yandex_url, "_blank")}
+              >
+                <Navigation className="w-5 h-5" />
+                Я.Навигатор
+              </Button>
+              <Button
+                variant="outline"
+                size="icon"
+                className="h-12 w-12 shrink-0"
+                title="Скопировать ссылку маршрута"
+                onClick={() => handleCopyNav(activeRoute?.yandex_url ?? '', activeVehicleIndex)}
+              >
+                {copiedNav === activeVehicleIndex
+                  ? <Check className="w-5 h-5 text-emerald-500" />
+                  : <Copy className="w-5 h-5" />}
+              </Button>
+              <Button
+                variant="outline"
+                className="flex-1 h-12 gap-2 text-emerald-600 border-emerald-200"
+                onClick={() => window.open(activeRoute?.whatsapp_url, "_blank")}
+              >
+                <Share2 className="w-5 h-5" />
+                WhatsApp
+              </Button>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -229,6 +314,16 @@ export function ResultPage() {
           </Button>
         </div>
       </div>
+
+      {/* Global split-route warning */}
+      {hasSplitRoutes && (
+        <Alert className="border-amber-200 bg-amber-50">
+          <AlertTriangle className="h-4 w-4 text-amber-600" />
+          <AlertDescription className="text-amber-800">
+            Один или несколько маршрутов автоматически разделены на части из-за ограничений Яндекс.Навигатора — мобильное приложение поддерживает не более 20 точек в одной ссылке. Каждая часть имеет отдельную кнопку открытия и копирования.
+          </AlertDescription>
+        </Alert>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <Card className="bg-primary text-primary-foreground border-transparent">
@@ -321,71 +416,126 @@ export function ResultPage() {
       <div className="space-y-6">
         <h2 className="text-2xl font-bold tracking-tight mt-8 mb-4">Детализация по машинам</h2>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {result.routes.map((route, i) => (
-            <Card key={route.vehicle_name} className="flex flex-col">
-              <CardHeader className="pb-3 border-b bg-muted/20">
-                <div className="flex items-center justify-between">
-                  <CardTitle className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-full flex items-center justify-center text-white" style={{ backgroundColor: COLORS[i % COLORS.length] }}>
-                      <Car className="w-4 h-4" />
-                    </div>
-                    {route.vehicle_name}
-                  </CardTitle>
-                  <Badge variant="secondary">{route.stores.length} точек</Badge>
-                </div>
-                <div className="flex items-center gap-4 text-sm text-muted-foreground mt-2">
-                  <span className="flex items-center gap-1"><MapPin className="w-4 h-4" /> {Math.round(route.total_km)} км</span>
-                  <span className="flex items-center gap-1"><Clock className="w-4 h-4" /> ~{Math.floor((route.estimated_minutes ?? 0) / 60)} ч {(route.estimated_minutes ?? 0) % 60} мин</span>
-                </div>
-              </CardHeader>
-              <CardContent className="p-0 flex-1">
-                <ScrollArea className="h-[300px]">
-                  <div className="p-4 space-y-4">
-                    {route.stores.map((stop, idx) => (
-                      <div key={stop.store_id} className="flex gap-4 relative">
-                        {idx !== route.stores.length - 1 && (
-                          <div className="absolute left-[11px] top-6 bottom-[-16px] w-[2px] bg-border" />
-                        )}
-                        <div className="w-6 h-6 rounded-full bg-secondary text-secondary-foreground text-xs font-bold flex items-center justify-center shrink-0 z-10 border-2 border-background">
-                          {stop.order}
-                        </div>
-                        <div className="space-y-1 pb-2 min-w-0">
-                          <p className="font-medium text-sm leading-none truncate">{stop.store_name}</p>
-                          <p className="text-xs text-muted-foreground truncate">{stop.address}</p>
-                          {stop.arrive_by && (
-                            <p className="text-xs text-emerald-600 font-medium mt-1">
-                              Прибытие: {stop.arrive_by}
-                            </p>
-                          )}
-                        </div>
+          {result.routes.map((route, i) => {
+            const r = route as VehicleRouteWithUrls;
+            const segments = getNavSegments(r);
+            const isSplit = segments.length > 1;
+            return (
+              <Card key={route.vehicle_name} className="flex flex-col">
+                <CardHeader className="pb-3 border-b bg-muted/20">
+                  <div className="flex items-center justify-between">
+                    <CardTitle className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-full flex items-center justify-center text-white" style={{ backgroundColor: COLORS[i % COLORS.length] }}>
+                        <Car className="w-4 h-4" />
                       </div>
-                    ))}
+                      {route.vehicle_name}
+                    </CardTitle>
+                    <Badge variant="secondary">{route.stores.length} точек</Badge>
                   </div>
-                </ScrollArea>
-              </CardContent>
-              <div className="p-4 border-t bg-muted/10 flex gap-2 print:hidden">
-                <Button className="flex-1 gap-2" onClick={() => window.open(route.yandex_url, "_blank")}>
-                  <Navigation className="w-4 h-4" />
-                  Я.Навигатор
-                </Button>
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="shrink-0"
-                  title="Скопировать ссылку маршрута в буфер"
-                  onClick={() => handleCopyNav(route.yandex_url ?? '', i)}
-                >
-                  {copiedNav === i
-                    ? <Check className="w-4 h-4 text-emerald-500" />
-                    : <Copy className="w-4 h-4" />}
-                </Button>
-                <Button variant="outline" className="flex-1 gap-2 text-emerald-600 border-emerald-200 hover:bg-emerald-50" onClick={() => window.open(route.whatsapp_url, "_blank")}>
-                  <Share2 className="w-4 h-4" />
-                  WhatsApp
-                </Button>
-              </div>
-            </Card>
-          ))}
+                  <div className="flex items-center gap-4 text-sm text-muted-foreground mt-2">
+                    <span className="flex items-center gap-1"><MapPin className="w-4 h-4" /> {Math.round(route.total_km)} км</span>
+                    <span className="flex items-center gap-1"><Clock className="w-4 h-4" /> ~{Math.floor((route.estimated_minutes ?? 0) / 60)} ч {(route.estimated_minutes ?? 0) % 60} мин</span>
+                  </div>
+                </CardHeader>
+                <CardContent className="p-0 flex-1">
+                  <ScrollArea className="h-[300px]">
+                    <div className="p-4 space-y-4">
+                      {route.stores.map((stop, idx) => (
+                        <div key={stop.store_id} className="flex gap-4 relative">
+                          {idx !== route.stores.length - 1 && (
+                            <div className="absolute left-[11px] top-6 bottom-[-16px] w-[2px] bg-border" />
+                          )}
+                          <div className="w-6 h-6 rounded-full bg-secondary text-secondary-foreground text-xs font-bold flex items-center justify-center shrink-0 z-10 border-2 border-background">
+                            {stop.order}
+                          </div>
+                          <div className="space-y-1 pb-2 min-w-0">
+                            <p className="font-medium text-sm leading-none truncate">{stop.store_name}</p>
+                            <p className="text-xs text-muted-foreground truncate">{stop.address}</p>
+                            {stop.arrive_by && (
+                              <p className="text-xs text-emerald-600 font-medium mt-1">
+                                Прибытие: {stop.arrive_by}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </ScrollArea>
+                </CardContent>
+
+                {/* Footer: split or single */}
+                <div className="p-4 border-t bg-muted/10 print:hidden">
+                  {isSplit ? (
+                    <div className="space-y-2">
+                      {/* Per-segment buttons */}
+                      {segments.map((url, segIdx) => {
+                        const segKey: CopiedSegKey = `${i}-${segIdx}`;
+                        const stopFrom = segIdx * 20 + 1;
+                        const stopTo = Math.min((segIdx + 1) * 20, route.stores.length);
+                        return (
+                          <div key={segIdx} className="flex gap-2 items-center">
+                            <div className="text-xs font-medium text-muted-foreground w-16 shrink-0">
+                              Часть {segIdx + 1}
+                              <span className="block text-[10px]">ост. {stopFrom}–{stopTo}</span>
+                            </div>
+                            <Button
+                              className="flex-1 h-9 gap-1.5 text-sm"
+                              onClick={() => window.open(url, "_blank")}
+                            >
+                              <Navigation className="w-3.5 h-3.5" />
+                              Открыть
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="icon"
+                              className="h-9 w-9 shrink-0"
+                              title="Скопировать ссылку"
+                              onClick={() => handleCopySeg(url, i, segIdx)}
+                            >
+                              {copiedSeg === segKey
+                                ? <Check className="w-3.5 h-3.5 text-emerald-500" />
+                                : <Copy className="w-3.5 h-3.5" />}
+                            </Button>
+                          </div>
+                        );
+                      })}
+                      {/* WhatsApp below segments */}
+                      <Button
+                        variant="outline"
+                        className="w-full gap-2 text-emerald-600 border-emerald-200 hover:bg-emerald-50 mt-1"
+                        onClick={() => window.open(route.whatsapp_url, "_blank")}
+                      >
+                        <Share2 className="w-4 h-4" />
+                        WhatsApp
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="flex gap-2">
+                      <Button className="flex-1 gap-2" onClick={() => window.open(route.yandex_url, "_blank")}>
+                        <Navigation className="w-4 h-4" />
+                        Я.Навигатор
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        className="shrink-0"
+                        title="Скопировать ссылку маршрута в буфер"
+                        onClick={() => handleCopyNav(route.yandex_url ?? '', i)}
+                      >
+                        {copiedNav === i
+                          ? <Check className="w-4 h-4 text-emerald-500" />
+                          : <Copy className="w-4 h-4" />}
+                      </Button>
+                      <Button variant="outline" className="flex-1 gap-2 text-emerald-600 border-emerald-200 hover:bg-emerald-50" onClick={() => window.open(route.whatsapp_url, "_blank")}>
+                        <Share2 className="w-4 h-4" />
+                        WhatsApp
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              </Card>
+            );
+          })}
         </div>
       </div>
     </div>

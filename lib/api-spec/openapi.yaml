@@ -544,6 +544,12 @@ components:
           type: integer
         yandex_url:
           type: string
+          description: "Первая ссылка Яндекс.Навигатора (первые 20 точек). Для совместимости."
+        yandex_urls:
+          type: array
+          items:
+            type: string
+          description: "Список ссылок Яндекс.Навигатора — по одной на каждые 20 точек маршрута."
         whatsapp_url:
           type: string
       required:
@@ -552,6 +558,7 @@ components:
         - total_km
         - estimated_minutes
         - yandex_url
+        - yandex_urls
         - whatsapp_url
 
     RouteStop:

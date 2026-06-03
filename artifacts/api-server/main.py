@@ -1250,9 +1250,32 @@ def calculate_savings(
     }
 
 
+# Яндекс.Навигатор (мобильное приложение) поддерживает максимум 20 промежуточных
+# точек в одной ссылке rtext. При большем числе маршрут не строится.
+YANDEX_NAV_MAX_STOPS = 20
+
+
 def yandex_nav_url(coords_list: list) -> str:
-    points = "~".join(f"{lat},{lon}" for lat, lon in coords_list)
+    """Генерирует одну ссылку Яндекс.Навигатора (до YANDEX_NAV_MAX_STOPS точек)."""
+    chunk = coords_list[:YANDEX_NAV_MAX_STOPS]
+    points = "~".join(f"{lat},{lon}" for lat, lon in chunk)
     return f"https://yandex.ru/maps/?rtext={points}&rtt=auto"
+
+
+def yandex_nav_urls(coords_list: list) -> list:
+    """
+    Разбивает маршрут на сегменты по YANDEX_NAV_MAX_STOPS точек и возвращает
+    список ссылок Яндекс.Навигатора. Если точек ≤ YANDEX_NAV_MAX_STOPS —
+    возвращает список из одной ссылки.
+    """
+    if not coords_list:
+        return []
+    urls = []
+    for i in range(0, len(coords_list), YANDEX_NAV_MAX_STOPS):
+        chunk = coords_list[i: i + YANDEX_NAV_MAX_STOPS]
+        points = "~".join(f"{lat},{lon}" for lat, lon in chunk)
+        urls.append(f"https://yandex.ru/maps/?rtext={points}&rtt=auto")
+    return urls
 
 
 def whatsapp_url(vehicle_name: str, stores: list, total_km: float, yandex_url: str) -> str:
@@ -2272,7 +2295,8 @@ def build_route(body: RouteRequest):
         est_minutes = drive_min + unload_min
 
         nav_coords = route_coords[1:]  # exclude depot for nav
-        yurl = yandex_nav_url(nav_coords) if nav_coords else ""
+        yurls = yandex_nav_urls(nav_coords) if nav_coords else []
+        yurl = yurls[0] if yurls else ""
         wurl = whatsapp_url(vehicle.name, route_stores, km, yurl)
 
         routes.append({
@@ -2281,6 +2305,7 @@ def build_route(body: RouteRequest):
             "total_km": round(km, 1),
             "estimated_minutes": est_minutes,
             "yandex_url": yurl,
+            "yandex_urls": yurls,
             "whatsapp_url": wurl,
         })
 

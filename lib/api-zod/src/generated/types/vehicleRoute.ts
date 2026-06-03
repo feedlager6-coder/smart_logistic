@@ -12,6 +12,9 @@ export interface VehicleRoute {
   stores: RouteStop[];
   total_km: number;
   estimated_minutes: number;
+  /** Первая ссылка Яндекс.Навигатора (первые 20 точек). Для совместимости. */
   yandex_url: string;
+  /** Список ссылок Яндекс.Навигатора — по одной на каждые 20 точек маршрута. */
+  yandex_urls: string[];
   whatsapp_url: string;
 }

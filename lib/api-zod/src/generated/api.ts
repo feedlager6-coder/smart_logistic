@@ -198,7 +198,8 @@ export const BuildRouteResponse = zod.object({
 })),
   "total_km": zod.number(),
   "estimated_minutes": zod.number(),
-  "yandex_url": zod.string(),
+  "yandex_url": zod.string().describe('Первая ссылка Яндекс.Навигатора (первые 20 точек). Для совместимости.'),
+  "yandex_urls": zod.array(zod.string()).describe('Список ссылок Яндекс.Навигатора — по одной на каждые 20 точек маршрута.'),
   "whatsapp_url": zod.string()
 })),
   "savings": zod.object({
@@ -267,7 +268,8 @@ export const GetRouteSessionResponse = zod.object({
 })),
   "total_km": zod.number(),
   "estimated_minutes": zod.number(),
-  "yandex_url": zod.string(),
+  "yandex_url": zod.string().describe('Первая ссылка Яндекс.Навигатора (первые 20 точек). Для совместимости.'),
+  "yandex_urls": zod.array(zod.string()).describe('Список ссылок Яндекс.Навигатора — по одной на каждые 20 точек маршрута.'),
   "whatsapp_url": zod.string()
 })),
   "savings": zod.object({
