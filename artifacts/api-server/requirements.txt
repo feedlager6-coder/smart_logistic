@@ -1,6 +1,7 @@
 fastapi>=0.136
-uvicorn>=0.48
+uvicorn[standard]>=0.48
 psycopg2-binary>=2.9
 openpyxl>=3.1
 ortools>=9.10
 python-multipart>=0.0.9
+aiofiles>=23.1

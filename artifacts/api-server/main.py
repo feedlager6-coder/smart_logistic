@@ -38,9 +38,18 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="SmartRoute API")
 
+# ALLOWED_ORIGINS env var — comma-separated list of allowed origins.
+# Default "*" works for single-service deployments where frontend and backend
+# share the same Railway domain. Restrict to your domain for production:
+#   ALLOWED_ORIGINS=https://smartroute.up.railway.app
+_raw_origins = os.environ.get("ALLOWED_ORIGINS", "*")
+_ALLOWED_ORIGINS: list = (
+    ["*"] if _raw_origins.strip() == "*"
+    else [o.strip() for o in _raw_origins.split(",") if o.strip()]
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -2618,6 +2627,36 @@ def get_top_stores():
         }
         for r in rows
     ]
+
+
+# ── Production static file serving ────────────────────────────────────────────
+# In production (Docker / Railway), FastAPI serves the Vite build output from
+# ./static/. In development, the Vite dev server handles this via the proxy.
+# This block must come AFTER all /api/* routes so the catch-all doesn't
+# shadow them. FastAPI matches routes in registration order.
+from pathlib import Path as _Path  # noqa: E402
+
+_STATIC_DIR = _Path(__file__).parent / "static"
+if _STATIC_DIR.exists() and _STATIC_DIR.is_dir():
+    from fastapi.staticfiles import StaticFiles as _StaticFiles  # noqa: E402
+    from fastapi.responses import FileResponse as _FileResponse  # noqa: E402
+
+    # Vite outputs JS/CSS bundles under /assets/ — mount separately so
+    # FileResponse header (Content-Type) is set correctly.
+    _assets_dir = _STATIC_DIR / "assets"
+    if _assets_dir.exists():
+        app.mount("/assets", _StaticFiles(directory=str(_assets_dir)), name="static-assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def _serve_spa(full_path: str):
+        """Serve exact static file if it exists, otherwise fall back to SPA index.html."""
+        if full_path and ".." not in full_path:
+            candidate = _STATIC_DIR / full_path
+            if candidate.is_file():
+                return _FileResponse(str(candidate))
+        return _FileResponse(str(_STATIC_DIR / "index.html"))
+
+    logger.info("Static dir found at %s — serving frontend from FastAPI", _STATIC_DIR)
 
 
 if __name__ == "__main__":

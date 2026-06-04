@@ -1,5 +1,94 @@
 # CHANGELOG
 
+## [Unreleased] — 2026-06-04 (Railway deployment-readiness audit)
+
+### Новые файлы
+
+| Файл | Назначение |
+|------|-----------|
+| `Dockerfile` | Мультистейдж сборка: Node.js 20 (Vite build) → Python 3.11-slim (FastAPI runtime) |
+| `railway.toml` | Railway конфигурация: `healthcheckPath=/api/healthz`, `healthcheckTimeout=60` |
+| `.dockerignore` | Исключает `.git`, `node_modules`, `dist/`, docs для эффективной сборки |
+| `DEPLOY.md` | Пошаговая инструкция деплоя на Railway |
+
+### Исправлено (P0 — обязательно до Railway деплоя)
+
+**`vite build` падал без переменной `PORT`** — конфиг бросал `throw new Error("PORT … required")` на
+любой build-шаг. Railway устанавливает PORT только в runtime, не во время сборки. Исправлено:
+`PORT` теперь опционален при build (fallback `5173`), обязателен только при `vite dev` / `vite preview`.
+
+**FastAPI не отдавал frontend** — в продакшне нет Vite-proxy, относительные `/api/...` calls
+работали бы только через тот же origin. Исправлено: FastAPI при наличии `./static/` монтирует
+Vite build-артефакты и добавляет SPA catch-all route (`/{full_path:path}` → `index.html`).
+Конкретно: `/assets/*` → `StaticFiles`, `/*` → файл или `index.html`. Маршруты API (`/api/*`)
+регистрируются раньше catch-all → не затрагиваются.
+
+### Исправлено (P1)
+
+**CORS конфигурируется через env var** — было `allow_origins=["*"]` хардкодом. Теперь:
+`ALLOWED_ORIGINS=https://your-app.railway.app` (через запятую, default `*` для single-service деплоя).
+
+### Добавлено
+
+- `aiofiles>=23.1` в `requirements.txt` — нужен для `FileResponse` в продакшн static serving
+- `artifacts/api-server/static/` добавлен в `.gitignore` (создаётся Docker-сборкой, не коммитится)
+- `.env.example` обновлён: добавлены `YANDEX_GEOCODER_API_KEY`, `GRAPHHOPPER_API_KEY`,
+  `GRAPHHOPPER_CLUSTER_MAX`, `OSRM_BASE_URL`, `ALLOWED_ORIGINS`, `ORTOOLS_TIME_LIMIT_SECONDS`,
+  `CLUSTER_CENTROID_REFINEMENT_ROUNDS` с описаниями
+
+### Аудит безопасности — итог
+
+| Категория | Статус | Примечание |
+|-----------|--------|-----------|
+| SQL-инъекции | ✅ Безопасно | psycopg2 параметризованные запросы везде; `set_clause` строится из hardcoded ключей Python-кода, не из user input |
+| Секреты в ответах API | ✅ Безопасно | API-ключи используются только в исходящих HTTP-запросах, не возвращаются клиенту |
+| CORS preflight | ✅ Работает | OPTIONS с CORS-заголовками → HTTP 200 от CORSMiddleware (не 405 от app) |
+| Traversal через `/` | ✅ Безопасно | ASGI нормализует пути; `".." not in full_path` в catch-all |
+| Открытые endpoints | ⚠️ P1 | Все 7 write-endpoints (DELETE, POST, PUT) открыты без авторизации — критично для B2B multi-tenant; достаточно для первого пилота с одним клиентом |
+| Rate limiting | ⚠️ P2 | Нет лимитов на `POST /api/route/build` (дорогой endpoint) |
+| Error exposure | ⚠️ P2 | `VRP solver error: {exc}` попадает в HTTP 500 detail — OK для MVP |
+
+### Архитектура деплоя
+
+```
+Railway — 1 сервис
+  Docker build (~8 мин первый раз, кэшируется):
+    Stage 1: Node.js 20 → pnpm install → vite build → dist/public/
+    Stage 2: Python 3.11 → pip install → COPY main.py + dist/public/→static/
+
+  Runtime:
+    FastAPI на $PORT (Railway инжектирует)
+    /api/*   → API handlers
+    /assets/ → Vite JS/CSS bundles (StaticFiles)
+    /*       → index.html (SPA routing)
+
+  Railway Postgres plugin → DATABASE_URL (auto-injected)
+```
+
+### DB-миграции на Railway
+
+`init_db()` использует `CREATE TABLE IF NOT EXISTS` + `ALTER TABLE … ADD COLUMN IF NOT EXISTS`.
+Идемпотентны — безопасно запускаются при каждом рестарте. Ручное применение не нужно.
+`seed_demo_data()` пропускается если `stores ≥ 3`.
+
+### Regression suite (все зелёные)
+
+| Тест | Результат |
+|------|-----------|
+| `vite build` без PORT | ✅ `built in 17s` |
+| `GET /api/healthz` → `{"status":"ok"}` | ✅ |
+| `GET /` → `index.html` (production) | ✅ HTTP 200 |
+| `GET /stores` → SPA catch-all | ✅ HTTP 200 |
+| `GET /robots.txt` → статический файл | ✅ HTTP 200 |
+| `GET /assets/*.js` → JS bundle | ✅ `content-type: text/javascript` |
+| `GET /api/stores` → JSON (не index.html) | ✅ |
+| `POST /api/route/build` 5 точек / 2 машины | ✅ `session_id` создан |
+| `DELETE /api/stores/99999` → 404 | ✅ |
+| CORS preflight OPTIONS → 200 | ✅ CORSMiddleware перехватывает |
+| TypeScript typecheck | ✅ 0 ошибок |
+
+---
+
 ## [Unreleased] — 2026-06-04 (Pre-release audit: финальная очистка + P1/P2 исправления)
 
 ### Исправлено (P1 — желательно до клиента)

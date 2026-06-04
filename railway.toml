@@ -1,0 +1,15 @@
+# Railway deployment configuration for SmartRoute
+# Docs: https://docs.railway.com/reference/config-as-code
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "./Dockerfile"
+
+[deploy]
+# FastAPI exposes /api/healthz — Railway uses this to confirm the app is up
+healthcheckPath = "/api/healthz"
+healthcheckTimeout = 60
+
+# Restart on crash, but not indefinitely (avoid billing loops on broken deploys)
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5

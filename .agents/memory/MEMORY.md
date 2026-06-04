@@ -7,3 +7,4 @@
 - [Python deps no requirements.txt](python-deps.md) — artifacts/api-server had no requirements.txt; must pip install fastapi uvicorn psycopg2-binary openpyxl ortools python-multipart manually; requirements.txt now added.
 - [Savings metrics cost model](savings-cost-model.md) — cost_per_km=31 руб/км (audited breakdown); ROAD_FACTOR=1.4 applied only to monetary calcs (fuel_l, rub_day); saved_km/saved_pct use raw Haversine (both sides consistent).
 - [City filter address format](city-filter-format.md) — city filter splits address on first comma; city MUST be the first token. Excel import must use `f"{city}, {raw_addr}"` (city first). DELETE /api/stores/{id} must check rowcount=0 → 404.
+- [Railway single-service deployment](railway-deploy.md) — FastAPI serves built frontend from ./static/ (SPA catch-all registered LAST). PORT optional for vite build (fallback 5173). Dockerfile: node:20-slim + pnpm@10 → vite build → python:3.11-slim. CORS via ALLOWED_ORIGINS env var.

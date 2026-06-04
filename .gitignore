@@ -53,6 +53,9 @@ Thumbs.db
 .env.local
 .env.*.local
 
+# Production build artifacts (created by Docker/build scripts, not committed)
+artifacts/api-server/static/
+
 # Python
 __pycache__/
 *.py[cod]

@@ -11,6 +11,29 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 - Workflow `Start API Server` — FastAPI бэкенд на порту 8080 (`cd artifacts/api-server && python3 main.py`)
 - Workflow `Start Frontend` — Vite dev server, порт 24853, BASE_PATH=/
 
+## Railway Deployment
+
+**Файлы деплоя**: `Dockerfile`, `railway.toml`, `.env.example`, `DEPLOY.md`
+
+**Архитектура**: один Railway-сервис. FastAPI отдаёт и `/api/*` (бизнес-логика), и собранный Vite frontend из `./static/`.
+
+**Быстрый старт Railway:**
+1. New Project → Deploy from GitHub
+2. + New → Database → PostgreSQL (auto-устанавливает `DATABASE_URL`)
+3. Variables: установить `YANDEX_GEOCODER_API_KEY` (рекомендуется)
+4. Деплой запускается автоматически; health check → `/api/healthz`
+
+**Ключевые env vars** (см. `.env.example` для полного списка):
+
+| Переменная | Обязательно | Примечание |
+|-----------|-------------|-----------|
+| `DATABASE_URL` | ✅ авто | Устанавливается PostgreSQL плагином |
+| `YANDEX_GEOCODER_API_KEY` | Рекомендуется | Быстрый геокодинг российских адресов |
+| `GRAPHHOPPER_API_KEY` | Опционально | Реальные дороги в матрицах расстояний |
+| `ALLOWED_ORIGINS` | Опционально | CORS origins (default `*` = ок для single-service) |
+
+Подробнее: `DEPLOY.md`
+
 ## Stack
 
 - **Монорепо**: pnpm workspaces
@@ -93,6 +116,10 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 - **`migrate_moscow_stores()` ОТКЛЮЧЕНА**: функция существует в коде, но НЕ вызывается при старте. Была нужна однократно для замены московских демо-данных. Повторный вызов при каждом старте удалял бы реальные магазины любого клиента из города с lat > 50 (Москва, СПб, Новосибирск, Екатеринбург и т.д.) если у него ≤ 15 таких магазинов. **Не возвращать в startup.**
 - **Валидация depot_lat/lon**: добавлена в `POST /api/route/build` — диапазоны -90..90 и -180..180. Без этого невалидные координаты давали маршрут через весь мир (11783км, arrive_by=04:37).
 - **page_size**: зажимается к 1..200 в `GET /api/route/sessions`. Отрицательные значения используют дефолт 20.
+- **Railway single-service**: FastAPI отдаёт и API, и собранный фронтенд из `./static/`. В dev Vite-proxy обращается к `localhost:8080`; в production они на одном origin — proxy не нужен. Catch-all `/{full_path:path}` зарегистрирован ПОСЛЕДНИМ, поэтому `/api/*` маршруты имеют приоритет.
+- **PORT опционален при `vite build`**: `vite.config.ts` принимает PORT fallback=5173 для build-шага. Railway инжектирует PORT только в runtime, не при сборке.
+- **Static dir не коммитится**: `artifacts/api-server/static/` создаётся Docker-сборкой (COPY --from=frontend), исключён из `.gitignore`.
+- **CORS через env var**: `ALLOWED_ORIGINS` (comma-separated, default `*`). Для single-service Railway CORS не нужен (same origin), но конфигурируется для внешних API-клиентов.
 
 ## Gotchas
 

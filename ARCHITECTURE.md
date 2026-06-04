@@ -386,17 +386,58 @@ saved_rub_day = saved_km_road × 31      # 31 руб/км (разбивка ни
 
 ---
 
+## Деплой на Railway
+
+SmartRoute деплоится как **один Railway-сервис** (backend + frontend в одном контейнере).
+
+```
+┌─────────────────────────────────────────┐
+│  Railway Service                        │
+│                                         │
+│  Docker Stage 1: Node.js 20            │
+│    pnpm install → vite build           │
+│    → dist/public/ (React bundle)       │
+│                                         │
+│  Docker Stage 2: Python 3.11-slim      │
+│    pip install requirements.txt        │
+│    COPY main.py                        │
+│    COPY dist/public/ → ./static/       │
+│                                         │
+│  Runtime (FastAPI):                    │
+│    /api/*    → API handlers            │
+│    /assets/* → JS/CSS bundles          │
+│    /*        → index.html (SPA)        │
+└───────────────┬─────────────────────────┘
+                │ DATABASE_URL (auto)
+┌───────────────▼─────────────────────────┐
+│  Railway PostgreSQL Plugin              │
+│  (автоматически инжектирует DATABASE_URL│
+└─────────────────────────────────────────┘
+```
+
+**Почему single-service?** Vite-proxy (`/api → localhost:8080`) работает только в dev.
+В production frontend делает запросы к тому же origin → FastAPI должен отвечать на
+`/api/*` и отдавать `index.html` на все остальные пути.
+
+**DB-миграции**: `init_db()` использует `CREATE TABLE IF NOT EXISTS` + `ALTER TABLE … ADD COLUMN IF NOT EXISTS`.
+Запускается при каждом старте, идемпотентна. Ручное применение миграций не нужно.
+
+Подробная инструкция: `DEPLOY.md`
+
+---
+
 ## Ключевые зависимости
 
 ### Python (бэкенд)
 | Пакет | Зачем |
 |---|---|
 | `fastapi` | Веб-фреймворк для API |
-| `uvicorn` | Сервер для запуска FastAPI |
+| `uvicorn[standard]` | Сервер для запуска FastAPI |
 | `ortools` | Алгоритм оптимизации маршрутов (Google OR-Tools) |
 | `psycopg2-binary` | Подключение к PostgreSQL |
 | `openpyxl` | Чтение и создание Excel-файлов |
 | `python-multipart` | Загрузка файлов через форму |
+| `aiofiles` | Асинхронное обслуживание статических файлов (FileResponse) |
 | `pydantic` | Валидация входящих данных |
 
 ### JavaScript / TypeScript (фронтенд)
