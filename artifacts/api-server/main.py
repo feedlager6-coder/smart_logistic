@@ -1456,7 +1456,7 @@ def seed_demo_data():
         cur.execute(
             """INSERT INTO route_sessions (date, num_vehicles, total_km, saved_km, saved_rub, num_points)
                VALUES (%s, %s, %s, %s, %s, %s)""",
-            (str(d), 2 + i % 3, round(total_km, 1), round(saved_km, 1), round(saved_km * 12), 8 + i % 6)
+            (str(d), 2 + i % 3, round(total_km, 1), round(saved_km, 1), round(saved_km * 1.4 * 31), 8 + i % 6)
         )
 
     conn.commit()
@@ -1728,9 +1728,9 @@ async def import_stores(file: UploadFile = File(...)):
         city       = str(_get(row, c_city, "")).strip()
         raw_addr   = str(_get(row, c_address, "")).strip()
 
-        # Combine city + address
+        # Combine city + address: city goes FIRST so address.split(",")[0] == city
         if city and city not in raw_addr:
-            address = f"{raw_addr}, {city}" if raw_addr else city
+            address = f"{city}, {raw_addr}" if raw_addr else city
         else:
             address = raw_addr
 
@@ -1909,7 +1909,7 @@ def _import_process_content_sync(content_bytes: bytes, job: dict) -> None:
         yandex_url = str(_get(row, c_yandex, "")).strip() or None
         city      = str(_get(row, c_city, "")).strip()
         raw_addr  = str(_get(row, c_addr, "")).strip()
-        address   = f"{raw_addr}, {city}" if city and city not in raw_addr else raw_addr
+        address   = f"{city}, {raw_addr}" if city and city not in raw_addr else raw_addr
         if not address:
             address = city
 
@@ -2139,9 +2139,12 @@ def delete_store(id: int):
     conn = get_db()
     cur = conn.cursor()
     cur.execute("DELETE FROM stores WHERE id = %s", (id,))
+    deleted = cur.rowcount
     conn.commit()
     cur.close()
     conn.close()
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="Store not found")
 
 
 @app.post("/api/stores/{id}/geocode")
