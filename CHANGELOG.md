@@ -667,3 +667,5 @@ solve_vrp clusters: total=4, graphhopper=2, haversine=2, elapsed=1.2s, cache_hit
 - `StatusBadge` компонент
 - Режим водителя на мобильных
 - Кнопка "Копировать ссылку на маршрут"
+
+Redeploy trigger
