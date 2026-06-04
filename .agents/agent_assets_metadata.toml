@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "A3DUC91QzSg22JB0FRS0i"
+uri = "file://docs/smartroute-business-brief.md"
+type = "text"
+title = "SmartRoute — Бизнес-брифинг для клиента"
