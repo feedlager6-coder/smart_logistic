@@ -6,3 +6,9 @@ id = "A3DUC91QzSg22JB0FRS0i"
 uri = "file://docs/smartroute-business-brief.md"
 type = "text"
 title = "SmartRoute — Бизнес-брифинг для клиента"
+
+[[outputs]]
+id = "8miZOvh4JMDLs4Uy8Q-kz"
+uri = "file://docs/smartroute-business-brief.txt"
+type = "text"
+title = "SmartRoute — Бизнес-брифинг"
