@@ -48,4 +48,8 @@ README.md
 docs/
 
 # ── Dev-only artifacts ────────────────────────────────────────────────────────
+# Exclude all mockup-sandbox source/assets — not needed at runtime
 artifacts/mockup-sandbox/
+# Re-include package.json: pnpm needs it to resolve the workspace graph during
+# `pnpm install --frozen-lockfile` (it is registered as an importer in pnpm-lock.yaml)
+!artifacts/mockup-sandbox/package.json

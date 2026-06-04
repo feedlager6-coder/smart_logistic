@@ -18,7 +18,9 @@ RUN npm install -g pnpm@10 --quiet
 WORKDIR /workspace
 
 # ── Layer 1: workspace config (invalidated only when lockfile changes) ────────
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
+# tsconfig.base.json + tsconfig.json are needed because artifacts/smartroute/tsconfig.json
+# extends "../../tsconfig.base.json" — Vite resolves it at build time.
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc tsconfig.base.json tsconfig.json ./
 
 # ── Layer 2: all package.json files (needed for pnpm workspace graph) ─────────
 COPY lib/api-client-react/package.json ./lib/api-client-react/

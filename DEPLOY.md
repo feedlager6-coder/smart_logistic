@@ -113,7 +113,11 @@ Railway предоставляет:
 ```
 Stage 1 (frontend):        ~2-3 мин
   node:20-slim
-  → pnpm install (кэшируется между деплоями)
+  → pnpm@10 install
+  → COPY tsconfig.base.json + tsconfig.json (нужны для Vite/esbuild)
+  → COPY всех package.json (для pnpm workspace graph)
+  → pnpm install --frozen-lockfile
+  → COPY lib/ + artifacts/smartroute/
   → BASE_PATH=/ vite build
   → dist/public/ (≈1.2 МБ)
 
@@ -149,3 +153,33 @@ Stage 2 (runtime):         ~5-7 мин (ortools большой)
 ### Маршрут строится долго
 → Нормально при 50+ точках (OSRM + OR-Tools = 7-12 сек).
    Увеличьте `ORTOOLS_TIME_LIMIT_SECONDS` для более качественных маршрутов.
+
+---
+
+## Известные проблемы и исправления сборки
+
+### `.dockerignore` и `artifacts/mockup-sandbox/`
+
+`artifacts/mockup-sandbox/` исключён из Docker-образа (dev-only артефакт),
+но pnpm регистрирует его в `pnpm-lock.yaml` как workspace-importer.
+`pnpm install --frozen-lockfile` требует наличия его `package.json` для
+разрешения графа зависимостей.
+
+**Решение:** в `.dockerignore` после исключения директории добавлено:
+```
+artifacts/mockup-sandbox/
+!artifacts/mockup-sandbox/package.json
+```
+
+### `tsconfig.base.json` не копировался в Dockerfile
+
+`artifacts/smartroute/tsconfig.json` делает `extends: "../../tsconfig.base.json"`.
+Vite/esbuild разрешает этот путь во время сборки — без файла build падал с:
+```
+failed to resolve "extends":"../../tsconfig.base.json"
+```
+
+**Решение:** добавлен в Layer 1 Dockerfile:
+```dockerfile
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc tsconfig.base.json tsconfig.json ./
+```
