@@ -118,6 +118,21 @@ pnpm --filter @workspace/api-spec run codegen
 
 ## Документация
 
+### Техническая
 - [Архитектура](docs/ARCHITECTURE.md)
 - [Потоки данных](docs/PROJECT_FLOW.md)
 - [Контекст проекта](docs/CONTEXT.md)
+- [Бизнес-брифинг](docs/smartroute-business-brief.md)
+- [Деплой на Railway](DEPLOY.md)
+- [Changelog](CHANGELOG.md)
+- [Roadmap](ROADMAP.md)
+
+### Коммерческий пакет (для первого клиента)
+
+| Документ | Назначение | Статус перед подписанием |
+|----------|-----------|--------------------------|
+| [PILOT_AGREEMENT.md](PILOT_AGREEMENT.md) | Договор пилотного использования | ⚠️ Удалить раздел «Юридический аудит», заполнить реквизиты, проверить у юриста |
+| [TERMS_OF_SERVICE.md](TERMS_OF_SERVICE.md) | Пользовательское соглашение | ⚠️ Удалить раздел «Юридический аудит» |
+| [PRIVACY_POLICY.md](PRIVACY_POLICY.md) | Политика обработки персональных данных | ⚠️ Удалить раздел «Юридический аудит», уведомить Роскомнадзор |
+| [COMMERCIAL_OFFER.md](COMMERCIAL_OFFER.md) | Коммерческое предложение | Заполнить контактные данные |
+| [CLIENT_ONBOARDING.md](CLIENT_ONBOARDING.md) | Инструкция для клиента | Заполнить контакты поддержки |
