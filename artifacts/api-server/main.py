@@ -1284,7 +1284,10 @@ YANDEX_NAV_MAX_STOPS = 20
 
 
 def yandex_nav_url(coords_list: list) -> str:
-    """Генерирует одну ссылку Яндекс.Навигатора (до YANDEX_NAV_MAX_STOPS точек)."""
+    """Генерирует одну ссылку Яндекс.Навигатора.
+    coords_list[0] = склад (depot) — первая точка rtext.
+    Яндекс заменяет её GPS-позицией водителя, но все магазины (точки 2…N) сохраняются.
+    """
     chunk = coords_list[:YANDEX_NAV_MAX_STOPS]
     points = "~".join(f"{lat},{lon}" for lat, lon in chunk)
     return f"https://yandex.ru/maps/?rtext={points}&rtt=auto"
@@ -1292,17 +1295,40 @@ def yandex_nav_url(coords_list: list) -> str:
 
 def yandex_nav_urls(coords_list: list) -> list:
     """
-    Разбивает маршрут на сегменты по YANDEX_NAV_MAX_STOPS точек и возвращает
-    список ссылок Яндекс.Навигатора. Если точек ≤ YANDEX_NAV_MAX_STOPS —
-    возвращает список из одной ссылки.
+    coords_list[0] = склад (depot), coords_list[1:] = магазины в порядке объезда.
+
+    Разбивает маршрут на сегменты по YANDEX_NAV_MAX_STOPS точек (включая точку
+    отправления). Каждый сегмент:
+      - сегмент 1: [склад, магазин1 … магазин19]  (20 точек)
+      - сегмент 2: [магазин19, магазин20 … магазин37] (20 точек)
+      - …
+
+    Яндекс Навигатор заменяет первую точку GPS-позицией водителя — это нормально:
+    водитель стоит на складе в начале смены. Все магазины остаются на месте.
     """
     if not coords_list:
         return []
+
+    stores = coords_list[1:]        # магазины (без склада)
+    if not stores:
+        return []
+
+    max_stores = YANDEX_NAV_MAX_STOPS - 1  # 19 магазинов + 1 точка отправления = 20
+    origin = coords_list[0]         # склад — точка отправления первого сегмента
+
     urls = []
-    for i in range(0, len(coords_list), YANDEX_NAV_MAX_STOPS):
-        chunk = coords_list[i: i + YANDEX_NAV_MAX_STOPS]
-        points = "~".join(f"{lat},{lon}" for lat, lon in chunk)
+    idx = 0
+    while idx < len(stores):
+        chunk = stores[idx: idx + max_stores]
+        idx += max_stores
+
+        segment = [origin] + chunk
+        points = "~".join(f"{lat},{lon}" for lat, lon in segment)
         urls.append(f"https://yandex.ru/maps/?rtext={points}&rtt=auto")
+
+        # Следующий сегмент стартует с последнего магазина текущего
+        origin = chunk[-1]
+
     return urls
 
 
@@ -2334,8 +2360,9 @@ def build_route(body: RouteRequest):
         drive_min = int(km / eff_spd * 60)
         est_minutes = drive_min + unload_min
 
-        nav_coords = route_coords[1:]  # exclude depot for nav
-        yurls = yandex_nav_urls(nav_coords) if nav_coords else []
+        # depot (route_coords[0]) остаётся первой точкой — Яндекс заменит его
+        # GPS-позицией водителя, но все магазины сохранятся на своих местах.
+        yurls = yandex_nav_urls(route_coords) if len(route_coords) > 1 else []
         yurl = yurls[0] if yurls else ""
         wurl = whatsapp_url(vehicle.name, route_stores, km, yurl)
 
