@@ -432,11 +432,12 @@ export function ResultPage() {
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '11px' }}>
               <thead>
                 <tr style={{ background: '#f0f4f8' }}>
-                  <th style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'center', width: '32px' }}>№</th>
-                  <th style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'left' }}>Магазин</th>
+                  <th style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'center', width: '28px' }}>№</th>
+                  <th style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'left', width: '28%' }}>Магазин</th>
                   <th style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'left' }}>Адрес</th>
-                  <th style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'center', width: '56px' }}>Прибытие</th>
-                  <th style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'center', width: '48px' }}>Отметка</th>
+                  <th style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'center', width: '68px' }}>Кол-во товара</th>
+                  <th style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'center', width: '52px' }}>Прибытие</th>
+                  <th style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'center', width: '44px' }}>Отметка</th>
                 </tr>
               </thead>
               <tbody>
@@ -445,6 +446,7 @@ export function ResultPage() {
                     <td style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'center', fontWeight: 'bold' }}>{stop.order}</td>
                     <td style={{ border: '1px solid #ccc', padding: '4px 6px', fontWeight: '500' }}>{stop.store_name}</td>
                     <td style={{ border: '1px solid #ccc', padding: '4px 6px', color: '#444' }}>{stop.address}</td>
+                    <td style={{ border: '1px solid #ccc', padding: '4px 6px' }}></td>
                     <td style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'center' }}>{stop.arrive_by ?? '—'}</td>
                     <td style={{ border: '1px solid #ccc', padding: '4px 6px' }}></td>
                   </tr>

@@ -282,6 +282,11 @@
   }
 }
 
+@page {
+  size: A4 portrait;
+  margin: 14mm 12mm 14mm 12mm;
+}
+
 @media print {
   /* Скрыть боковое меню и шапку */
   [data-sidebar],
