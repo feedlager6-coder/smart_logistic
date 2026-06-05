@@ -1432,11 +1432,16 @@ def yandex_nav_urls(coords_list: list) -> list:
     return urls
 
 
-def whatsapp_url(vehicle_name: str, stores: list, total_km: float, yandex_url: str) -> str:
-    lines = [f"🚗 {vehicle_name} — маршрут на {total_km:.1f} км:"]
+def whatsapp_url(vehicle_name: str, stores: list, total_km: float, yandex_urls: list) -> str:
+    lines = [f"🚚 {vehicle_name} — маршрут на {total_km:.1f} км:"]
     for i, s in enumerate(stores, 1):
         lines.append(f"{i}. {s['store_name']} — {s['address']}")
-    lines.append(f"🗺 Навигатор: {yandex_url}")
+    if len(yandex_urls) == 1:
+        lines.append(f"\n🗺 Навигатор: {yandex_urls[0]}")
+    elif len(yandex_urls) > 1:
+        lines.append("")
+        for idx, url in enumerate(yandex_urls, 1):
+            lines.append(f"🗺 Маршрут {idx}: {url}")
     text = "\n".join(lines)
     return f"https://wa.me/?text={urllib.parse.quote(text)}"
 
@@ -2464,7 +2469,7 @@ def build_route(body: RouteRequest):
         # GPS-позицией водителя, но все магазины сохранятся на своих местах.
         yurls = yandex_nav_urls(route_coords) if len(route_coords) > 1 else []
         yurl = yurls[0] if yurls else ""
-        wurl = whatsapp_url(vehicle.name, route_stores, km, yurl)
+        wurl = whatsapp_url(vehicle.name, route_stores, km, yurls)
 
         routes.append({
             "vehicle_name": vehicle.name,
