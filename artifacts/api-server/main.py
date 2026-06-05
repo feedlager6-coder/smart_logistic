@@ -99,6 +99,12 @@ OSRM_RATE_LIMIT_TTL = 30      # seconds to suppress OSRM calls after error/timeo
 # Increase for larger clusters on a dedicated server; lower for test environments.
 ORTOOLS_TIME_LIMIT_SECONDS: float = float(os.environ.get("ORTOOLS_TIME_LIMIT_SECONDS", "2"))
 
+# Minimum number of stops per vehicle route.
+# If any vehicle ends up with fewer stops after VRP+Or-opt, the rebalancer
+# steals the cheapest (min-distance-penalty) stops from overloaded vehicles.
+# Scales down automatically when total_stops < MIN_STOPS_PER_VEHICLE * num_vehicles.
+MIN_STOPS_PER_VEHICLE: int = 5
+
 # Post-assignment centroid refinement for _cluster_by_sweep().
 # Number of nearest-centroid reassignment iterations (0 = sweep-only, no refinement).
 # Each iteration moves border-point stores to the geometrically nearest cluster centroid.
@@ -679,7 +685,8 @@ def _fallback_distribution(store_nodes: list, num_vehicles: int) -> list:
     return [r for r in routes if r]
 
 
-def _inter_route_relocate(routes: list, full_matrix: list, max_iter: int = 5) -> list:
+def _inter_route_relocate(routes: list, full_matrix: list, max_iter: int = 5,
+                          min_stops: int = 1) -> list:
     """
     Post-process routes with inter-route Or-opt relocate moves.
 
@@ -688,6 +695,7 @@ def _inter_route_relocate(routes: list, full_matrix: list, max_iter: int = 5) ->
     if it reduces total distance.  Repeats up to max_iter passes or until no
     improvement is found.
 
+    min_stops: do not reduce a route below this many stops (hard floor).
     This equalises route quality across all vehicles — the first route solved
     by TSP is typically the best; relocate spreads good stops more evenly.
 
@@ -710,9 +718,8 @@ def _inter_route_relocate(routes: list, full_matrix: list, max_iter: int = 5) ->
         for i in range(len(routes)):
             si = 0
             while si < len(routes[i]):
-                # Never remove the last stop from a route — that would leave a vehicle empty.
-                # Efficiency-first routing means we keep all vehicles active.
-                if len(routes[i]) <= 1:
+                # Respect the minimum-stops floor: never reduce a route below min_stops.
+                if len(routes[i]) <= min_stops:
                     si += 1
                     continue
 
@@ -750,6 +757,86 @@ def _inter_route_relocate(routes: list, full_matrix: list, max_iter: int = 5) ->
         if not improved:
             logger.info("inter_route_relocate: converged after %d iteration(s)", iteration + 1)
             break
+
+    return [r for r in routes if r]
+
+
+def _rebalance_min_stops(routes: list, full_matrix: list, min_stops: int) -> list:
+    """
+    Ensure every route has at least `min_stops` stops by stealing cheapest stops
+    from donor routes (those above the floor).
+
+    The algorithm picks the stop whose (removal_gain - insertion_cost) is best,
+    i.e. it minimises the total distance penalty of the rebalancing move.
+    Runs until no underfull routes remain or no donor can provide more stops.
+
+    effective_min = min(min_stops, total_stops // num_routes) so that small
+    datasets (e.g. 8 stops on 3 vehicles → effective_min=2) scale gracefully.
+    """
+    if len(routes) <= 1:
+        return routes
+
+    total = sum(len(r) for r in routes)
+    effective_min = max(1, min(min_stops, total // len(routes)))
+    if effective_min < 2:
+        return routes
+
+    def route_cost(route):
+        if not route:
+            return 0
+        cost = full_matrix[0][route[0]] + full_matrix[route[-1]][0]
+        for a, b in zip(route, route[1:]):
+            cost += full_matrix[a][b]
+        return cost
+
+    changed = True
+    while changed:
+        changed = False
+        for i, route in enumerate(routes):
+            if len(route) >= effective_min:
+                continue
+
+            # Route i is underfull — find the cheapest stop to steal from any donor.
+            best_net_cost = float("inf")
+            best_stop_val = None
+            best_donor_idx = -1
+            best_donor_stop_pos = -1
+            best_insert_pos = -1
+
+            for j, donor in enumerate(routes):
+                if i == j or len(donor) <= effective_min:
+                    continue  # donor must keep at least effective_min stops
+
+                base_donor = route_cost(donor)
+                base_route = route_cost(route)
+
+                for k, stop in enumerate(donor):
+                    donor_without = donor[:k] + donor[k + 1:]
+                    removal_gain = base_donor - route_cost(donor_without)
+
+                    for pos in range(len(route) + 1):
+                        route_with = route[:pos] + [stop] + route[pos:]
+                        insertion_cost = route_cost(route_with) - base_route
+                        net_cost = insertion_cost - removal_gain  # lower = better
+                        if net_cost < best_net_cost:
+                            best_net_cost = net_cost
+                            best_stop_val = stop
+                            best_donor_idx = j
+                            best_donor_stop_pos = k
+                            best_insert_pos = pos
+
+            if best_stop_val is not None:
+                # Apply the best steal
+                routes[i] = route[:best_insert_pos] + [best_stop_val] + route[best_insert_pos:]
+                d = routes[best_donor_idx]
+                routes[best_donor_idx] = d[:best_donor_stop_pos] + d[best_donor_stop_pos + 1:]
+                logger.info(
+                    "rebalance_min_stops: moved stop %d from route %d→%d "
+                    "(route %d now %d stops, net_cost %+.0f m)",
+                    best_stop_val, best_donor_idx, i, i, len(routes[i]), best_net_cost,
+                )
+                changed = True
+                break  # restart outer loop — route sizes have changed
 
     return [r for r in routes if r]
 
@@ -1004,18 +1091,23 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
         routes[largest_idx] = sorted_half[:mid]
         routes.append(sorted_half[mid:])
 
+    # Compute effective min-stops floor: scale down when there aren't enough
+    # total stops to give every vehicle the full minimum.
+    effective_min = max(1, min(MIN_STOPS_PER_VEHICLE, store_count // max(len(routes), 1)))
+
     # ── Step 5: inter-route relocate post-processing ──────────────────────────
     # Move individual stops between routes if it reduces total Haversine distance.
     # This equalises quality across all vehicles: TSP sectors are optimised in
     # isolation, so route 1 can end up much shorter than route 2.  Relocate fixes
     # this by shifting misplaced stops to the route where they cost the least.
+    # The min_stops guard prevents Or-opt from draining routes below the floor.
     if len(routes) > 1 and store_count <= 80:
         before_km = sum(
             sum(full_matrix[r[k]][r[k + 1]] for k in range(len(r) - 1))
             + (full_matrix[0][r[0]] + full_matrix[r[-1]][0] if r else 0)
             for r in routes
         ) / 1000
-        routes = _inter_route_relocate(routes, full_matrix)
+        routes = _inter_route_relocate(routes, full_matrix, min_stops=effective_min)
         after_km = sum(
             sum(full_matrix[r[k]][r[k + 1]] for k in range(len(r) - 1))
             + (full_matrix[0][r[0]] + full_matrix[r[-1]][0] if r else 0)
@@ -1025,6 +1117,14 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
             "inter_route_relocate: %.1f km → %.1f km (saved %.1f km across all vehicles)",
             before_km, after_km, before_km - after_km,
         )
+
+    # ── Step 6: rebalance to minimum stops per vehicle ────────────────────────
+    # After sector sweep + Or-opt some vehicles may still be underfull (< effective_min
+    # stops).  Steal the cheapest stop (minimum distance penalty) from any donor
+    # route that has more than effective_min stops and insert it optimally.
+    # This step runs always (also when store_count > 80, where Or-opt is skipped).
+    if len(routes) > 1 and effective_min >= 2:
+        routes = _rebalance_min_stops(routes, full_matrix, effective_min)
 
     return routes, matrix_source
 
