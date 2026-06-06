@@ -9,10 +9,13 @@ import {
   SidebarProvider,
   SidebarTrigger,
   SidebarHeader,
+  SidebarFooter,
 } from "@/components/ui/sidebar";
 import { Link, useLocation } from "wouter";
-import { Home, Store, Map, BarChart3, Truck, History } from "lucide-react";
+import { Home, Store, Map, BarChart3, Truck, History, LogOut, User } from "lucide-react";
 import React from "react";
+import { useAuth } from "@/context/auth";
+import { Button } from "@/components/ui/button";
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -43,6 +46,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
 
 function AppSidebar() {
   const [location] = useLocation();
+  const { user, logout } = useAuth();
 
   const menuItems = [
     { title: "Главная", url: "/", icon: Home },
@@ -82,6 +86,21 @@ function AppSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
+      <SidebarFooter className="border-t border-sidebar-border p-3">
+        <div className="flex items-center gap-2 px-1 py-1 rounded-md text-sidebar-foreground">
+          <User className="w-4 h-4 shrink-0 text-muted-foreground" />
+          <span className="text-sm flex-1 truncate text-muted-foreground">{user?.username}</span>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
+            onClick={logout}
+            title="Выйти"
+          >
+            <LogOut className="w-4 h-4" />
+          </Button>
+        </div>
+      </SidebarFooter>
     </Sidebar>
   );
 }

@@ -10,14 +10,18 @@ import logging
 import threading
 import concurrent.futures
 import uuid as _uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
+import secrets
 import psycopg2
 import psycopg2.extras
-from fastapi import FastAPI, HTTPException, UploadFile, File, Query
+from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
+from jose import jwt, JWTError
+from passlib.context import CryptContext
 
 try:
     from ortools.constraint_solver import routing_enums_pb2
@@ -55,6 +59,29 @@ app.add_middleware(
 )
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+# ── JWT / Auth ────────────────────────────────────────────────────────────────
+_JWT_SECRET_ENV = os.environ.get("JWT_SECRET", "")
+if not _JWT_SECRET_ENV:
+    _JWT_SECRET_ENV = secrets.token_hex(32)
+    logging.warning(
+        "JWT_SECRET env var is not set — using a random secret. "
+        "All sessions will be invalidated on server restart. "
+        "Set JWT_SECRET in production for persistent sessions."
+    )
+JWT_SECRET: str = _JWT_SECRET_ENV
+JWT_ALGORITHM: str = "HS256"
+JWT_TOKEN_TTL_HOURS: int = int(os.environ.get("JWT_TOKEN_TTL_HOURS", "24"))
+JWT_COOKIE_NAME: str = "smartroute_token"
+COOKIE_SECURE: bool = os.environ.get("COOKIE_SECURE", "").lower() in ("1", "true", "yes")
+
+_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+ADMIN_PASSWORD: str = os.environ.get("ADMIN_PASSWORD", "")
+
+# Paths that do NOT require authentication
+_AUTH_PUBLIC_PATHS = {"/api/healthz", "/api/auth/login"}
+
 AVG_SPEED_KMH = 30
 TRAFFIC_MULTIPLIER = 1.2
 geocode_cache: dict = {}
@@ -892,10 +919,19 @@ def init_db():
             visit_order INTEGER
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     # Performance indexes
     cur.execute("CREATE INDEX IF NOT EXISTS idx_stores_geocode ON stores(geocode_status)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_date ON route_sessions(date DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_session_stores_session ON route_session_stores(session_id)")
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username)")
     conn.commit()
     cur.close()
     conn.close()
@@ -1531,6 +1567,7 @@ async def startup():
     # Calling it on every startup is catastrophically dangerous for production clients
     # in any Russian city with lat > 50 (Moscow, SPb, Novosibirsk, Yekaterinburg, etc.).
     seed_demo_data()
+    seed_admin_user()
 
 
 def migrate_moscow_stores():
@@ -1603,6 +1640,163 @@ def seed_demo_data():
     cur.close()
     conn.close()
 
+
+# ── Auth utilities ────────────────────────────────────────────────────────────
+
+def _hash_password(password: str) -> str:
+    return _pwd_context.hash(password)
+
+
+def _verify_password(plain: str, hashed: str) -> bool:
+    return _pwd_context.verify(plain, hashed)
+
+
+def _create_access_token(username: str) -> str:
+    expire = datetime.utcnow() + timedelta(hours=JWT_TOKEN_TTL_HOURS)
+    payload = {"sub": username, "exp": expire}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _decode_token(token: str) -> Optional[str]:
+    """Return username from token, or None if invalid/expired."""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload.get("sub")
+    except JWTError:
+        return None
+
+
+def seed_admin_user():
+    """Create the admin user from ADMIN_PASSWORD env var if not exists."""
+    if not ADMIN_PASSWORD:
+        logger.warning(
+            "ADMIN_PASSWORD env var is not set — admin user will NOT be created. "
+            "Set ADMIN_PASSWORD to enable login."
+        )
+        return
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute("SELECT id FROM users WHERE username = %s", ("admin",))
+        row = cur.fetchone()
+        if row is None:
+            hashed = _hash_password(ADMIN_PASSWORD)
+            cur.execute(
+                "INSERT INTO users (username, password_hash) VALUES (%s, %s)",
+                ("admin", hashed),
+            )
+            conn.commit()
+            logger.info("Admin user created.")
+        else:
+            logger.info("Admin user already exists — skipping creation.")
+    except Exception as exc:
+        logger.error("seed_admin_user failed: %s", exc)
+        conn.rollback()
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ── Auth middleware ───────────────────────────────────────────────────────────
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    # Always pass through OPTIONS (CORS pre-flight) and public paths
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    path = request.url.path
+    if path in _AUTH_PUBLIC_PATHS or not path.startswith("/api/"):
+        return await call_next(request)
+
+    token = request.cookies.get(JWT_COOKIE_NAME)
+    if not token:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Не авторизован. Войдите в систему."},
+        )
+
+    username = _decode_token(token)
+    if not username:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Токен недействителен или истёк. Войдите снова."},
+        )
+
+    request.state.username = username
+    return await call_next(request)
+
+
+# ── Auth endpoints ────────────────────────────────────────────────────────────
+
+class LoginForm(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/auth/login")
+async def login(request: Request, response: Response):
+    """Authenticate with username + password (form-encoded). Sets HttpOnly JWT cookie."""
+    content_type = request.headers.get("content-type", "")
+    if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        form = await request.form()
+        username = str(form.get("username", "")).strip()
+        password = str(form.get("password", ""))
+    else:
+        try:
+            body = await request.json()
+            username = str(body.get("username", "")).strip()
+            password = str(body.get("password", ""))
+        except Exception:
+            raise HTTPException(status_code=422, detail="Неверный формат запроса")
+
+    if not username or not password:
+        raise HTTPException(status_code=422, detail="Укажите логин и пароль")
+
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute("SELECT password_hash FROM users WHERE username = %s", (username,))
+        row = cur.fetchone()
+    finally:
+        cur.close()
+        conn.close()
+
+    if not row or not _verify_password(password, row["password_hash"]):
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль")
+
+    token = _create_access_token(username)
+    resp = JSONResponse(content={"ok": True, "username": username})
+    resp.set_cookie(
+        key=JWT_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        samesite="lax",
+        secure=COOKIE_SECURE,
+        max_age=JWT_TOKEN_TTL_HOURS * 3600,
+        path="/",
+    )
+    return resp
+
+
+@app.post("/api/auth/logout")
+async def logout():
+    """Clear the JWT cookie."""
+    resp = JSONResponse(content={"ok": True})
+    resp.delete_cookie(key=JWT_COOKIE_NAME, path="/", samesite="lax")
+    return resp
+
+
+@app.get("/api/auth/me")
+async def me(request: Request):
+    """Return the currently authenticated user."""
+    username = getattr(request.state, "username", None)
+    if not username:
+        raise HTTPException(status_code=401, detail="Не авторизован")
+    return {"username": username}
+
+
+# ── Business routes ───────────────────────────────────────────────────────────
 
 @app.get("/api/healthz")
 def health_check():

@@ -5,3 +5,5 @@ openpyxl>=3.1
 ortools>=9.10
 python-multipart>=0.0.9
 aiofiles>=23.1
+python-jose[cryptography]>=3.3
+passlib[bcrypt]>=1.7
