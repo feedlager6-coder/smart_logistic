@@ -2749,6 +2749,22 @@ def get_route_session(id: int):
     return json.loads(row["result_json"])
 
 
+@app.delete("/api/route/sessions/{id}")
+def delete_route_session(id: int):
+    """Удалить сессию маршрута по ID."""
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM route_sessions WHERE id = %s", (id,))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Route session not found")
+        conn.commit()
+        return {"ok": True}
+    finally:
+        cur.close()
+        conn.close()
+
+
 @app.get("/api/route/sessions")
 def list_route_sessions(page: int = 1, page_size: int = 20):
     """Список сессий маршрутов с пагинацией."""

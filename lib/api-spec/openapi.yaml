@@ -331,6 +331,28 @@ paths:
                 $ref: "#/components/schemas/RouteResult"
         "404":
           description: Not found
+    delete:
+      operationId: deleteRouteSession
+      tags: [routes]
+      summary: Delete a route session by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        "404":
+          description: Not found
 
   /analytics/summary:
     get:

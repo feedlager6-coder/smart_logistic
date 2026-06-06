@@ -1,11 +1,23 @@
 import { useState } from "react";
 import { Link } from "wouter";
-import { useListRouteSessions } from "@workspace/api-client-react";
+import { useListRouteSessions, getListRouteSessionsQueryKey } from "@workspace/api-client-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { ExternalLink, History, ChevronLeft, ChevronRight, Loader2, RefreshCw } from "lucide-react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { ExternalLink, History, ChevronLeft, ChevronRight, Loader2, RefreshCw, Trash2 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 
 const PAGE_SIZE = 20;
 
@@ -27,6 +39,12 @@ function formatTime(ts: string | null | undefined) {
 
 export function HistoryPage() {
   const [page, setPage] = useState(1);
+  const [deleteId, setDeleteId] = useState<number | null>(null);
+  const [deleteDate, setDeleteDate] = useState<string>("");
+  const [deleting, setDeleting] = useState(false);
+
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
 
   const { data: raw, isLoading, refetch } = useListRouteSessions(
     { page, page_size: PAGE_SIZE },
@@ -35,6 +53,26 @@ export function HistoryPage() {
 
   const sessions = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
   const totalPages = sessions ? Math.ceil(sessions.total / PAGE_SIZE) : 1;
+
+  const handleDeleteConfirm = async () => {
+    if (!deleteId) return;
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/route/sessions/${deleteId}`, { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "Ошибка удаления");
+      }
+      toast({ title: "Маршрут удалён", description: `Сессия от ${deleteDate} удалена.` });
+      queryClient.invalidateQueries({ queryKey: getListRouteSessionsQueryKey({ page, page_size: PAGE_SIZE }) });
+      refetch();
+    } catch (e: any) {
+      toast({ title: "Ошибка", description: e.message, variant: "destructive" });
+    } finally {
+      setDeleting(false);
+      setDeleteId(null);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -112,17 +150,31 @@ export function HistoryPage() {
                         </span>
                       </TableCell>
                       <TableCell className="pr-6 text-right">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          asChild
-                          className="opacity-60 group-hover:opacity-100 transition-opacity"
-                        >
-                          <Link href={`/result/${s.id}`}>
-                            <ExternalLink className="w-4 h-4 mr-1" />
-                            Открыть
-                          </Link>
-                        </Button>
+                        <div className="flex items-center justify-end gap-1">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            asChild
+                            className="opacity-60 group-hover:opacity-100 transition-opacity"
+                          >
+                            <Link href={`/result/${s.id}`}>
+                              <ExternalLink className="w-4 h-4 mr-1" />
+                              Открыть
+                            </Link>
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
+                            title="Удалить маршрут"
+                            onClick={() => {
+                              setDeleteId(s.id);
+                              setDeleteDate(formatDate(s.date));
+                            }}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -158,6 +210,30 @@ export function HistoryPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Confirmation dialog */}
+      <AlertDialog open={deleteId !== null} onOpenChange={(open) => { if (!open) setDeleteId(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Удалить маршрут?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Вы действительно хотите удалить маршрут от <strong>{deleteDate}</strong>?
+              Это действие необратимо — данные маршрута будут удалены навсегда.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>Отмена</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDeleteConfirm}
+              disabled={deleting}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {deleting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+              Удалить
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

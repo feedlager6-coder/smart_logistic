@@ -6,7 +6,7 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-spec run codegen` — пересобрать API hooks + Zod schemas из OpenAPI spec (запускать после изменения `lib/api-spec/openapi.yaml`)
+- `pnpm --filter @workspace/api-spec run codegen` — пересобрать API hooks + Zod schemas из OpenAPI spec (запускать после изменения `lib/api-spec/openapi.yaml`). **Внимание**: codegen очищает `generated/` папку перед генерацией. Если orval падает с "Failed to resolve input", восстанавливать из git: `git show HEAD:lib/api-client-react/src/generated/api.ts > lib/api-client-react/src/generated/api.ts` (аналогично для api.schemas.ts и lib/api-zod). Для новых DELETE-эндпоинтов проще использовать прямой `fetch()` в компоненте, не ждать codegen.
 - `pnpm run typecheck` — проверить типы по всему монорепо
 - Workflow `Start API Server` — FastAPI бэкенд на порту 8080 (`cd artifacts/api-server && python3 main.py`)
 - Workflow `Start Frontend` — Vite dev server, порт 24853, BASE_PATH=/
@@ -80,7 +80,7 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 - **Склад (депо)**: адрес + опциональная ссылка Яндекс Карт, геокодинг через `/api/geocode`, кнопка «Открыть в Яндекс Картах», сохранение в localStorage
 - **Маршруты**: VRP оптимизация с временными окнами и временем разгрузки, поддержка 1-50 машин, сохранение автопарка как шаблон; автоматическая разбивка маршрутов на сегменты ≤20 точек для Яндекс.Навигатора
 - **Результат**: интерактивная карта 2ГИС/Leaflet с автозумом, цветная легенда, детализация по машинам, ссылки Яндекс Навигатора + кнопка копирования для каждого водителя, отправка в WhatsApp, мобильный режим водителя
-- **История маршрутов**: таблица сессий с пагинацией, дата/машины/точки/пробег/экономия, ссылки на результаты
+- **История маршрутов**: таблица сессий с пагинацией, дата/машины/точки/пробег/экономия, ссылки на результаты; **удаление маршрута** — кнопка корзины появляется при наведении, AlertDialog с подтверждением, `DELETE /api/route/sessions/{id}`
 - **Аналитика**: выбор периода (30д/90д/6м/1год/произвольный с DatePicker), пробег по дням, экономия по месяцам, загрузка машин (точек/авт.), топ-10 магазинов
 - **Умный выбор магазинов**: фильтр по городу (chip-кнопки, только если > 1 города), предупреждение AlertDialog при выборе точек без координат
 
@@ -99,6 +99,7 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 | POST | `/api/route/build` | Построить маршруты (VRP, OR-Tools + OSRM + Or-opt) |
 | GET | `/api/route/sessions` | Список сессий маршрутов (пагинация: page, page_size) |
 | GET | `/api/route/sessions/{id}` | Получить сохранённый маршрут |
+| DELETE | `/api/route/sessions/{id}` | Удалить сессию маршрута |
 | GET | `/api/analytics/summary` | Сводка аналитики |
 | GET | `/api/analytics/daily` | Ежедневная статистика (query: date_from, date_to) |
 | GET | `/api/analytics/monthly` | Помесячная статистика (query: date_from, date_to) |
@@ -120,10 +121,15 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 - **PORT опционален при `vite build`**: `vite.config.ts` принимает PORT fallback=5173 для build-шага. Railway инжектирует PORT только в runtime, не при сборке.
 - **Static dir не коммитится**: `artifacts/api-server/static/` создаётся Docker-сборкой (COPY --from=frontend), исключён из `.gitignore`.
 - **CORS через env var**: `ALLOWED_ORIGINS` (comma-separated, default `*`). Для single-service Railway CORS не нужен (same origin), но конфигурируется для внешних API-клиентов.
+- **Favicon**: `artifacts/smartroute/public/favicon.svg` — синий (#0E7490) скруглённый квадрат с грузовиком и пунктирной дорогой. Ссылка в `index.html` как `type="image/svg+xml"`.
+- **Print маршрутный лист**: каждый водитель на отдельной странице (`pageBreakBefore: 'always'`). Шапка: имя, дата, точки, км, время — без данных экономии. Таблица: №, Магазин, Адрес, Кол-во товара (пустая), Прибытие, Отметка. Строки подписей внизу. Карточки экономии и главный заголовок скрыты при печати (`print:hidden`).
+- **Удаление сессий маршрутов**: `DELETE /api/route/sessions/{id}` — backend удаляет строку из `route_sessions` (каскадно удаляет связанные vehicle_tracks). Frontend: кнопка корзины появляется при наведении на строку, AlertDialog с подтверждением, прямой `fetch()` без сгенерированного хука.
+- **Мобильный вид `route.tsx`**: панель магазинов `h-[60vh] lg:h-[calc(100vh-200px)]`, правая панель `lg:h-[calc(100vh-200px)]`, поля транспорта `grid-cols-1 sm:grid-cols-3`. Таблица магазинов `overflow-x-auto`.
 
 ## Gotchas
 
 - `Start API Server` и `artifacts/smartroute: web` workflows — всегда FAILED (конфликт портов с уже запущенными `artifacts/api-server: API Server` и `Start Frontend`) — ожидаемо, не чинить
+- **Codegen orval падает с "Failed to resolve input"** в Replit-окружении (orval v8.9.1 не может разрезолвить `./openapi.yaml` из TypeScript конфига). Workaround: восстанавливать сгенерированные файлы из git-истории (см. Run & Operate выше). Для новых DELETE/PUT/PATCH эндпоинтов в компонентах — использовать прямой `fetch()` вместо сгенерированного хука.
 - После изменения `openapi.yaml` всегда запускать codegen, затем typecheck
 - `YANDEX_GEOCODER_API_KEY` не установлен → Nominatim (1 req/sec, медленный импорт больших файлов); нужен ключ для быстрого геокодинга
 - `GRAPHHOPPER_API_KEY` не установлен → OSRM используется как primary дистанционная матрица (real roads, free); Haversine как итоговый fallback
