@@ -40,12 +40,18 @@ Railway автоматически установит `DATABASE_URL` в пере
 | Переменная | Обязательно | Значение |
 |-----------|-------------|---------|
 | `DATABASE_URL` | ✅ авто | Устанавливается PostgreSQL плагином автоматически |
+| `ADMIN_PASSWORD` | ✅ | Пароль для входа в систему (логин: `admin`). Минимум 12 символов |
+| `JWT_SECRET` | ✅ | Случайная строка ≥32 символов для подписи JWT. `openssl rand -hex 32` |
 | `YANDEX_GEOCODER_API_KEY` | Рекомендуется | Ключ от [developer.tech.yandex.ru](https://developer.tech.yandex.ru/) |
 | `GRAPHHOPPER_API_KEY` | Опционально | Ключ от [graphhopper.com](https://www.graphhopper.com/) |
 | `ALLOWED_ORIGINS` | Опционально | `https://your-app.up.railway.app` (для ограничения CORS) |
 | `ORTOOLS_TIME_LIMIT_SECONDS` | Опционально | `2` (увеличить на мощных серверах) |
+| `COOKIE_SECURE` | Опционально | `true` — включить флаг `Secure` на JWT cookie (требует HTTPS) |
+| `JWT_TOKEN_TTL_HOURS` | Опционально | `24` — время жизни сессии в часах |
 
 > **PORT** устанавливать не нужно — Railway инжектирует его автоматически.
+
+> **COOKIE_SECURE**: в Railway всегда HTTPS → установите `COOKIE_SECURE=true` в production.
 
 ### 4. Деплой
 
@@ -59,13 +65,54 @@ Railway ждёт `GET /api/healthz → {"status": "ok"}` до 60 секунд.
 
 ---
 
+## Авторизация
+
+SmartRoute использует JWT-авторизацию на основе HttpOnly cookie.
+
+### Как это работает
+
+1. Пользователь вводит логин/пароль → `POST /api/auth/login`
+2. Сервер проверяет bcrypt-хеш → устанавливает HttpOnly cookie `smartroute_token`
+3. Все `/api/*` запросы (кроме `/api/healthz` и `/api/auth/login`) проверяются middleware
+4. Без валидного токена → `401 Unauthorized`
+5. `POST /api/auth/logout` → cookie удаляется
+
+### Создание нового пользователя
+
+Прямой SQL через Railway Database console:
+
+```sql
+-- Генерировать хеш через Python:
+-- python3 -c "import bcrypt; print(bcrypt.hashpw(b'NewPass123!', bcrypt.gensalt(12)).decode())"
+INSERT INTO users (username, password_hash)
+VALUES ('newuser', '$2b$12$...<bcrypt hash>...');
+```
+
+### Смена пароля
+
+```sql
+-- Генерировать новый хеш:
+-- python3 -c "import bcrypt; print(bcrypt.hashpw(b'NewPass!456', bcrypt.gensalt(12)).decode())"
+UPDATE users SET password_hash = '$2b$12$...<new hash>...' WHERE username = 'admin';
+```
+
+### При перезапуске Railway
+
+- `JWT_SECRET` должен быть одинаковым до и после перезапуска
+- Если `JWT_SECRET` изменился — все активные сессии инвалидируются (пользователи переходят на страницу входа)
+- `ADMIN_PASSWORD` проверяется при старте: если пользователя `admin` нет — создаётся автоматически
+
+---
+
 ## Первый запуск (автосидирование)
 
 При первом подключении к пустой PostgreSQL базе:
-1. `init_db()` создаёт таблицы (`CREATE TABLE IF NOT EXISTS`)
+1. `init_db()` создаёт таблицы (`CREATE TABLE IF NOT EXISTS`), включая `users`
 2. `seed_demo_data()` добавляет 8 демо-магазинов Махачкалы
+3. `seed_admin_user()` создаёт пользователя `admin` с паролем из `ADMIN_PASSWORD`
 
 Если база уже содержит данные (≥3 магазинов) — сидирование пропускается.
+Если пользователь `admin` уже есть — `seed_admin_user()` ничего не делает.
 
 ---
 
@@ -135,6 +182,15 @@ Stage 2 (runtime):         ~5-7 мин (ortools большой)
 ---
 
 ## Troubleshooting
+
+### Страница входа не появляется / 401 на всех запросах
+→ Нормально — авторизация работает. Откройте браузер и войдите через страницу логина.
+
+### `Admin user will NOT be created`
+→ `ADMIN_PASSWORD` не установлен. Добавьте переменную в Railway Variables.
+
+### Сессии сбрасываются при каждом перезапуске
+→ `JWT_SECRET` не установлен или генерируется случайно. Установите фиксированный `JWT_SECRET`.
 
 ### `DATABASE_URL not set` / `psycopg2.OperationalError`
 → Убедитесь что PostgreSQL плагин добавлен и `DATABASE_URL` виден в Variables.

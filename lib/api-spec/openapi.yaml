@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
-  version: 0.1.0
+  version: 0.2.0
   description: SmartRoute API - Delivery route optimization
 servers:
   - url: /api
@@ -10,13 +10,103 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: auth
+    description: Authentication (JWT via HttpOnly cookie)
   - name: stores
     description: Store management
   - name: routes
     description: Route optimization
   - name: analytics
     description: Analytics and statistics
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: smartroute_token
+
+security:
+  - cookieAuth: []
+
 paths:
+  /auth/login:
+    post:
+      operationId: authLogin
+      tags: [auth]
+      summary: Log in
+      description: >
+        Authenticate with username and password (form-encoded).
+        On success sets an HttpOnly JWT cookie (`smartroute_token`).
+        This endpoint does NOT require authentication.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                  example: admin
+                password:
+                  type: string
+                  format: password
+      responses:
+        "200":
+          description: Login successful — JWT cookie set
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  username:
+                    type: string
+        "401":
+          description: Invalid credentials
+        "422":
+          description: Missing username or password
+
+  /auth/logout:
+    post:
+      operationId: authLogout
+      tags: [auth]
+      summary: Log out
+      description: Clears the JWT cookie.
+      responses:
+        "200":
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+
+  /auth/me:
+    get:
+      operationId: authMe
+      tags: [auth]
+      summary: Current user
+      description: Returns the currently authenticated user info.
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  username:
+                    type: string
+        "401":
+          description: Not authenticated
+
   /healthz:
     get:
       operationId: healthCheck

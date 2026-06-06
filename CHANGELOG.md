@@ -1,5 +1,62 @@
 # CHANGELOG
 
+## [Unreleased] — 2026-06-06 (JWT авторизация)
+
+### Добавлено
+
+- **Таблица `users` в PostgreSQL** — `id`, `username` (UNIQUE), `password_hash`, `created_at`
+- **bcrypt-хеширование паролей** — прямой вызов библиотеки `bcrypt` (rounds=12), без passlib (несовместима с bcrypt≥4.0). Пароль усекается до 72 байт перед хешированием
+- **JWT в HttpOnly cookie** — токен `smartroute_token`, алгоритм HS256, TTL 24ч (настраивается `JWT_TOKEN_TTL_HOURS`). Флаги: `httponly=True`, `samesite=lax`, `secure` через `COOKIE_SECURE` env
+- **Auth middleware** — проверяет все `/api/*` запросы кроме `/api/healthz` и `/api/auth/login`. Невалидный/истёкший токен → 401
+- **`POST /api/auth/login`** — принимает `application/x-www-form-urlencoded`, возвращает `{"ok": true, "username": "..."}` + устанавливает cookie
+- **`POST /api/auth/logout`** — удаляет cookie, возвращает `{"ok": true}`
+- **`GET /api/auth/me`** — возвращает `{"username": "..."}` для текущей сессии
+- **`seed_admin_user()`** — при старте: если пользователя `admin` нет — создаётся автоматически из `ADMIN_PASSWORD` env var
+- **Страница входа** (`/src/pages/login.tsx`) — минималистичная форма логин/пароль с показом/скрытием пароля, обработкой ошибок
+- **AuthProvider** (`/src/context/auth.tsx`) — React context: `user`, `isLoading`, `isAuthenticated`, `logout()`, `refetch()`
+- **Защита роутинга** — `ProtectedRouter` в `App.tsx`: spinner при загрузке, `<LoginPage>` если не авторизован, приложение если авторизован. Редирект на логин автоматический
+- **Кнопка Выйти** в сайдбаре — иконка `LogOut`, вызывает `logout()` из `AuthContext`
+- **`credentials: "include"`** в `customFetch` — все API-запросы отправляют cookie автоматически
+- **OpenAPI обновлён** — добавлены эндпоинты `/auth/login`, `/auth/logout`, `/auth/me`; схема безопасности `cookieAuth`; версия `0.2.0`
+- **DEPLOY.md обновлён** — секция «Авторизация»: как работает, создание пользователя, смена пароля, поведение при перезапуске, новые env vars
+
+### Изменено
+
+- `artifacts/api-server/main.py` — импорты, JWT/auth константы, `init_db()`, `startup()`, auth utilities, middleware, эндпоинты
+- `artifacts/api-server/requirements.txt` — добавлены `python-jose[cryptography]>=3.3`, `passlib[bcrypt]>=1.7`
+- `artifacts/smartroute/src/App.tsx` — `AuthProvider`, `ProtectedRouter`, guard
+- `artifacts/smartroute/src/components/layout.tsx` — кнопка Выйти, импорт `useAuth`
+- `lib/api-client-react/src/custom-fetch.ts` — добавлен `credentials: "include"`
+- `lib/api-spec/openapi.yaml` — auth эндпоинты, `cookieAuth` security scheme
+
+### Аудит безопасности (все 14 проверок прошли)
+
+| Проверка | Результат |
+|---------|-----------|
+| API без токена | 401 ✅ |
+| `/api/healthz` без токена | 200 ✅ |
+| Логин правильный пароль | 200 + cookie ✅ |
+| API с валидным cookie | 200 ✅ |
+| Логин неверный пароль | 401 ✅ |
+| Логин несуществующий пользователь | 401 ✅ |
+| Logout | 200 + cookie удалена ✅ |
+| API после logout | 401 ✅ |
+| Невалидный JWT | 401 ✅ |
+| JWT с чужим секретом / истёкший | 401 ✅ |
+| `/api/auth/me` без токена | 401 ✅ |
+| `/api/analytics/summary` без токена | 401 ✅ |
+| `POST /api/route/build` без токена | 401 ✅ |
+| Cookie флаги (HttpOnly, SameSite=lax) | ✅ |
+
+### Остаточные риски
+
+- Нет rate-limiting на `/api/auth/login` (brute-force возможен). Для MVP приемлемо; для production рекомендуется nginx/Traefik rate-limit
+- Один пользователь на всю систему — нет изоляции данных между разными клиентами (намеренно, MVP)
+- `COOKIE_SECURE=false` в dev (Replit HTTP) — в production Railway (HTTPS) установить `COOKIE_SECURE=true`
+- Пароль admin меняется только через прямой SQL-запрос (нет UI смены пароля)
+
+---
+
 ## [Unreleased] — 2026-06-05 (Commercial SaaS documentation)
 
 ### Новые файлы (коммерческий пакет документов)

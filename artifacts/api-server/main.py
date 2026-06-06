@@ -21,7 +21,6 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from jose import jwt, JWTError
-from passlib.context import CryptContext
 
 try:
     from ortools.constraint_solver import routing_enums_pb2
@@ -75,7 +74,9 @@ JWT_TOKEN_TTL_HOURS: int = int(os.environ.get("JWT_TOKEN_TTL_HOURS", "24"))
 JWT_COOKIE_NAME: str = "smartroute_token"
 COOKIE_SECURE: bool = os.environ.get("COOKIE_SECURE", "").lower() in ("1", "true", "yes")
 
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# passlib is imported but NOT used for bcrypt — direct bcrypt calls avoid the
+# bcrypt≥4.0 passlib incompatibility (missing __about__.__version__).
+# CryptContext left in place only so the import doesn't break; never call it.
 
 ADMIN_PASSWORD: str = os.environ.get("ADMIN_PASSWORD", "")
 
@@ -1643,12 +1644,25 @@ def seed_demo_data():
 
 # ── Auth utilities ────────────────────────────────────────────────────────────
 
+import bcrypt as _bcrypt_lib
+
+
+def _truncate_password(password: str) -> bytes:
+    """bcrypt silently truncates at 72 bytes — enforce explicitly."""
+    return password.encode("utf-8")[:72]
+
+
 def _hash_password(password: str) -> str:
-    return _pwd_context.hash(password)
+    pw = _truncate_password(password)
+    return _bcrypt_lib.hashpw(pw, _bcrypt_lib.gensalt(rounds=12)).decode("utf-8")
 
 
 def _verify_password(plain: str, hashed: str) -> bool:
-    return _pwd_context.verify(plain, hashed)
+    try:
+        pw = _truncate_password(plain)
+        return _bcrypt_lib.checkpw(pw, hashed.encode("utf-8"))
+    except Exception:
+        return False
 
 
 def _create_access_token(username: str) -> str:
