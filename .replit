@@ -78,6 +78,4 @@ externalPort = 3000
 [userenv]
 
 [userenv.shared]
-GRAPHHOPPER_API_KEY = "8a6a1fd0-73e5-4523-9b52-d6bd065fa911"
-YANDEX_GEOCODER_API_KEY = "ada8b170-25f4-4e00-a6ed-cf07e6b6d5a3"
 BASE_PATH = "/"
