@@ -302,7 +302,7 @@ export function RoutePage() {
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
 
         {/* Left Panel: Stores */}
-        <Card className="lg:col-span-2 flex flex-col h-[calc(100vh-200px)]">
+        <Card className="lg:col-span-2 flex flex-col h-[60vh] lg:h-[calc(100vh-200px)]">
           <CardHeader className="pb-4 shrink-0">
             <CardTitle className="flex items-center justify-between">
               Магазины
@@ -388,7 +388,7 @@ export function RoutePage() {
         </Card>
 
         {/* Right Panel: Vehicles & Settings */}
-        <div className="lg:col-span-3 space-y-6 flex flex-col h-[calc(100vh-200px)]">
+        <div className="lg:col-span-3 space-y-6 flex flex-col lg:h-[calc(100vh-200px)]">
           <Card className="flex-1 flex flex-col overflow-hidden">
             <CardHeader className="shrink-0 flex flex-row items-center justify-between pb-2">
               <div>
@@ -413,7 +413,7 @@ export function RoutePage() {
                       <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center text-primary shrink-0">
                         <Truck className="w-4 h-4" />
                       </div>
-                      <div className="flex-1 grid grid-cols-3 gap-3">
+                      <div className="flex-1 grid grid-cols-1 sm:grid-cols-3 gap-3">
                         <div className="space-y-1.5">
                           <Label className="text-xs">Название / Водитель</Label>
                           <Input

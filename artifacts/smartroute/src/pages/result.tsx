@@ -293,23 +293,23 @@ export function ResultPage() {
 
   return (
     <div className="space-y-6 pb-20">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 print:hidden">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Результат оптимизации</h1>
           <p className="text-muted-foreground">Маршруты успешно построены</p>
         </div>
         <div className="flex gap-2 flex-wrap">
           {sessionId && (
-            <Button variant="outline" onClick={handleCopyLink} className="gap-2 print:hidden">
+            <Button variant="outline" onClick={handleCopyLink} className="gap-2">
               {copied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
               <span className="hidden sm:inline">Копировать ссылку</span>
             </Button>
           )}
-          <Button variant="outline" onClick={() => window.print()} className="gap-2 print:hidden">
+          <Button variant="outline" onClick={() => window.print()} className="gap-2">
             <Printer className="w-4 h-4" />
             <span className="hidden sm:inline">Маршрутный лист</span>
           </Button>
-          <Button className="gap-2 print:hidden" asChild>
+          <Button className="gap-2" asChild>
             <Link href="/route">
               <RefreshCw className="w-4 h-4" />
               <span className="hidden sm:inline">Новый маршрут</span>
@@ -320,7 +320,7 @@ export function ResultPage() {
 
       {/* Global split-route warning */}
       {hasSplitRoutes && (
-        <Alert className="border-amber-200 bg-amber-50">
+        <Alert className="border-amber-200 bg-amber-50 print:hidden">
           <AlertTriangle className="h-4 w-4 text-amber-600" />
           <AlertDescription className="text-amber-800">
             Один или несколько маршрутов автоматически разделены на части — Яндекс.Навигатор поддерживает не более 20 точек в одной ссылке (склад + 19 магазинов). Каждая часть имеет отдельную кнопку открытия и копирования.
@@ -328,7 +328,7 @@ export function ResultPage() {
         </Alert>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 print:hidden">
         <Card className="bg-primary text-primary-foreground border-transparent">
           <CardContent className="pt-6">
             <div className="text-sm font-medium opacity-90 mb-1">Общий пробег</div>
@@ -418,49 +418,57 @@ export function ResultPage() {
 
       {/* ── PRINT-ONLY: Route sheets per vehicle ─────────────────────────── */}
       <div className="hidden print:block">
-        <div className="print-header" style={{ marginBottom: '8px' }}>
-          <h1 style={{ fontSize: '18px', fontWeight: 'bold', margin: 0 }}>Маршрутный лист</h1>
-          <p style={{ fontSize: '12px', color: '#555', margin: '2px 0 0' }}>
-            Дата: {new Date().toLocaleDateString('ru-RU')} · Всего: {Math.round(result.total_km)} км · {result.routes.length} {result.routes.length === 1 ? 'машина' : result.routes.length < 5 ? 'машины' : 'машин'}
-          </p>
-        </div>
         {result.routes.map((route, i) => (
-          <div key={route.vehicle_name} style={{ marginBottom: '24px', pageBreakInside: 'avoid' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', borderBottom: '2px solid #1e3a5f', paddingBottom: '4px', marginBottom: '6px' }}>
-              <span style={{ fontSize: '14px', fontWeight: 'bold' }}>{route.vehicle_name}</span>
-              <span style={{ fontSize: '11px', color: '#555' }}>
-                {route.stores.length} точек · {Math.round(route.total_km)} км · ~{Math.floor((route.estimated_minutes ?? 0) / 60)} ч {(route.estimated_minutes ?? 0) % 60} мин
-              </span>
+          <div
+            key={route.vehicle_name}
+            style={{
+              pageBreakBefore: i === 0 ? 'auto' : 'always',
+              pageBreakInside: 'avoid',
+              paddingTop: i === 0 ? 0 : '16px',
+            }}
+          >
+            {/* Шапка страницы каждого водителя */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px', borderBottom: '3px solid #1e3a5f', paddingBottom: '8px' }}>
+              <div>
+                <div style={{ fontSize: '11px', color: '#666', marginBottom: '2px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Маршрутный лист</div>
+                <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#111' }}>{route.vehicle_name}</div>
+              </div>
+              <div style={{ textAlign: 'right', fontSize: '11px', color: '#555' }}>
+                <div>Дата: <strong>{new Date().toLocaleDateString('ru-RU')}</strong></div>
+                <div style={{ marginTop: '2px' }}>{route.stores.length} точек &nbsp;·&nbsp; {Math.round(route.total_km)} км &nbsp;·&nbsp; ~{Math.floor((route.estimated_minutes ?? 0) / 60)} ч {(route.estimated_minutes ?? 0) % 60} мин</div>
+              </div>
             </div>
+
+            {/* Таблица остановок */}
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '11px' }}>
               <thead>
-                <tr style={{ background: '#f0f4f8' }}>
-                  <th style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'center', width: '28px' }}>№</th>
-                  <th style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'left', width: '28%' }}>Магазин</th>
-                  <th style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'left' }}>Адрес</th>
-                  <th style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'center', width: '68px' }}>Кол-во товара</th>
-                  <th style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'center', width: '52px' }}>Прибытие</th>
-                  <th style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'center', width: '44px' }}>Отметка</th>
+                <tr style={{ background: '#e8edf2' }}>
+                  <th style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'center', width: '30px' }}>№</th>
+                  <th style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'left', width: '26%' }}>Магазин</th>
+                  <th style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'left' }}>Адрес</th>
+                  <th style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'center', width: '80px' }}>Кол-во товара</th>
+                  <th style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'center', width: '55px' }}>Прибытие</th>
+                  <th style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'center', width: '50px' }}>Отметка</th>
                 </tr>
               </thead>
               <tbody>
                 {route.stores.map((stop) => (
-                  <tr key={stop.store_id} style={{ background: stop.order % 2 === 0 ? '#fafafa' : '#fff' }}>
-                    <td style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'center', fontWeight: 'bold' }}>{stop.order}</td>
-                    <td style={{ border: '1px solid #ccc', padding: '4px 6px', fontWeight: '500' }}>{stop.store_name}</td>
-                    <td style={{ border: '1px solid #ccc', padding: '4px 6px', color: '#444' }}>{stop.address}</td>
-                    <td style={{ border: '1px solid #ccc', padding: '4px 6px' }}></td>
-                    <td style={{ border: '1px solid #ccc', padding: '4px 6px', textAlign: 'center' }}>{stop.arrive_by ?? '—'}</td>
-                    <td style={{ border: '1px solid #ccc', padding: '4px 6px' }}></td>
+                  <tr key={stop.store_id} style={{ background: stop.order % 2 === 0 ? '#f7f9fb' : '#fff' }}>
+                    <td style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'center', fontWeight: 'bold', color: '#1e3a5f' }}>{stop.order}</td>
+                    <td style={{ border: '1px solid #bbb', padding: '5px 6px', fontWeight: '600' }}>{stop.store_name}</td>
+                    <td style={{ border: '1px solid #bbb', padding: '5px 6px', color: '#444' }}>{stop.address}</td>
+                    <td style={{ border: '1px solid #bbb', padding: '5px 6px' }}>&nbsp;</td>
+                    <td style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'center' }}>{stop.arrive_by ?? '—'}</td>
+                    <td style={{ border: '1px solid #bbb', padding: '5px 6px' }}>&nbsp;</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-            <div style={{ display: 'flex', gap: '40px', marginTop: '6px', fontSize: '11px', color: '#444' }}>
-              <span>Водитель: _________________________</span>
-              <span>Подпись: ____________</span>
-              <span>Диспетчер: _________________________</span>
-              <span>Подпись: ____________</span>
+
+            {/* Подписи */}
+            <div style={{ display: 'flex', gap: '48px', marginTop: '14px', fontSize: '11px', color: '#333' }}>
+              <span>Водитель: _________________________&nbsp;&nbsp; Подпись: ____________</span>
+              <span>Диспетчер: _________________________&nbsp;&nbsp; Подпись: ____________</span>
             </div>
           </div>
         ))}

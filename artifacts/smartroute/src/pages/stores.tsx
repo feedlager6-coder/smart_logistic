@@ -453,19 +453,21 @@ export function StoresPage() {
 
       {/* Stores table */}
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between pb-2">
-          <CardTitle>
-            Список магазинов{" "}
-            <span className="text-muted-foreground font-normal text-base ml-1">({stores.length})</span>
-          </CardTitle>
-          <div className="relative w-64">
-            <Search className="w-4 h-4 absolute left-2.5 top-2.5 text-muted-foreground" />
-            <Input
-              placeholder="Поиск..."
-              className="pl-8"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
+        <CardHeader className="pb-2">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <CardTitle>
+              Список магазинов{" "}
+              <span className="text-muted-foreground font-normal text-base ml-1">({stores.length})</span>
+            </CardTitle>
+            <div className="relative w-full sm:w-64">
+              <Search className="w-4 h-4 absolute left-2.5 top-2.5 text-muted-foreground" />
+              <Input
+                placeholder="Поиск..."
+                className="pl-8"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
           </div>
         </CardHeader>
         <CardContent>
@@ -480,7 +482,7 @@ export function StoresPage() {
               <p className="text-sm mt-1">Добавьте магазин вручную или импортируйте из Excel</p>
             </div>
           ) : (
-            <div className="rounded-md border overflow-hidden">
+            <div className="rounded-md border overflow-x-auto">
               <Table>
                 <TableHeader>
                   <TableRow>
