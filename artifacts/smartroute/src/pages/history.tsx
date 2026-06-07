@@ -16,7 +16,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { ExternalLink, History, ChevronLeft, ChevronRight, Loader2, RefreshCw, Trash2 } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { ExternalLink, History, ChevronLeft, ChevronRight, Loader2, RefreshCw, Trash2, AlertCircle } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 const PAGE_SIZE = 20;
@@ -46,28 +47,28 @@ export function HistoryPage() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
-  const { data: raw, isLoading, refetch } = useListRouteSessions(
+  const { data: sessions, isLoading, isError, refetch } = useListRouteSessions(
     { page, page_size: PAGE_SIZE },
-    { query: { keepPreviousData: true } as any },
+    { query: { staleTime: 30_000 } as any },
   );
 
-  const sessions = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
   const totalPages = sessions ? Math.ceil(sessions.total / PAGE_SIZE) : 1;
 
   const handleDeleteConfirm = async () => {
     if (!deleteId) return;
     setDeleting(true);
     try {
-      const res = await fetch(`/api/route/sessions/${deleteId}`, { method: "DELETE" });
+      const res = await fetch(`/api/route/sessions/${deleteId}`, { method: "DELETE", credentials: "include" });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || "Ошибка удаления");
+        throw new Error((err as any).detail || "Ошибка удаления");
       }
       toast({ title: "Маршрут удалён", description: `Сессия от ${deleteDate} удалена.` });
       queryClient.invalidateQueries({ queryKey: getListRouteSessionsQueryKey({ page, page_size: PAGE_SIZE }) });
       refetch();
-    } catch (e: any) {
-      toast({ title: "Ошибка", description: e.message, variant: "destructive" });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Неизвестная ошибка";
+      toast({ title: "Ошибка", description: msg, variant: "destructive" });
     } finally {
       setDeleting(false);
       setDeleteId(null);
@@ -90,17 +91,41 @@ export function HistoryPage() {
         </Button>
       </div>
 
+      {isError && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription className="flex items-center justify-between">
+            <span>Не удалось загрузить историю маршрутов. Проверьте соединение.</span>
+            <Button variant="outline" size="sm" onClick={() => refetch()} className="ml-4 shrink-0">
+              Повторить
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+
       <Card>
         <CardHeader className="pb-3">
           <CardTitle>Сессии маршрутизации</CardTitle>
           <CardDescription>
-            {sessions ? `Всего: ${sessions.total} маршрутов` : "Загрузка данных..."}
+            {isLoading
+              ? "Загружаем данные…"
+              : isError
+                ? "Ошибка загрузки"
+                : sessions
+                  ? `Всего: ${sessions.total} маршрутов`
+                  : "Нет данных"}
           </CardDescription>
         </CardHeader>
         <CardContent className="p-0">
-          {isLoading && !sessions ? (
+          {isLoading ? (
             <div className="flex justify-center items-center py-20">
               <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+            </div>
+          ) : isError ? (
+            <div className="flex flex-col items-center justify-center py-16 text-muted-foreground gap-3">
+              <AlertCircle className="w-12 h-12 opacity-25" />
+              <p className="text-lg font-medium">Не удалось загрузить данные</p>
+              <Button variant="outline" onClick={() => refetch()}>Попробовать снова</Button>
             </div>
           ) : sessions?.items.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-muted-foreground gap-3">
@@ -146,7 +171,7 @@ export function HistoryPage() {
                       </TableCell>
                       <TableCell className="text-right">
                         <span className="text-emerald-600 dark:text-emerald-400 font-medium">
-                          {s.saved_rub.toLocaleString("ru-RU")} ₽
+                          {Number(s.saved_rub).toLocaleString("ru-RU")} ₽
                         </span>
                       </TableCell>
                       <TableCell className="pr-6 text-right">

@@ -1,5 +1,5 @@
-import { Switch, Route, Router as WouterRouter, Redirect } from "wouter";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Switch, Route, Router as WouterRouter } from "wouter";
+import { QueryClient, QueryClientProvider, QueryCache, MutationCache } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
@@ -14,8 +14,30 @@ import { ResultPage } from "@/pages/result";
 import { AnalyticsPage } from "@/pages/analytics";
 import { HistoryPage } from "@/pages/history";
 import { SettingsPage } from "@/pages/settings";
+import { ApiError } from "@workspace/api-client-react";
+
+function is401(error: unknown): boolean {
+  return (
+    error instanceof ApiError && error.status === 401
+  );
+}
 
 const queryClient = new QueryClient({
+  queryCache: new QueryCache({
+    onError: (error) => {
+      if (is401(error)) {
+        // Notify auth context to re-check session; if truly logged out → login page shown
+        window.dispatchEvent(new CustomEvent("api:unauthorized"));
+      }
+    },
+  }),
+  mutationCache: new MutationCache({
+    onError: (error) => {
+      if (is401(error)) {
+        window.dispatchEvent(new CustomEvent("api:unauthorized"));
+      }
+    },
+  }),
   defaultOptions: {
     queries: {
       refetchOnWindowFocus: false,

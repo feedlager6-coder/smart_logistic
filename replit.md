@@ -128,6 +128,10 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 - **Print маршрутный лист**: каждый водитель на отдельной странице (`pageBreakBefore: 'always'`). Шапка: имя, дата, точки, км, время — без данных экономии. Таблица: №, Магазин, Адрес, Кол-во товара (пустая), Прибытие, Отметка. Строки подписей внизу. Карточки экономии и главный заголовок скрыты при печати (`print:hidden`).
 - **Удаление сессий маршрутов**: `DELETE /api/route/sessions/{id}` — backend удаляет строку из `route_sessions` (каскадно удаляет связанные vehicle_tracks). Frontend: кнопка корзины появляется при наведении на строку, AlertDialog с подтверждением, прямой `fetch()` без сгенерированного хука.
 - **Мобильный вид `route.tsx`**: панель магазинов `h-[60vh] lg:h-[calc(100vh-200px)]`, правая панель `lg:h-[calc(100vh-200px)]`, поля транспорта `grid-cols-1 sm:grid-cols-3`. Таблица магазинов `overflow-x-auto`.
+- **Cookie SameSite=none**: JWT-cookie выставляется с `SameSite=none; Secure=true` (дефолт). Это обязательно для работы в Replit Canvas (iframe) и любых embedded-сценариях. `SameSite=lax` блокирует cookie для script-initiated fetch из кросс-сайтового iframe (top-level = replit.com, iframe = xxx.replit.dev). Конфигурируется через `COOKIE_SAMESITE` / `COOKIE_SECURE` env vars. В production (Railway, HTTPS) дефолты работают без изменений.
+- **Глобальный 401-handler**: `App.tsx` содержит `QueryCache` + `MutationCache` с `onError`, который при получении `ApiError` со статусом 401 диспатчит кастомный DOM-event `api:unauthorized`. `auth.tsx` слушает этот event → вызывает `fetchMe()`. Если `/api/auth/me` тоже возвращает 401 → `isAuthenticated = false` → login page показывается автоматически.
+- **TanStack Query v5 keepPreviousData**: `keepPreviousData: true` удалён из TanStack Query v5 (v5.100.9). Заменять на `staleTime` или `placeholderData`. В generated-хуках использовать `as any` для несовместимых опций.
+- **История маршрутов error state**: `history.tsx` имеет полный error state (Alert + retry button) при ошибке запроса, не бесконечный "Загрузка данных...".
 
 ## Gotchas
 

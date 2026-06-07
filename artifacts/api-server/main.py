@@ -72,7 +72,11 @@ JWT_SECRET: str = _JWT_SECRET_ENV
 JWT_ALGORITHM: str = "HS256"
 JWT_TOKEN_TTL_HOURS: int = int(os.environ.get("JWT_TOKEN_TTL_HOURS", "24"))
 JWT_COOKIE_NAME: str = "smartroute_token"
-COOKIE_SECURE: bool = os.environ.get("COOKIE_SECURE", "").lower() in ("1", "true", "yes")
+# SameSite=none + Secure=true is required for cross-site iframe contexts (Replit canvas, embedded apps).
+# Default: none/true so dev preview works inside Replit's iframe-based editor.
+# Override via env: COOKIE_SAMESITE=lax + COOKIE_SECURE=false for pure-localhost HTTP testing.
+COOKIE_SAMESITE: str = os.environ.get("COOKIE_SAMESITE", "none")
+COOKIE_SECURE: bool = os.environ.get("COOKIE_SECURE", "true").lower() in ("1", "true", "yes")
 
 # passlib is imported but NOT used for bcrypt — direct bcrypt calls avoid the
 # bcrypt≥4.0 passlib incompatibility (missing __about__.__version__).
@@ -1831,7 +1835,7 @@ async def login(request: Request, response: Response):
         key=JWT_COOKIE_NAME,
         value=token,
         httponly=True,
-        samesite="lax",
+        samesite=COOKIE_SAMESITE,
         secure=COOKIE_SECURE,
         max_age=JWT_TOKEN_TTL_HOURS * 3600,
         path="/",
@@ -1843,7 +1847,7 @@ async def login(request: Request, response: Response):
 async def logout():
     """Clear the JWT cookie."""
     resp = JSONResponse(content={"ok": True})
-    resp.delete_cookie(key=JWT_COOKIE_NAME, path="/", samesite="lax")
+    resp.delete_cookie(key=JWT_COOKIE_NAME, path="/", samesite=COOKIE_SAMESITE)
     return resp
 
 

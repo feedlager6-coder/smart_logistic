@@ -46,12 +46,13 @@ Railway автоматически установит `DATABASE_URL` в пере
 | `GRAPHHOPPER_API_KEY` | Опционально | Ключ от [graphhopper.com](https://www.graphhopper.com/) |
 | `ALLOWED_ORIGINS` | Опционально | `https://your-app.up.railway.app` (для ограничения CORS) |
 | `ORTOOLS_TIME_LIMIT_SECONDS` | Опционально | `2` (увеличить на мощных серверах) |
-| `COOKIE_SECURE` | Опционально | `true` — включить флаг `Secure` на JWT cookie (требует HTTPS) |
+| `COOKIE_SAMESITE` | Опционально | `none` (дефолт) — требуется для iframe-контекстов. Альтернатива: `lax` |
+| `COOKIE_SECURE` | Опционально | `true` (дефолт) — флаг `Secure` на JWT cookie. Обязательно при `COOKIE_SAMESITE=none` |
 | `JWT_TOKEN_TTL_HOURS` | Опционально | `24` — время жизни сессии в часах |
 
 > **PORT** устанавливать не нужно — Railway инжектирует его автоматически.
 
-> **COOKIE_SECURE**: в Railway всегда HTTPS → установите `COOKIE_SECURE=true` в production.
+> **Cookie в production**: Railway всегда HTTPS. Дефолты `COOKIE_SAMESITE=none` + `COOKIE_SECURE=true` работают в Railway без изменений.
 
 ### 4. Деплой
 
@@ -185,6 +186,11 @@ Stage 2 (runtime):         ~5-7 мин (ortools большой)
 
 ### Страница входа не появляется / 401 на всех запросах
 → Нормально — авторизация работает. Откройте браузер и войдите через страницу логина.
+
+### Залогинился, но всё равно 401 / «история маршрутов — загрузка данных»
+→ Проблема с cookie: либо `COOKIE_SAMESITE=none` без `COOKIE_SECURE=true`, либо приложение открыто
+  в iframe на стороннем домене без нужных флагов.
+  Убедитесь что оба установлены: `COOKIE_SAMESITE=none` и `COOKIE_SECURE=true` (дефолт в production).
 
 ### `Admin user will NOT be created`
 → `ADMIN_PASSWORD` не установлен. Добавьте переменную в Railway Variables.

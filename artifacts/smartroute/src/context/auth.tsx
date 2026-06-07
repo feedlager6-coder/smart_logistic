@@ -38,6 +38,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     fetchMe();
   }, [fetchMe]);
 
+  // Re-check auth when any API returns 401 (e.g., cookie expired or env routing issue)
+  useEffect(() => {
+    const handler = () => { fetchMe(); };
+    window.addEventListener("api:unauthorized", handler);
+    return () => window.removeEventListener("api:unauthorized", handler);
+  }, [fetchMe]);
+
   const logout = useCallback(async () => {
     try {
       await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
