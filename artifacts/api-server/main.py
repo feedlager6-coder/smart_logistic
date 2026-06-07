@@ -933,9 +933,52 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_date ON route_sessions(date DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_session_stores_session ON route_session_stores(session_id)")
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username)")
+    # Company settings (single-row table for cost model params)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS company_settings (
+            id SERIAL PRIMARY KEY,
+            fuel_price DOUBLE PRECISION DEFAULT 67.0,
+            fuel_consumption DOUBLE PRECISION DEFAULT 13.0,
+            driver_salary DOUBLE PRECISION DEFAULT 55000.0,
+            cost_per_km DOUBLE PRECISION DEFAULT 21.21,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    # Seed defaults if table is empty
+    cur.execute("""
+        INSERT INTO company_settings (fuel_price, fuel_consumption, driver_salary, cost_per_km)
+        SELECT 67.0, 13.0, 55000.0, ROUND(CAST((67.0 * 13.0 / 100.0) + (55000.0 / 22.0 / 200.0) AS numeric), 2)
+        WHERE NOT EXISTS (SELECT 1 FROM company_settings)
+    """)
+    # Historical cost_per_km per route session
+    cur.execute("""
+        ALTER TABLE route_sessions ADD COLUMN IF NOT EXISTS cost_per_km DOUBLE PRECISION
+    """)
     conn.commit()
     cur.close()
     conn.close()
+
+
+def get_company_settings() -> dict:
+    """Read cost model settings from DB (single row). Returns defaults if table is empty."""
+    _defaults = {
+        "fuel_price": 67.0,
+        "fuel_consumption": 13.0,
+        "driver_salary": 55000.0,
+        "cost_per_km": round((67.0 * 13.0 / 100.0) + (55000.0 / 22.0 / 200.0), 2),
+    }
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT fuel_price, fuel_consumption, driver_salary, cost_per_km FROM company_settings ORDER BY id LIMIT 1")
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row:
+            return dict(row)
+    except Exception as e:
+        logger.warning("get_company_settings error: %s", e)
+    return _defaults
 
 
 def haversine_meters(c1: tuple, c2: tuple) -> int:
@@ -1342,6 +1385,7 @@ def calculate_savings(
     num_vehicles: int,
     depot_lat: float,
     depot_lon: float,
+    settings: dict = None,
 ) -> dict:
     """
     Baseline: маршрут в порядке загрузки из Excel (как диспетчер без оптимизации),
@@ -1350,6 +1394,8 @@ def calculate_savings(
     Методика прозрачна для клиента:
       «Если бы водители ехали в том же порядке, в котором магазины загружены в систему»
     """
+    if settings is None:
+        settings = get_company_settings()
     # Distribute stores round-robin across vehicles (same order as input)
     n = max(num_vehicles, 1)
     buckets: list = [[] for _ in range(n)]
@@ -1373,35 +1419,25 @@ def calculate_savings(
     saved_km = round(max(0.0, unoptimized_km - optimized_km), 1)
     saved_pct = round(saved_km / unoptimized_km * 100) if unoptimized_km > 0 else 0
 
-    # ── Реалистичная модель стоимости (Газель, РФ, 2026) ─────────────────────
+    # ── Модель стоимости — параметры берём из настроек компании (БД) ─────────
     #
-    # ROAD_FACTOR: средний коэффициент реальных дорог к Haversine-расстоянию.
-    # Оба сравниваемых маршрута (baseline и optimized_km) используют Haversine,
-    # поэтому saved_pct и saved_km честны как относительное сравнение.
-    # Однако для расчёта реальной экономии топлива и денег необходимо перевести
-    # прямолинейные км в фактический пробег по дорогам (OSRM показывает ×1.4–1.5
-    # для Махачкалы и аналогичных городов).
+    # ROAD_FACTOR: географическая константа — Haversine → реальный пробег.
+    # Оба маршрута (baseline и optimized) считаются через Haversine,
+    # поэтому saved_km / saved_pct — честное сравнение.
+    # Для монетарных метрик умножаем Haversine-км на ROAD_FACTOR.
     #
-    # Разбивка cost_per_km (руб/км по реальным дорогам):
-    #   • Топливо:     10 л × 70 руб/л / 100 км  =  7.0 руб/км
-    #   • Водитель:    65 000 руб/мес / 25 дн / 200 км/дн = 13.0 руб/км
-    #                  (50 000 зарплата + 30% страх.взносы)
-    #   • ТО + износ:  7.0 руб/км  (нормативы для Газели)
-    #   • Накладные:   4.0 руб/км  (ОСАГО, прочее)
-    #   ────────────────────────────────────────────────────────
-    #   ИТОГО:        31.0 руб/км  (реальных дорог)
-    #
-    ROAD_FACTOR: float = 1.4           # Haversine → реальный пробег
-    fuel_l_per_100km: float = 10.0
-    fuel_price_rub: float = 70.0       # руб. за литр (дизель, 2026)
-    cost_per_km: float = 31.0          # руб/км реальных дорог (с разбивкой выше)
+    ROAD_FACTOR: float = 1.4           # Haversine → реальный пробег (константа)
+    fuel_l_per_100km: float = float(settings.get("fuel_consumption", 13.0))
+    fuel_price_rub: float = float(settings.get("fuel_price", 67.0))
+    cost_per_km_val: float = float(settings.get("cost_per_km", 21.21))
+    driver_salary: float = float(settings.get("driver_salary", 55000.0))
 
     # Применяем ROAD_FACTOR только к монетарным метрикам, а не к saved_km,
     # чтобы не искажать честное сравнение маршрутов.
     saved_km_road = saved_km * ROAD_FACTOR
     saved_fuel_l = round(saved_km_road * fuel_l_per_100km / 100.0, 1)
     saved_fuel_cost_rub = round(saved_fuel_l * fuel_price_rub)
-    saved_rub_day = round(saved_km_road * cost_per_km)
+    saved_rub_day = round(saved_km_road * cost_per_km_val)
 
     return {
         "optimized_km": round(optimized_km, 1),
@@ -1412,6 +1448,10 @@ def calculate_savings(
         "saved_fuel_cost_rub": saved_fuel_cost_rub,
         "saved_rub_day": saved_rub_day,
         "saved_rub_month": saved_rub_day * 30,
+        "cost_per_km": round(cost_per_km_val, 2),
+        "fuel_price": fuel_price_rub,
+        "fuel_consumption": fuel_l_per_100km,
+        "driver_salary": driver_salary,
     }
 
 
@@ -1540,6 +1580,12 @@ class RouteRequest(BaseModel):
     depot_lon: Optional[float] = None
     use_time_windows: Optional[bool] = False
     use_unload_time: Optional[bool] = False
+
+
+class CompanySettingsInput(BaseModel):
+    fuel_price: float       # руб/литр
+    fuel_consumption: float # л/100 км
+    driver_salary: float    # руб/месяц
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -2689,12 +2735,14 @@ def build_route(body: RouteRequest):
             "whatsapp_url": wurl,
         })
 
+    _cost_settings = get_company_settings()
     savings = calculate_savings(
         total_km,
         store_list,      # passed in original input order — used as baseline
         num_vehicles,
         depot_lat,
         depot_lon,
+        settings=_cost_settings,
     )
 
     result = {
@@ -2711,11 +2759,11 @@ def build_route(body: RouteRequest):
         conn2 = get_db()
         cur2 = conn2.cursor()
         cur2.execute(
-            """INSERT INTO route_sessions (date, num_vehicles, total_km, saved_km, saved_rub, num_points, result_json)
-               VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+            """INSERT INTO route_sessions (date, num_vehicles, total_km, saved_km, saved_rub, num_points, cost_per_km, result_json)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
             (str(date.today()), num_vehicles, round(total_km, 1),
              savings["saved_km"], savings["saved_rub_day"], len(store_list),
-             json.dumps(result))
+             savings.get("cost_per_km"), json.dumps(result))
         )
         session_id = cur2.fetchone()[0]
         result["session_id"] = session_id
@@ -2807,6 +2855,42 @@ def list_route_sessions(page: int = 1, page_size: int = 20):
     finally:
         cur.close()
         conn.close()
+
+
+@app.get("/api/settings")
+def get_settings_endpoint():
+    """Получить текущие параметры расчёта стоимости км."""
+    return get_company_settings()
+
+
+@app.put("/api/settings")
+def update_settings_endpoint(body: CompanySettingsInput):
+    """Обновить параметры расчёта стоимости км. cost_per_km рассчитывается автоматически."""
+    if body.fuel_price <= 0 or body.fuel_consumption <= 0 or body.driver_salary <= 0:
+        raise HTTPException(status_code=400, detail="Все параметры должны быть положительными числами")
+    cost_per_km = round((body.fuel_price * body.fuel_consumption / 100.0) + (body.driver_salary / 22.0 / 200.0), 2)
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE company_settings
+               SET fuel_price=%s, fuel_consumption=%s, driver_salary=%s, cost_per_km=%s, updated_at=NOW()
+        """, (body.fuel_price, body.fuel_consumption, body.driver_salary, cost_per_km))
+        if cur.rowcount == 0:
+            cur.execute("""
+                INSERT INTO company_settings (fuel_price, fuel_consumption, driver_salary, cost_per_km)
+                VALUES (%s, %s, %s, %s)
+            """, (body.fuel_price, body.fuel_consumption, body.driver_salary, cost_per_km))
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+    return {
+        "fuel_price": body.fuel_price,
+        "fuel_consumption": body.fuel_consumption,
+        "driver_salary": body.driver_salary,
+        "cost_per_km": cost_per_km,
+    }
 
 
 @app.get("/api/analytics/summary")

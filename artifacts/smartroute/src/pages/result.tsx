@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check, AlertTriangle, Printer } from "lucide-react";
+import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check, AlertTriangle, Printer, Info, Settings } from "lucide-react";
 import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap } from "react-leaflet";
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
@@ -355,6 +355,28 @@ export function ResultPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Savings breakdown */}
+      {((result.savings as any).cost_per_km != null) && (
+        <div className="rounded-lg border border-border bg-muted/40 px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-3 print:hidden">
+          <Info className="w-4 h-4 text-muted-foreground shrink-0 hidden sm:block" />
+          <div className="text-sm text-muted-foreground flex-1 space-y-0.5">
+            <span className="font-medium text-foreground">Как считалась экономия: </span>
+            топливо {(result.savings as any).fuel_price ?? "—"} ₽/л × {(result.savings as any).fuel_consumption ?? "—"} л/100 км
+            {" "}+ водитель {(result.savings as any).driver_salary != null
+              ? Number((result.savings as any).driver_salary).toLocaleString("ru-RU")
+              : "—"} ₽/мес
+            {" "}= <span className="font-semibold text-foreground">{(result.savings as any).cost_per_km} ₽/км</span>
+            {" "}× {(result.savings as any).saved_km ?? 0} км × 1.4 (дороги)
+          </div>
+          <Button variant="outline" size="sm" className="gap-1.5 shrink-0 self-start sm:self-center" asChild>
+            <Link href="/settings">
+              <Settings className="w-3.5 h-3.5" />
+              Изменить
+            </Link>
+          </Button>
+        </div>
+      )}
 
       {/* Map + Legend */}
       <Card className="overflow-hidden border-border print:hidden">

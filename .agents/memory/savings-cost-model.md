@@ -1,40 +1,36 @@
 ---
 name: Savings metrics cost model
-description: Audit findings for calculate_savings() — cost_per_km breakdown, ROAD_FACTOR, Haversine consistency
+description: cost_per_km from DB company_settings table (not hardcoded), formula, ROAD_FACTOR, savings response fields
 ---
 
 ## Rule
 
-`calculate_savings()` in `main.py`:
-- `cost_per_km = 31` руб/км (real roads, Gazelle, Russia 2026)
-- `ROAD_FACTOR = 1.4` — applied **only** to monetary calculations (fuel_l, fuel_cost_rub, rub_day)
-- `saved_km` and `saved_pct` use raw Haversine — both baseline and optimized_km use Haversine, so comparison is internally consistent
+`calculate_savings()` in `main.py` reads settings from `company_settings` table via `get_company_settings()`.
 
-## Cost breakdown (31 руб/км)
+- Formula: `cost_per_km = (fuel_price × consumption / 100) + (salary / 22 / 200)`
+- Defaults: 67 ₽/л, 13 л/100 км, 55 000 ₽/мес → cost_per_km ≈ 21.21 ₽/км
+- `ROAD_FACTOR = 1.4` — **geographic constant**, applied **only** to monetary calculations (fuel_l, rub_day). Not user-settable.
+- `saved_km` and `saved_pct` use raw Haversine — both baseline and optimized use Haversine, comparison is internally consistent
 
-| Component | руб/км | Basis |
-|-----------|--------|-------|
-| Fuel | 7.0 | 10 л/100 км × 70 руб/л |
-| Driver (gross + taxes) | 13.0 | 65 000 руб/мес / 25 дн / 200 км/дн |
-| Maintenance + wear | 7.0 | Gazelle industry norms |
-| Insurance + overhead | 4.0 | OSAGO, misc |
-| **Total** | **31.0** | |
+## Savings response fields (additional fields added)
 
-## Why ROAD_FACTOR = 1.4
+POST /api/route/build → result.savings now includes:
+- `cost_per_km` — the value used for this build
+- `fuel_price`, `fuel_consumption`, `driver_salary` — for frontend breakdown display
 
-Both baseline_km and optimized_km are computed with `haversine_meters()` (straight-line).
-This makes the percentage comparison honest (apples-to-apples).
-BUT fuel and money savings should reflect what drivers actually drive on real roads.
-OSRM data for Makhachkala shows real roads ≈ 1.4–1.5× Haversine distance.
-ROAD_FACTOR = 1.4 (conservative estimate) converts straight-line saved km to real road saved km for monetary purposes.
+## DB schema
 
-## Audit findings (2026-06-03)
+`company_settings` table (single row):
+- `fuel_price`, `fuel_consumption`, `driver_salary`, `cost_per_km`, `updated_at`
+- Seeded on startup with defaults if empty
 
-| Metric | Before fix | After fix | Notes |
-|--------|-----------|-----------|-------|
-| saved_pct | ✅ correct | ✅ correct | Both Haversine |
-| saved_km | ✅ correct | ✅ correct | Haversine straight-line |
-| saved_fuel_l | ⚠️ -31% low | ✅ correct | Now uses ROAD_FACTOR |
-| saved_rub_day | ⚠️ +11% high | ✅ -13% vs old | cost 50→31, +ROAD_FACTOR |
+`route_sessions` table now has `cost_per_km` column (historical — the value at build time).
 
-**How to apply:** Any future change to fuel price, driver wage, or cost breakdown → update `cost_per_km` and the comment breakdown. Any change to the distance calculation method → reconsider whether ROAD_FACTOR is still needed.
+## Endpoints
+
+- `GET /api/settings` — returns current settings
+- `PUT /api/settings` — updates settings, recalculates cost_per_km automatically
+
+**Why:** Needed to let users configure real fleet costs. Past sessions store cost_per_km historically so analytics remains consistent.
+
+**How to apply:** Settings page `/settings` shows live calculator. Result page shows savings breakdown with link to /settings.

@@ -18,6 +18,8 @@ tags:
     description: Route optimization
   - name: analytics
     description: Analytics and statistics
+  - name: settings
+    description: Company cost model settings
 
 components:
   securitySchemes:
@@ -354,6 +356,38 @@ paths:
         "404":
           description: Not found
 
+  /settings:
+    get:
+      operationId: getSettings
+      tags: [settings]
+      summary: Get company cost model settings
+      responses:
+        "200":
+          description: Current settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanySettings"
+    put:
+      operationId: updateSettings
+      tags: [settings]
+      summary: Update company cost model settings (cost_per_km auto-calculated)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompanySettingsInput"
+      responses:
+        "200":
+          description: Updated settings with calculated cost_per_km
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanySettings"
+        "400":
+          description: Invalid input (non-positive values)
+
   /analytics/summary:
     get:
       operationId: getAnalyticsSummary
@@ -460,6 +494,44 @@ paths:
 
 components:
   schemas:
+    CompanySettings:
+      type: object
+      properties:
+        fuel_price:
+          type: number
+          description: "Цена топлива, ₽/литр"
+        fuel_consumption:
+          type: number
+          description: "Расход топлива, л/100 км"
+        driver_salary:
+          type: number
+          description: "Зарплата водителя, ₽/месяц"
+        cost_per_km:
+          type: number
+          description: "Рассчитанная стоимость км = (fuel_price×consumption/100) + (salary/22/200)"
+      required:
+        - fuel_price
+        - fuel_consumption
+        - driver_salary
+        - cost_per_km
+
+    CompanySettingsInput:
+      type: object
+      properties:
+        fuel_price:
+          type: number
+          description: "Цена топлива, ₽/литр"
+        fuel_consumption:
+          type: number
+          description: "Расход топлива, л/100 км"
+        driver_salary:
+          type: number
+          description: "Зарплата водителя, ₽/месяц"
+      required:
+        - fuel_price
+        - fuel_consumption
+        - driver_salary
+
     HealthStatus:
       type: object
       properties:

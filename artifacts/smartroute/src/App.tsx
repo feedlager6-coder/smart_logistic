@@ -13,6 +13,7 @@ import { RoutePage } from "@/pages/route";
 import { ResultPage } from "@/pages/result";
 import { AnalyticsPage } from "@/pages/analytics";
 import { HistoryPage } from "@/pages/history";
+import { SettingsPage } from "@/pages/settings";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -48,6 +49,7 @@ function ProtectedRouter() {
         <Route path="/result" component={ResultPage} />
         <Route path="/analytics" component={AnalyticsPage} />
         <Route path="/history" component={HistoryPage} />
+        <Route path="/settings" component={SettingsPage} />
         <Route component={NotFound} />
       </Switch>
     </AppLayout>
