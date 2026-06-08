@@ -53,9 +53,29 @@ _ALLOWED_ORIGINS: list = (
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_ALLOWED_ORIGINS,
+    # allow_credentials requires explicit origin list (not "*").
+    # In production Railway, front+API share the same origin so CORS doesn't apply.
+    # In dev (Replit), Vite proxy handles cross-origin requests transparently.
+    allow_credentials=_ALLOWED_ORIGINS != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """Add security headers to every response."""
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+    # HSTS only when served over HTTPS (Railway / custom domain)
+    if request.url.scheme == "https":
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
+    return response
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 

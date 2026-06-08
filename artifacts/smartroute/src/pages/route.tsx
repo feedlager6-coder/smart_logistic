@@ -494,7 +494,7 @@ export function RoutePage() {
                 className="w-full h-14 text-lg shadow-lg shadow-primary/20"
                 size="lg"
                 onClick={handleBuild}
-                disabled={buildRoute.isPending}
+                disabled={buildRoute.isPending || selectedStores.size === 0 || vehicles.length === 0}
               >
                 {buildRoute.isPending ? (
                   <>
