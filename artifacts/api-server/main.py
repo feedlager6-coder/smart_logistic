@@ -635,11 +635,36 @@ def _ortools_solve_group(depot_coord: tuple, group_node_indices: list,
     routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
 
     # ── Time dimension (enforced only when caller supplies time_windows) ──────
+    tw_enabled = False
     if time_windows and len(time_windows) == len(group_node_indices):
         speed_m_per_min = AVG_SPEED_KMH * 1000 / 60  # ~500 m/min at 30 km/h
 
+        # Pre-validate and sanitize all time windows before touching OR-Tools.
+        # Three classes of bad data that cause CP Solver domain-wipeout:
+        #   1. tw_from > tw_to (swapped / overnight window)
+        #   2. tw_to < 9*60   (window closes before depot departure at 09:00)
+        #   3. tw_from < 0 or tw_to > 1440 (out of [0, 1440] horizon)
+        DEPOT_START = 9 * 60
+        sanitized_tw = []
+        bad_windows = 0
+        for tw_from_s, tw_to_s, svc_s in time_windows:
+            tw_f = max(0, int(tw_from_s))
+            tw_t = max(0, int(tw_to_s))
+            # Invalid range → expand to full working day
+            if tw_f >= tw_t or tw_t < DEPOT_START:
+                tw_f = DEPOT_START
+                tw_t = 23 * 60
+                bad_windows += 1
+            sanitized_tw.append((tw_f, tw_t, int(svc_s)))
+        if bad_windows:
+            logger.warning(
+                "OR-Tools cluster %d: %d/%d stores had invalid/unreachable time windows "
+                "(tw_from>=tw_to or tw_to<09:00) — expanded to full day for those stores",
+                len(group_node_indices), bad_windows, len(time_windows),
+            )
+
         # tw_data[0] = depot (full day), tw_data[k] = store k-1
-        tw_data = [(5 * 60, 23 * 60, 0)] + list(time_windows)
+        tw_data = [(5 * 60, 23 * 60, 0)] + sanitized_tw
 
         def time_cb(from_idx, to_idx):
             from_node = manager.IndexToNode(from_idx)
@@ -648,30 +673,49 @@ def _ortools_solve_group(depot_coord: tuple, group_node_indices: list,
             service_min = tw_data[from_node][2] if from_node > 0 else 0
             return travel_min + service_min
 
-        time_transit_idx = routing.RegisterTransitCallback(time_cb)
-        routing.AddDimension(
-            time_transit_idx,
-            60,       # max slack (early arrival wait) per stop: 60 min
-            24 * 60,  # max cumulative time horizon
-            False,    # do NOT force start cumul to zero
-            "Time",
-        )
-        time_dim = routing.GetDimensionOrDie("Time")
-        time_dim.SetGlobalSpanCostCoefficient(0)
+        try:
+            time_transit_idx = routing.RegisterTransitCallback(time_cb)
+            routing.AddDimension(
+                time_transit_idx,
+                60,       # max slack (early arrival wait) per stop: 60 min
+                24 * 60,  # max cumulative time horizon
+                False,    # do NOT force start cumul to zero
+                "Time",
+            )
+            time_dim = routing.GetDimensionOrDie("Time")
+            time_dim.SetGlobalSpanCostCoefficient(0)
 
-        # Depot departs exactly at 09:00
-        time_dim.CumulVar(routing.Start(0)).SetRange(9 * 60, 9 * 60)
+            # Depot departs exactly at 09:00
+            time_dim.CumulVar(routing.Start(0)).SetRange(DEPOT_START, DEPOT_START)
 
-        # Enforce time window on each store node
-        for local_node in range(1, n):
-            tw_from, tw_to, _ = tw_data[local_node]
-            routing_idx = manager.NodeToIndex(local_node)
-            time_dim.CumulVar(routing_idx).SetRange(tw_from, tw_to)
+            # Enforce time window on each store node.
+            # SetRange raises "CP Solver fail" if constraint propagation produces
+            # an empty domain (e.g. last stop in a large cluster can't be reached
+            # within its tw_to due to cumulative service + travel time).
+            for local_node in range(1, n):
+                tw_from, tw_to, _ = tw_data[local_node]
+                routing_idx = manager.NodeToIndex(local_node)
+                time_dim.CumulVar(routing_idx).SetRange(tw_from, tw_to)
 
-        logger.info(
-            "OR-Tools time-windows enabled for cluster of %d stops",
-            len(group_node_indices),
-        )
+            tw_enabled = True
+            logger.info(
+                "OR-Tools time-windows enabled for cluster of %d stops",
+                len(group_node_indices),
+            )
+        except Exception as tw_exc:
+            # Domain wipeout during model construction — cluster is infeasible with
+            # time windows (too many stops, tight windows, large cumulative service
+            # time). Fall back to distance-only solve for this cluster.
+            logger.warning(
+                "OR-Tools cluster %d: time-window model construction failed (%s) "
+                "— retrying without time windows (distance-only)",
+                len(group_node_indices), tw_exc,
+            )
+            # Rebuild a fresh model without the time dimension
+            manager = pywrapcp.RoutingIndexManager(n, 1, 0)
+            routing = pywrapcp.RoutingModel(manager)
+            transit_idx2 = routing.RegisterTransitCallback(dist_cb)
+            routing.SetArcCostEvaluatorOfAllVehicles(transit_idx2)
 
     # ── Adaptive time limit based on cluster size ─────────────────────────────
     # Small clusters (≤5 stops) are trivial TSPs — 0.3 s is more than enough.
@@ -1133,8 +1177,16 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
             except IndexError:
                 cluster_tw = None
 
-        ordered = _ortools_solve_group(all_coords[0], cluster_nodes, group_coords, sub_matrix,
-                                       time_windows=cluster_tw)
+        try:
+            ordered = _ortools_solve_group(all_coords[0], cluster_nodes, group_coords, sub_matrix,
+                                           time_windows=cluster_tw)
+        except Exception as cluster_exc:
+            logger.warning(
+                "solve_vrp: _ortools_solve_group raised for cluster of %d stops (%s) "
+                "— keeping original sweep order",
+                len(cluster_nodes), cluster_exc,
+            )
+            ordered = cluster_nodes
         routes.append(ordered if ordered else cluster_nodes)
 
     # Determine reported matrix source
@@ -2631,13 +2683,30 @@ def build_route(body: RouteRequest):
     # When use_time_windows is True, pass (tw_from_min, tw_to_min, service_min)
     # per store to solve_vrp so OR-Tools enforces arrival constraints.
     store_time_windows = None
+    route_warnings: list[str] = []   # non-fatal issues surfaced to the frontend
     if body.use_time_windows:
         store_time_windows = []
+        invalid_tw_count = 0
         for s in store_list:
             tw_from = _parse_time_to_minutes(s.get("time_window_from") or "09:00")
             tw_to   = _parse_time_to_minutes(s.get("time_window_to")   or "18:00")
             service = int(s.get("unload_minutes") or 15) if body.use_unload_time else 0
+            # Pre-validate: tw_from must be strictly less than tw_to, and window
+            # must not close before depot departure (09:00 = 540 min).
+            if tw_from >= tw_to or tw_to < 9 * 60:
+                invalid_tw_count += 1
+                tw_from, tw_to = 9 * 60, 23 * 60  # expand to full working day
             store_time_windows.append((tw_from, tw_to, service))
+        if invalid_tw_count:
+            route_warnings.append(
+                f"{invalid_tw_count} магазин(ов) имели некорректные временные окна "
+                f"(tw_from≥tw_to или закрытие раньше 09:00) — заменены на полный день."
+            )
+            logger.warning(
+                "build_route: %d stores had invalid time windows (tw_from>=tw_to or "
+                "tw_to<09:00) — replaced with full-day window",
+                invalid_tw_count,
+            )
         logger.info(
             "build_route: time windows enabled for %d stores (use_unload=%s)",
             len(store_time_windows), body.use_unload_time,
@@ -2649,13 +2718,53 @@ def build_route(body: RouteRequest):
         "yes" if store_time_windows else "no",
     )
 
+    # ── Degradation chain ────────────────────────────────────────────────────
+    # Level 1: TW enabled (if requested)
+    # Level 2: retry without TW on any solver exception
+    # Level 3: greedy round-robin fallback if Level 2 also fails
+    # Never return HTTP 500 — always produce a route or a clear 422 message.
+    matrix_source = "haversine"
     try:
         vehicle_routes_indices, matrix_source = solve_vrp(
             all_coords, num_vehicles, capacities, demands, store_time_windows
         )
-    except Exception as vrp_exc:
-        logger.error("solve_vrp failed:\n%s", traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"VRP solver error: {vrp_exc}")
+    except Exception as vrp_exc_1:
+        logger.error("solve_vrp (with TW) failed:\n%s", traceback.format_exc())
+        if store_time_windows is not None:
+            # Level 2: disable time windows and retry
+            route_warnings.append(
+                "Временные окна привели к неразрешимой задаче и были отключены. "
+                "Маршрут построен без учёта временных окон."
+            )
+            logger.warning(
+                "build_route: degrading to no-TW solve (%s stores, %s vehicles)",
+                len(store_list), num_vehicles,
+            )
+            try:
+                vehicle_routes_indices, matrix_source = solve_vrp(
+                    all_coords, num_vehicles, capacities, demands, None
+                )
+            except Exception as vrp_exc_2:
+                logger.error("solve_vrp (no TW) also failed:\n%s", traceback.format_exc())
+                # Level 3: greedy round-robin — cannot fail
+                route_warnings.append(
+                    "Оптимизатор маршрутов недоступен. Магазины распределены по машинам "
+                    "в порядке загрузки (round-robin). Результат не оптимален."
+                )
+                logger.warning("build_route: falling back to greedy round-robin distribution")
+                store_nodes = list(range(1, len(all_coords)))
+                vehicle_routes_indices = _fallback_distribution(store_nodes, num_vehicles)
+                matrix_source = "haversine"
+        else:
+            # No TW was requested and basic VRP still failed — greedy fallback
+            route_warnings.append(
+                "Оптимизатор маршрутов недоступен. Магазины распределены по машинам "
+                "в порядке загрузки (round-robin). Результат не оптимален."
+            )
+            logger.warning("build_route: falling back to greedy round-robin (no TW requested)")
+            store_nodes = list(range(1, len(all_coords)))
+            vehicle_routes_indices = _fallback_distribution(store_nodes, num_vehicles)
+            matrix_source = "haversine"
 
     logger.info("solve_vrp result: %s routes", len(vehicle_routes_indices))
 
@@ -2760,6 +2869,7 @@ def build_route(body: RouteRequest):
         "matrix_source": matrix_source,
         "geocoder_used": "yandex" if YANDEX_GEOCODER_API_KEY else "nominatim",
         "session_id": None,
+        "warnings": route_warnings,  # non-fatal degradation notices for the frontend
     }
 
     # Save session to DB

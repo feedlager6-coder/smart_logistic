@@ -318,6 +318,14 @@ export function ResultPage() {
         </div>
       </div>
 
+      {/* VRP degradation warnings (e.g. TW disabled due to infeasibility) */}
+      {((result as any).warnings as string[] | undefined)?.map((w, i) => (
+        <Alert key={i} className="border-amber-200 bg-amber-50 print:hidden">
+          <AlertTriangle className="h-4 w-4 text-amber-600" />
+          <AlertDescription className="text-amber-800">{w}</AlertDescription>
+        </Alert>
+      ))}
+
       {/* Global split-route warning */}
       {hasSplitRoutes && (
         <Alert className="border-amber-200 bg-amber-50 print:hidden">
