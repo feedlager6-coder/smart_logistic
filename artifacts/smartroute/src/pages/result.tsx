@@ -363,9 +363,6 @@ export function ResultPage() {
           <div className="text-sm text-muted-foreground flex-1 space-y-0.5">
             <span className="font-medium text-foreground">Как считалась экономия: </span>
             топливо {(result.savings as any).fuel_price ?? "—"} ₽/л × {(result.savings as any).fuel_consumption ?? "—"} л/100 км
-            {" "}+ водитель {(result.savings as any).driver_salary != null
-              ? Number((result.savings as any).driver_salary).toLocaleString("ru-RU")
-              : "—"} ₽/мес
             {" "}= <span className="font-semibold text-foreground">{(result.savings as any).cost_per_km} ₽/км</span>
             {" "}× {(result.savings as any).saved_km ?? 0} км × 1.4 (дороги)
           </div>

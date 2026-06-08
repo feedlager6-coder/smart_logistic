@@ -503,16 +503,12 @@ components:
         fuel_consumption:
           type: number
           description: "Расход топлива, л/100 км"
-        driver_salary:
-          type: number
-          description: "Зарплата водителя, ₽/месяц"
         cost_per_km:
           type: number
-          description: "Рассчитанная стоимость км = (fuel_price×consumption/100) + (salary/22/200)"
+          description: "Рассчитанная стоимость км = fuel_price × consumption / 100"
       required:
         - fuel_price
         - fuel_consumption
-        - driver_salary
         - cost_per_km
 
     CompanySettingsInput:
@@ -524,13 +520,9 @@ components:
         fuel_consumption:
           type: number
           description: "Расход топлива, л/100 км"
-        driver_salary:
-          type: number
-          description: "Зарплата водителя, ₽/месяц"
       required:
         - fuel_price
         - fuel_consumption
-        - driver_salary
 
     HealthStatus:
       type: object

@@ -943,16 +943,23 @@ def init_db():
             id SERIAL PRIMARY KEY,
             fuel_price DOUBLE PRECISION DEFAULT 67.0,
             fuel_consumption DOUBLE PRECISION DEFAULT 13.0,
-            driver_salary DOUBLE PRECISION DEFAULT 55000.0,
-            cost_per_km DOUBLE PRECISION DEFAULT 21.21,
+            driver_salary DOUBLE PRECISION DEFAULT 0.0,
+            cost_per_km DOUBLE PRECISION DEFAULT 8.71,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     # Seed defaults if table is empty
+    # driver_salary column kept for schema compatibility but no longer used in formula
     cur.execute("""
-        INSERT INTO company_settings (fuel_price, fuel_consumption, driver_salary, cost_per_km)
-        SELECT 67.0, 13.0, 55000.0, ROUND(CAST((67.0 * 13.0 / 100.0) + (55000.0 / 22.0 / 200.0) AS numeric), 2)
+        INSERT INTO company_settings (fuel_price, fuel_consumption, cost_per_km)
+        SELECT 67.0, 13.0, ROUND(CAST(67.0 * 13.0 / 100.0 AS numeric), 2)
         WHERE NOT EXISTS (SELECT 1 FROM company_settings)
+    """)
+    # Migration: recalculate cost_per_km for existing rows using fuel-only formula
+    cur.execute("""
+        UPDATE company_settings
+           SET cost_per_km = ROUND(CAST(fuel_price * fuel_consumption / 100.0 AS numeric), 2)
+         WHERE cost_per_km > fuel_price * fuel_consumption / 100.0 + 1
     """)
     # Historical cost_per_km per route session
     cur.execute("""
@@ -968,13 +975,12 @@ def get_company_settings() -> dict:
     _defaults = {
         "fuel_price": 67.0,
         "fuel_consumption": 13.0,
-        "driver_salary": 55000.0,
-        "cost_per_km": round((67.0 * 13.0 / 100.0) + (55000.0 / 22.0 / 200.0), 2),
+        "cost_per_km": round(67.0 * 13.0 / 100.0, 2),
     }
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT fuel_price, fuel_consumption, driver_salary, cost_per_km FROM company_settings ORDER BY id LIMIT 1")
+        cur.execute("SELECT fuel_price, fuel_consumption, cost_per_km FROM company_settings ORDER BY id LIMIT 1")
         row = cur.fetchone()
         cur.close()
         conn.close()
@@ -1433,14 +1439,14 @@ def calculate_savings(
     ROAD_FACTOR: float = 1.4           # Haversine → реальный пробег (константа)
     fuel_l_per_100km: float = float(settings.get("fuel_consumption", 13.0))
     fuel_price_rub: float = float(settings.get("fuel_price", 67.0))
-    cost_per_km_val: float = float(settings.get("cost_per_km", 21.21))
-    driver_salary: float = float(settings.get("driver_salary", 55000.0))
+    cost_per_km_val: float = float(settings.get("cost_per_km", round(67.0 * 13.0 / 100.0, 2)))
 
     # Применяем ROAD_FACTOR только к монетарным метрикам, а не к saved_km,
     # чтобы не искажать честное сравнение маршрутов.
     saved_km_road = saved_km * ROAD_FACTOR
     saved_fuel_l = round(saved_km_road * fuel_l_per_100km / 100.0, 1)
     saved_fuel_cost_rub = round(saved_fuel_l * fuel_price_rub)
+    # cost_per_km = fuel_price × consumption / 100 (только топливо)
     saved_rub_day = round(saved_km_road * cost_per_km_val)
 
     return {
@@ -1455,7 +1461,6 @@ def calculate_savings(
         "cost_per_km": round(cost_per_km_val, 2),
         "fuel_price": fuel_price_rub,
         "fuel_consumption": fuel_l_per_100km,
-        "driver_salary": driver_salary,
     }
 
 
@@ -1589,7 +1594,6 @@ class RouteRequest(BaseModel):
 class CompanySettingsInput(BaseModel):
     fuel_price: float       # руб/литр
     fuel_consumption: float # л/100 км
-    driver_salary: float    # руб/месяц
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -2869,22 +2873,22 @@ def get_settings_endpoint():
 
 @app.put("/api/settings")
 def update_settings_endpoint(body: CompanySettingsInput):
-    """Обновить параметры расчёта стоимости км. cost_per_km рассчитывается автоматически."""
-    if body.fuel_price <= 0 or body.fuel_consumption <= 0 or body.driver_salary <= 0:
+    """Обновить параметры расчёта стоимости км. cost_per_km = fuel_price × consumption / 100."""
+    if body.fuel_price <= 0 or body.fuel_consumption <= 0:
         raise HTTPException(status_code=400, detail="Все параметры должны быть положительными числами")
-    cost_per_km = round((body.fuel_price * body.fuel_consumption / 100.0) + (body.driver_salary / 22.0 / 200.0), 2)
+    cost_per_km = round(body.fuel_price * body.fuel_consumption / 100.0, 2)
     conn = get_db()
     cur = conn.cursor()
     try:
         cur.execute("""
             UPDATE company_settings
-               SET fuel_price=%s, fuel_consumption=%s, driver_salary=%s, cost_per_km=%s, updated_at=NOW()
-        """, (body.fuel_price, body.fuel_consumption, body.driver_salary, cost_per_km))
+               SET fuel_price=%s, fuel_consumption=%s, cost_per_km=%s, updated_at=NOW()
+        """, (body.fuel_price, body.fuel_consumption, cost_per_km))
         if cur.rowcount == 0:
             cur.execute("""
-                INSERT INTO company_settings (fuel_price, fuel_consumption, driver_salary, cost_per_km)
-                VALUES (%s, %s, %s, %s)
-            """, (body.fuel_price, body.fuel_consumption, body.driver_salary, cost_per_km))
+                INSERT INTO company_settings (fuel_price, fuel_consumption, cost_per_km)
+                VALUES (%s, %s, %s)
+            """, (body.fuel_price, body.fuel_consumption, cost_per_km))
         conn.commit()
     finally:
         cur.close()
@@ -2892,7 +2896,6 @@ def update_settings_endpoint(body: CompanySettingsInput):
     return {
         "fuel_price": body.fuel_price,
         "fuel_consumption": body.fuel_consumption,
-        "driver_salary": body.driver_salary,
         "cost_per_km": cost_per_km,
     }
 

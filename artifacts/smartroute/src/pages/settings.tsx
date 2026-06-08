@@ -4,20 +4,16 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import { Settings, Save, Info } from "lucide-react";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Settings, Save, Fuel, Gauge, Calculator, TrendingDown } from "lucide-react";
 
 interface CompanySettings {
   fuel_price: number;
   fuel_consumption: number;
-  driver_salary: number;
   cost_per_km: number;
 }
 
-function calcCostPerKm(fuelPrice: number, consumption: number, salary: number): number {
-  const fuelComponent = (fuelPrice * consumption) / 100;
-  const salaryComponent = salary / 22 / 200;
-  return Math.round((fuelComponent + salaryComponent) * 100) / 100;
+function calcCostPerKm(fuelPrice: number, consumption: number): number {
+  return Math.round((fuelPrice * consumption) / 100 * 100) / 100;
 }
 
 export function SettingsPage() {
@@ -27,18 +23,10 @@ export function SettingsPage() {
 
   const [fuelPrice, setFuelPrice] = useState<string>("67");
   const [consumption, setConsumption] = useState<string>("13");
-  const [salary, setSalary] = useState<string>("55000");
 
   const fuelPriceNum = parseFloat(fuelPrice) || 0;
   const consumptionNum = parseFloat(consumption) || 0;
-  const salaryNum = parseFloat(salary) || 0;
-  const fuelComponent = consumptionNum > 0 && fuelPriceNum > 0
-    ? Math.round((fuelPriceNum * consumptionNum / 100) * 100) / 100
-    : 0;
-  const salaryComponent = salaryNum > 0
-    ? Math.round((salaryNum / 22 / 200) * 100) / 100
-    : 0;
-  const costPerKm = calcCostPerKm(fuelPriceNum, consumptionNum, salaryNum);
+  const costPerKm = calcCostPerKm(fuelPriceNum, consumptionNum);
 
   useEffect(() => {
     fetch("/api/settings", { credentials: "include" })
@@ -46,14 +34,13 @@ export function SettingsPage() {
       .then((data: CompanySettings) => {
         setFuelPrice(String(data.fuel_price));
         setConsumption(String(data.fuel_consumption));
-        setSalary(String(data.driver_salary));
       })
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
 
   async function handleSave() {
-    if (fuelPriceNum <= 0 || consumptionNum <= 0 || salaryNum <= 0) {
+    if (fuelPriceNum <= 0 || consumptionNum <= 0) {
       toast({ title: "Ошибка", description: "Все поля должны быть заполнены положительными числами", variant: "destructive" });
       return;
     }
@@ -66,14 +53,13 @@ export function SettingsPage() {
         body: JSON.stringify({
           fuel_price: fuelPriceNum,
           fuel_consumption: consumptionNum,
-          driver_salary: salaryNum,
         }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || "Ошибка сервера");
+        throw new Error((err as any).detail || "Ошибка сервера");
       }
-      toast({ title: "Настройки сохранены", description: `Стоимость км: ${costPerKm} ₽/км` });
+      toast({ title: "Настройки сохранены", description: `Стоимость километра: ${costPerKm} ₽/км` });
     } catch (e: any) {
       toast({ title: "Не удалось сохранить", description: e.message, variant: "destructive" });
     } finally {
@@ -89,29 +75,44 @@ export function SettingsPage() {
     );
   }
 
+  const fuelComponent = fuelPriceNum > 0 && consumptionNum > 0
+    ? Math.round(fuelPriceNum * consumptionNum / 100 * 100) / 100
+    : 0;
+
   return (
-    <div className="space-y-6 max-w-2xl">
+    <div className="space-y-8 pb-10 max-w-2xl">
+      {/* Header */}
       <div>
-        <h1 className="text-3xl font-bold tracking-tight flex items-center gap-2">
-          <Settings className="w-7 h-7" />
+        <h1 className="text-3xl font-bold tracking-tight flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary">
+            <Settings className="w-5 h-5" />
+          </div>
           Настройки компании
         </h1>
-        <p className="text-muted-foreground mt-1">
-          Параметры расчёта экономии — применяются при каждом построении маршрута
+        <p className="text-muted-foreground mt-2">
+          Параметры топлива — применяются при расчёте экономии в каждом новом маршруте
         </p>
       </div>
 
+      {/* Input card */}
       <Card className="border-border">
         <CardHeader>
-          <CardTitle>Стоимость одного километра</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Fuel className="w-5 h-5 text-primary" />
+            Параметры топлива
+          </CardTitle>
           <CardDescription>
-            Укажите реальные данные вашего автопарка — система будет считать экономию точно
+            Укажите актуальные данные вашего автопарка — система будет считать экономию точно
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+            {/* Fuel price */}
             <div className="space-y-2">
-              <Label htmlFor="fuel_price">Цена топлива, ₽/литр</Label>
+              <Label htmlFor="fuel_price" className="flex items-center gap-1.5">
+                <Fuel className="w-3.5 h-3.5 text-muted-foreground" />
+                Цена топлива, ₽/литр
+              </Label>
               <Input
                 id="fuel_price"
                 type="number"
@@ -120,12 +121,17 @@ export function SettingsPage() {
                 value={fuelPrice}
                 onChange={e => setFuelPrice(e.target.value)}
                 placeholder="67"
+                className="text-base"
               />
               <p className="text-xs text-muted-foreground">Дизель или бензин по вашей заправке</p>
             </div>
 
+            {/* Consumption */}
             <div className="space-y-2">
-              <Label htmlFor="consumption">Расход топлива, л/100 км</Label>
+              <Label htmlFor="consumption" className="flex items-center gap-1.5">
+                <Gauge className="w-3.5 h-3.5 text-muted-foreground" />
+                Расход топлива, л/100 км
+              </Label>
               <Input
                 id="consumption"
                 type="number"
@@ -134,55 +140,79 @@ export function SettingsPage() {
                 value={consumption}
                 onChange={e => setConsumption(e.target.value)}
                 placeholder="13"
+                className="text-base"
               />
               <p className="text-xs text-muted-foreground">Для Газели — обычно 11–15 л/100 км</p>
             </div>
-
-            <div className="space-y-2 sm:col-span-2">
-              <Label htmlFor="salary">Зарплата водителя, ₽/месяц</Label>
-              <Input
-                id="salary"
-                type="number"
-                min="1"
-                step="1000"
-                value={salary}
-                onChange={e => setSalary(e.target.value)}
-                placeholder="55000"
-              />
-              <p className="text-xs text-muted-foreground">Итоговая сумма включая налоги и страховые взносы</p>
-            </div>
           </div>
-
-          {/* Live calculation */}
-          <div className="rounded-lg border border-border bg-muted/40 p-4 space-y-3">
-            <p className="text-sm font-medium text-foreground">Расчёт стоимости километра</p>
-            <div className="space-y-1.5 text-sm text-muted-foreground font-mono">
-              <div className="flex justify-between">
-                <span>Топливо: {fuelPrice} ₽/л × {consumption} л / 100 км</span>
-                <span className="text-foreground font-medium">{fuelComponent} ₽/км</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Водитель: {salary.replace(/\B(?=(\d{3})+(?!\d))/g, " ")} ₽ / 22 дн / 200 км</span>
-                <span className="text-foreground font-medium">{salaryComponent} ₽/км</span>
-              </div>
-              <div className="flex justify-between border-t border-border pt-2 mt-2">
-                <span className="font-semibold text-foreground">Итого:</span>
-                <span className="text-primary font-bold text-base">{costPerKm} ₽/км</span>
-              </div>
-            </div>
-          </div>
-
-          <Alert className="border-blue-200 bg-blue-50">
-            <Info className="h-4 w-4 text-blue-600" />
-            <AlertDescription className="text-blue-800 text-sm">
-              Формула: <span className="font-mono">(цена × расход / 100) + (зарплата / 22 / 200)</span>. Учитываются только топливо и водитель. ТО, страховку и другие затраты добавьте к зарплате при необходимости. Новые настройки применяются к маршрутам, построенным <strong>после сохранения</strong>.
-            </AlertDescription>
-          </Alert>
 
           <Button onClick={handleSave} disabled={saving} className="gap-2 w-full sm:w-auto">
             <Save className="w-4 h-4" />
             {saving ? "Сохраняю…" : "Сохранить настройки"}
           </Button>
+        </CardContent>
+      </Card>
+
+      {/* Live calculator card */}
+      <Card className="border-border bg-muted/30">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Calculator className="w-4 h-4 text-primary" />
+            Расчёт стоимости километра
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Formula breakdown */}
+          <div className="space-y-2 text-sm">
+            <div className="flex items-center justify-between py-2 border-b border-border">
+              <span className="text-muted-foreground font-mono">
+                {fuelPrice || "—"} ₽/л × {consumption || "—"} л / 100 км
+              </span>
+              <span className="font-semibold tabular-nums">
+                {fuelComponent > 0 ? `${fuelComponent} ₽/км` : "—"}
+              </span>
+            </div>
+            <div className="flex items-center justify-between py-2">
+              <span className="text-lg font-bold text-foreground">Итого</span>
+              <span className="text-2xl font-extrabold text-primary tabular-nums">
+                {costPerKm > 0 ? `${costPerKm} ₽/км` : "—"}
+              </span>
+            </div>
+          </div>
+
+          {/* Savings preview */}
+          {costPerKm > 0 && (
+            <div className="rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <TrendingDown className="w-4 h-4 text-emerald-600" />
+                <span className="text-sm font-semibold text-emerald-800 dark:text-emerald-300">Пример экономии</span>
+              </div>
+              <div className="grid grid-cols-3 gap-3 text-center">
+                {[
+                  { km: 20, label: "−20 км" },
+                  { km: 50, label: "−50 км" },
+                  { km: 100, label: "−100 км" },
+                ].map(({ km, label }) => {
+                  const saved = Math.round(km * 1.4 * costPerKm);
+                  return (
+                    <div key={km} className="bg-white dark:bg-card rounded-lg px-2 py-2 shadow-sm">
+                      <div className="text-xs text-muted-foreground">{label}/день</div>
+                      <div className="text-base font-bold text-emerald-600">{saved} ₽/день</div>
+                      <div className="text-xs text-muted-foreground">{saved * 22} ₽/мес</div>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-muted-foreground mt-3">
+                Расчёт: сэкономленные км × 1.4 (коэф. дорог) × {costPerKm} ₽/км
+              </p>
+            </div>
+          )}
+
+          <p className="text-xs text-muted-foreground">
+            Формула: <span className="font-mono">стоимость км = цена топлива × расход / 100</span>.
+            Новые настройки применяются к маршрутам, построенным <strong>после сохранения</strong>.
+          </p>
         </CardContent>
       </Card>
     </div>
