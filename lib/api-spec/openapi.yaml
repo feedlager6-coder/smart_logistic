@@ -662,6 +662,9 @@ components:
           type: boolean
         use_unload_time:
           type: boolean
+        max_stops_per_vehicle:
+          type: ["integer", "null"]
+          description: "Мягкий лимит точек на машину. Рекомендуется 24 при дисбалансе (ratio >3x). Параметр опциональный — null = без ограничения."
       required:
         - store_ids
         - vehicles

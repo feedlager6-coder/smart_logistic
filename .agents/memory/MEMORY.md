@@ -13,3 +13,4 @@
 - [Orval codegen broken in Replit](orval-codegen-broken.md) — orval v8.9.1 fails "Failed to resolve input" on every run; WIPES generated/ before failing. Restore from git. For new DELETE/PATCH endpoints use direct fetch() instead of generating a hook.
 - [Cookie SameSite iframe fix](cookie-samesite-iframe.md) — SameSite=lax blocks cookies in cross-site iframes (Replit Canvas). Must use SameSite=none + Secure=true. Configured via COOKIE_SAMESITE/COOKIE_SECURE env vars (both default to none/true).
 - [Global 401 handler pattern](global-401-handler.md) — QueryCache+MutationCache onError dispatches "api:unauthorized" DOM event; auth.tsx listens and calls fetchMe(); 401 from /me → login page. Prevents stale "Loading..." on protected pages.
+- [VRP balance benchmark results](vrp-balance-benchmark.md) — max_stops_per_vehicle=24 reduces ratio 3.9x→2.7x (−31%) at km cost −0.5%; Yandex gap is road-network (OSRM confirms SmartRoute faster by 2.2 min), not stop-ordering.

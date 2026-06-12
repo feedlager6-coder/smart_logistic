@@ -74,6 +74,7 @@ export function RoutePage() {
   const [vehicles, setVehicles] = useState<Vehicle[]>(() => loadFleet() ?? [DEFAULT_VEHICLE]);
   const [useTimeWindows, setUseTimeWindows] = useState(true);
   const [useUnloadTime, setUseUnloadTime] = useState(true);
+  const [maxStopsPerVehicle, setMaxStopsPerVehicle] = useState<string>(""); // "" = no cap
 
   // Persist depot to localStorage on change
   useEffect(() => {
@@ -190,6 +191,7 @@ export function RoutePage() {
         depot_lon: depotLonNum ?? null,
         use_time_windows: useTimeWindows,
         use_unload_time: useUnloadTime,
+        max_stops_per_vehicle: maxStopsPerVehicle ? parseInt(maxStopsPerVehicle) : null,
       }
     }, {
       onSuccess: (result) => {
@@ -488,6 +490,29 @@ export function RoutePage() {
                   <p className="text-sm text-muted-foreground">Добавление времени нахождения в точке</p>
                 </div>
                 <Switch checked={useUnloadTime} onCheckedChange={setUseUnloadTime} />
+              </div>
+
+              <div className="space-y-2">
+                <Label className="text-base">Макс. точек на машину</Label>
+                <p className="text-sm text-muted-foreground">
+                  Ограничивает нагрузку на водителя. Рекомендуется 24 при дисбалансе.
+                </p>
+                <div className="flex gap-2 flex-wrap">
+                  {["", "30", "26", "24"].map(val => (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => setMaxStopsPerVehicle(val)}
+                      className={`px-3 py-1.5 rounded-md text-sm font-medium border transition-colors ${
+                        maxStopsPerVehicle === val
+                          ? "bg-primary text-primary-foreground border-primary"
+                          : "bg-background text-foreground border-border hover:bg-muted"
+                      }`}
+                    >
+                      {val === "" ? "Без лимита" : `≤${val}`}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <Button
