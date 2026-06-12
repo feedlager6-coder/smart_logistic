@@ -556,6 +556,7 @@ def _cluster_by_sweep(store_indices: list, all_coords: list, num_vehicles: int,
     # Stores are assigned to whichever wedge their angle falls into.
     # Dense wedges naturally collect more stores; sparse wedges get fewer.
     # This is the key mechanism for unequal (geography-driven) distribution.
+    # Centroid refinement below then smoothes sector boundaries.
     all_angles = [(node, angle_from_depot(node)) for node in store_indices]
     if not all_angles:
         return []
@@ -855,6 +856,43 @@ def _inter_route_relocate(routes: list, full_matrix: list, max_iter: int = 5,
             break
 
     return [r for r in routes if r]
+
+
+def _two_opt_route(route: list, full_matrix: list) -> list:
+    """
+    Apply 2-opt improvement to a single route.
+
+    Considers all (i, j) pairs and reverses segment route[i+1:j+1] if it
+    reduces total route distance (depot→route→depot).  Runs until no
+    improving swap is found (convergence).
+
+    Complexity: O(n²) per pass — fast even for 30-stop clusters.
+    Fixes "linear chain" artefacts left by TSP initialisation.
+    """
+    if len(route) < 3:
+        return route
+
+    best = list(route)
+    improved = True
+    while improved:
+        improved = False
+        n = len(best)
+        for i in range(-1, n - 1):
+            node_i = 0 if i == -1 else best[i]
+            node_i1 = best[i + 1]
+            for j in range(i + 2, n):
+                if i == -1 and j == n - 1:
+                    continue  # skip full-route reversal (same cost)
+                node_j = best[j]
+                node_j1 = 0 if j == n - 1 else best[j + 1]
+                # Cost of current edges vs. reversed segment
+                d_before = full_matrix[node_i][node_i1] + full_matrix[node_j][node_j1]
+                d_after = full_matrix[node_i][node_j] + full_matrix[node_i1][node_j1]
+                if d_after < d_before - 1:  # 1-metre threshold avoids float noise
+                    best[i + 1:j + 1] = best[i + 1:j + 1][::-1]
+                    improved = True
+                    node_i1 = best[i + 1]  # update for next j in this i-pass
+    return best
 
 
 def _rebalance_min_stops(routes: list, full_matrix: list, min_stops: int) -> list:
@@ -1207,6 +1245,20 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
                 len(cluster_nodes), cluster_exc,
             )
             ordered = cluster_nodes
+
+        # ── 2-opt polish within this route ────────────────────────────────────
+        # Removes crossing edges and linear-chain artefacts that OR-Tools
+        # occasionally leaves, using the same sub_matrix (real road distances
+        # when OSRM/GH was available, otherwise Haversine).
+        if sub_matrix is not None and len(ordered) >= 3:
+            # Map global node indices back to local sub_matrix indices
+            # group_indices = [0] + cluster_nodes → local[k] = group_indices[k]
+            group_indices = [0] + cluster_nodes
+            local_idx = {gn: li for li, gn in enumerate(group_indices)}
+            local_route = [local_idx[gn] for gn in ordered]
+            local_route = _two_opt_route(local_route, sub_matrix)
+            ordered = [group_indices[li] for li in local_route]
+
         routes.append(ordered if ordered else cluster_nodes)
 
     # Determine reported matrix source
@@ -1253,9 +1305,16 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
         routes[largest_idx] = sorted_half[:mid]
         routes.append(sorted_half[mid:])
 
-    # Compute effective min-stops floor: scale down when there aren't enough
-    # total stops to give every vehicle the full minimum.
-    effective_min = max(1, min(MIN_STOPS_PER_VEHICLE, store_count // max(len(routes), 1)))
+    # Compute effective min-stops floor.
+    # For large datasets (avg > MIN_STOPS_PER_VEHICLE) use 70% of avg so no
+    # route drops below ≈70% of the mean — this caps ratio max/min at ~1.7x
+    # while still allowing inter-route optimisation to fix misplaced stops.
+    # For small datasets, fall back to avg-1 so no vehicle is left empty.
+    avg_stops = store_count // max(len(routes), 1)
+    if avg_stops <= MIN_STOPS_PER_VEHICLE:
+        effective_min = max(1, avg_stops - 1)
+    else:
+        effective_min = max(MIN_STOPS_PER_VEHICLE, int(avg_stops * 0.70))
 
     # ── Step 5: inter-route relocate post-processing ──────────────────────────
     # Move individual stops between routes if it reduces total Haversine distance.
@@ -1263,21 +1322,37 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
     # isolation, so route 1 can end up much shorter than route 2.  Relocate fixes
     # this by shifting misplaced stops to the route where they cost the least.
     # The min_stops guard prevents Or-opt from draining routes below the floor.
-    if len(routes) > 1 and store_count <= 80:
+    #
+    # REMOVED: the old `store_count <= 80` gate that disabled this step entirely
+    # for larger datasets — that was the root cause of quality degradation at
+    # 100+ stops.  Instead we use adaptive iteration counts so that larger
+    # problems still finish quickly (O(iters × stops × routes × cluster_size)).
+    if len(routes) > 1:
+        if store_count <= 80:
+            relocate_iters = 5
+        elif store_count <= 150:
+            relocate_iters = 3
+        elif store_count <= 300:
+            relocate_iters = 2
+        else:
+            relocate_iters = 1
+
         before_km = sum(
             sum(full_matrix[r[k]][r[k + 1]] for k in range(len(r) - 1))
             + (full_matrix[0][r[0]] + full_matrix[r[-1]][0] if r else 0)
             for r in routes
         ) / 1000
-        routes = _inter_route_relocate(routes, full_matrix, min_stops=effective_min)
+        routes = _inter_route_relocate(routes, full_matrix,
+                                       max_iter=relocate_iters,
+                                       min_stops=effective_min)
         after_km = sum(
             sum(full_matrix[r[k]][r[k + 1]] for k in range(len(r) - 1))
             + (full_matrix[0][r[0]] + full_matrix[r[-1]][0] if r else 0)
             for r in routes
         ) / 1000
         logger.info(
-            "inter_route_relocate: %.1f km → %.1f km (saved %.1f km across all vehicles)",
-            before_km, after_km, before_km - after_km,
+            "inter_route_relocate: %.1f km → %.1f km (saved %.1f km, iters=%d, stores=%d)",
+            before_km, after_km, before_km - after_km, relocate_iters, store_count,
         )
 
     # ── Step 6: rebalance to minimum stops per vehicle ────────────────────────
