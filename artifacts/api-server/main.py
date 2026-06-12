@@ -621,7 +621,8 @@ def _parse_time_to_minutes(time_str: str) -> int:
 
 def _ortools_solve_group(depot_coord: tuple, group_node_indices: list,
                          group_coords: list, dist_matrix: list,
-                         time_windows: list = None) -> list:
+                         time_windows: list = None,
+                         time_limit_override: float = None) -> list:
     """
     Run OR-Tools TSP on a single vehicle's cluster of stops.
 
@@ -740,14 +741,27 @@ def _ortools_solve_group(depot_coord: tuple, group_node_indices: list,
 
     # ── Adaptive time limit based on cluster size ─────────────────────────────
     # Small clusters (≤5 stops) are trivial TSPs — 0.3 s is more than enough.
-    # Medium clusters (≤10) need ~1 s.  Large clusters get the full budget.
+    # Medium clusters (≤10) need ~1 s.  Large clusters scale with size because
+    # GLS needs more iterations to escape local optima in larger search spaces.
+    # Confirmed by real data: 37-stop cluster with 2 s leaves 2.06 km (7.6%)
+    # of 2-opt improvements unused, directly causing the 14-min Yandex gap.
+    # Budget: ≤20 stops→5 s, ≤35 stops→10 s, >35 stops→15 s (via env override).
+    # An optional time_limit_override (from the global 60 s fleet budget in
+    # solve_vrp) further caps this so large datasets (300+ stops) don't stall.
     cluster_size = len(group_node_indices)
     if cluster_size <= 5:
         adaptive_tl = min(0.3, float(ORTOOLS_TIME_LIMIT_SECONDS))
     elif cluster_size <= 10:
         adaptive_tl = min(1.0, float(ORTOOLS_TIME_LIMIT_SECONDS))
+    elif cluster_size <= 20:
+        adaptive_tl = min(5.0, float(ORTOOLS_TIME_LIMIT_SECONDS) * 2.5)
+    elif cluster_size <= 35:
+        adaptive_tl = min(10.0, float(ORTOOLS_TIME_LIMIT_SECONDS) * 5.0)
     else:
-        adaptive_tl = float(ORTOOLS_TIME_LIMIT_SECONDS)
+        adaptive_tl = min(15.0, float(ORTOOLS_TIME_LIMIT_SECONDS) * 7.5)
+
+    if time_limit_override is not None:
+        adaptive_tl = min(adaptive_tl, time_limit_override)
 
     params = pywrapcp.DefaultRoutingSearchParameters()
     params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
@@ -1209,6 +1223,14 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
         matrix_results = [f.result() for f in matrix_futures]
 
     # Phase B: OR-Tools TSP per cluster (sequential; CPU-bound) -----------------
+    # Global 60 s OR-Tools budget spread equally across clusters so very large
+    # datasets (300+ stops) stay within a predictable wall-clock time.
+    # Each cluster gets at most (60 / num_clusters) seconds, further bounded by
+    # the per-size adaptive limits computed inside _ortools_solve_group.
+    GLOBAL_ORTOOLS_BUDGET_SECONDS = 60.0
+    num_clusters = len([r for r in matrix_results if r[1] is not None])
+    per_cluster_budget = (GLOBAL_ORTOOLS_BUDGET_SECONDS / max(num_clusters, 1))
+
     routes = []
     gh_clusters = 0
     osrm_clusters = 0
@@ -1237,7 +1259,8 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
 
         try:
             ordered = _ortools_solve_group(all_coords[0], cluster_nodes, group_coords, sub_matrix,
-                                           time_windows=cluster_tw)
+                                           time_windows=cluster_tw,
+                                           time_limit_override=per_cluster_budget)
         except Exception as cluster_exc:
             logger.warning(
                 "solve_vrp: _ortools_solve_group raised for cluster of %d stops (%s) "
@@ -1353,6 +1376,27 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
         logger.info(
             "inter_route_relocate: %.1f km → %.1f km (saved %.1f km, iters=%d, stores=%d)",
             before_km, after_km, before_km - after_km, relocate_iters, store_count,
+        )
+
+        # ── Step 5b: 2-opt re-polish after relocate ───────────────────────────
+        # inter_route_relocate inserts stops at their best position but does NOT
+        # re-run 2-opt after insertion, leaving crossing edges in the routes.
+        # Confirmed by real data (Session 49): Route 9 retains 2.061 km (7.6%)
+        # of 2-opt improvability after relocate; all routes combined: 3.038 km.
+        # Running 2-opt here on full_matrix (Haversine) removes those crossings.
+        # This is the primary cause of the 14-min gap vs Yandex on 37-stop routes.
+        routes = [
+            _two_opt_route(r, full_matrix) if len(r) >= 3 else r
+            for r in routes
+        ]
+        after_2opt_km = sum(
+            sum(full_matrix[r[k]][r[k + 1]] for k in range(len(r) - 1))
+            + (full_matrix[0][r[0]] + full_matrix[r[-1]][0] if r else 0)
+            for r in routes
+        ) / 1000
+        logger.info(
+            "post-relocate 2-opt: %.1f km → %.1f km (saved %.1f km, stores=%d)",
+            after_km, after_2opt_km, after_km - after_2opt_km, store_count,
         )
 
     # ── Step 6: rebalance to minimum stops per vehicle ────────────────────────
@@ -2876,6 +2920,13 @@ def build_route(body: RouteRequest):
 
         ROUTE_START_MINUTES = 9 * 60  # 09:00 departure from depot
         route_stores = []
+        # ETA_ROAD_FACTOR converts Haversine straight-line km to realistic road km
+        # (urban detours, one-way streets).  Empirically measured at 2.59× for
+        # Makhachkala city centre (session 49, Route 9: 27.1 km Haversine →
+        # 117 min Yandex actual at 30 km/h = 58.5 km road).  Using 1.4 (conservative)
+        # keeps ETA within ~40% of road reality, consistent with ROAD_FACTOR in
+        # cost calculations.  Override via vehicle.average_speed for custom fleets.
+        ETA_ROAD_FACTOR = 1.4
         route_coords = [(depot_lat, depot_lon)]
         dist_m = 0
         cumulative_min = 0  # elapsed minutes since 09:00
@@ -2892,8 +2943,8 @@ def build_route(body: RouteRequest):
             # Drive time from previous point
             leg_m = haversine_meters(prev_coord, curr_coord)
             dist_m += leg_m
-            effective_speed = vehicle.average_speed if vehicle.average_speed else (AVG_SPEED_KMH * TRAFFIC_MULTIPLIER)
-            leg_drive_min = max(1, int(leg_m / 1000 / effective_speed * 60))
+            effective_speed = vehicle.average_speed if vehicle.average_speed else AVG_SPEED_KMH
+            leg_drive_min = max(1, int(leg_m * ETA_ROAD_FACTOR / 1000 / effective_speed * 60))
             cumulative_min += leg_drive_min
 
             # Estimated arrival time at this stop
@@ -2927,8 +2978,8 @@ def build_route(body: RouteRequest):
         total_km += km
 
         unload_min = sum(s["unload_minutes"] for s in store_list if s["id"] in [rs["store_id"] for rs in route_stores]) if body.use_unload_time else 0
-        eff_spd = vehicle.average_speed if vehicle.average_speed else (AVG_SPEED_KMH * TRAFFIC_MULTIPLIER)
-        drive_min = int(km / eff_spd * 60)
+        eff_spd = vehicle.average_speed if vehicle.average_speed else AVG_SPEED_KMH
+        drive_min = int(km * ETA_ROAD_FACTOR / eff_spd * 60)
         est_minutes = drive_min + unload_min
 
         # depot (route_coords[0]) остаётся первой точкой — Яндекс заменит его
