@@ -10,6 +10,7 @@ dependencies = [
     "ortools>=9.10",
     "passlib[bcrypt]>=1.7",
     "psycopg2-binary>=2.9",
+    "pydantic>=2.13.4",
     "python-jose[cryptography]>=3.3",
     "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.48",
