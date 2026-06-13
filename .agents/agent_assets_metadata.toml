@@ -12,3 +12,9 @@ id = "8miZOvh4JMDLs4Uy8Q-kz"
 uri = "file://docs/smartroute-business-brief.txt"
 type = "text"
 title = "SmartRoute — Бизнес-брифинг"
+
+[[outputs]]
+id = "m5pboN_EAi-drgX8KA-UE"
+uri = "file://capacitated_sweep_audit.md"
+type = "text"
+title = "Audit: Capacitated Sweep vs Equal-Angle Sweep"
