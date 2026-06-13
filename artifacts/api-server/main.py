@@ -1317,7 +1317,7 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
     if not ORTOOLS_AVAILABLE:
         if store_count >= 1:
             all_store_nodes = list(range(1, n))
-            clusters = _cluster_by_capacitated_sweep(all_store_nodes, all_coords, num_vehicles)
+            clusters = _cluster_by_sweep(all_store_nodes, all_coords, num_vehicles)
             return [c for c in clusters if c], "haversine"
         return _fallback_distribution(list(range(1, n)), num_vehicles), "haversine"
 
@@ -1330,12 +1330,11 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
         store_count, num_vehicles,
     )
 
-    # ── Step 2: geographic sector partition (capacitated sweep) ──────────────
-    # Uses a dynamic per-cluster cap of ⌈avg×1.5⌉ to prevent runaway clusters
-    # in dense angular zones (e.g. 42/120 stores in a single 40° arc when the
-    # depot sits on the city edge).  Benchmark: −15% km vs equal-angle sweep.
+    # ── Step 2: geographic sector partition (contiguous sweep) ────────────────
+    # Each vehicle receives a contiguous angular sector around the depot.
+    # Denser sectors have more stores → vehicle gets more stops naturally.
     all_store_nodes = list(range(1, n))
-    clusters = _cluster_by_capacitated_sweep(all_store_nodes, all_coords, num_vehicles)
+    clusters = _cluster_by_sweep(all_store_nodes, all_coords, num_vehicles)
 
     # ── Step 3: per-cluster road matrix → OR-Tools TSP ────────────────────────
     # Routing priority per cluster:
