@@ -522,7 +522,15 @@ export function ResultPage() {
                   </div>
                   <div className="flex items-center gap-4 text-sm text-muted-foreground mt-2">
                     <span className="flex items-center gap-1"><MapPin className="w-4 h-4" /> {Math.round(route.total_km)} км</span>
-                    <span className="flex items-center gap-1"><Clock className="w-4 h-4" /> ~{Math.floor((route.estimated_minutes ?? 0) / 60)} ч {(route.estimated_minutes ?? 0) % 60} мин</span>
+                    {(route as any).service_minutes > 0 ? (
+                      <span className="flex items-center gap-1" title={`Езда: ${(route as any).drive_minutes ?? 0} мин + Обслуживание: ${(route as any).service_minutes} мин`}>
+                        <Clock className="w-4 h-4" />
+                        {Math.floor((route.estimated_minutes ?? 0) / 60)} ч {(route.estimated_minutes ?? 0) % 60} мин
+                        <span className="text-xs text-muted-foreground/70 ml-1">(езда {(route as any).drive_minutes ?? 0} мин)</span>
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1"><Clock className="w-4 h-4" /> ~{Math.floor((route.estimated_minutes ?? 0) / 60)} ч {(route.estimated_minutes ?? 0) % 60} мин</span>
+                    )}
                   </div>
                 </CardHeader>
                 <CardContent className="p-0 flex-1">
