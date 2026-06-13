@@ -691,7 +691,9 @@ def _parse_time_to_minutes(time_str: str) -> int:
 def _ortools_solve_group(depot_coord: tuple, group_node_indices: list,
                          group_coords: list, dist_matrix: list,
                          time_windows: list = None,
-                         time_limit_override: float = None) -> list:
+                         time_limit_override: float = None,
+                         time_matrix: list = None,
+                         optimize_by: str = "distance") -> list:
     """
     Run OR-Tools TSP on a single vehicle's cluster of stops.
 
@@ -706,6 +708,10 @@ def _ortools_solve_group(depot_coord: tuple, group_node_indices: list,
                             for each store in group_node_indices order.
                             When provided OR-Tools adds a Time dimension and enforces
                             the windows.  When None, pure distance optimisation.
+        time_matrix:        optional NxN real travel-time matrix (seconds) from
+                            GH/OSRM.  Used as arc cost when optimize_by="time".
+        optimize_by:        "distance" (default) — minimise metres; "time" —
+                            minimise real travel seconds (requires time_matrix).
 
     Returns the stores in optimised visit order (values from group_node_indices).
     Falls back to the original order on any solver failure.
@@ -719,10 +725,22 @@ def _ortools_solve_group(depot_coord: tuple, group_node_indices: list,
 
     int_matrix = [[int(v) for v in row] for row in dist_matrix]
 
+    # Fallback arc callback (distance in metres) — always built, used for:
+    # 1) distance mode, 2) rebuilt model after TW failure
     def dist_cb(from_idx, to_idx):
         return int_matrix[manager.IndexToNode(from_idx)][manager.IndexToNode(to_idx)]
 
-    transit_idx = routing.RegisterTransitCallback(dist_cb)
+    # Time-mode arc callback: uses real GH/OSRM travel seconds → converted to
+    # minutes so the unit matches the Time Dimension (also in minutes).
+    # Falls back to dist_cb when time_matrix is unavailable (Haversine clusters).
+    if optimize_by == "time" and time_matrix is not None:
+        int_time_arc = [[max(1, int(v / 60)) for v in row] for row in time_matrix]
+        def arc_cb(from_idx, to_idx):
+            return int_time_arc[manager.IndexToNode(from_idx)][manager.IndexToNode(to_idx)]
+    else:
+        arc_cb = dist_cb
+
+    transit_idx = routing.RegisterTransitCallback(arc_cb)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
 
     # ── Time dimension (enforced only when caller supplies time_windows) ──────
@@ -757,12 +775,24 @@ def _ortools_solve_group(depot_coord: tuple, group_node_indices: list,
         # tw_data[0] = depot (full day), tw_data[k] = store k-1
         tw_data = [(5 * 60, 23 * 60, 0)] + sanitized_tw
 
-        def time_cb(from_idx, to_idx):
-            from_node = manager.IndexToNode(from_idx)
-            to_node = manager.IndexToNode(to_idx)
-            travel_min = int(int_matrix[from_node][to_node] / max(speed_m_per_min, 1))
-            service_min = tw_data[from_node][2] if from_node > 0 else 0
-            return travel_min + service_min
+        # When time_mode is active and a real time_matrix exists, use real
+        # travel minutes for the Time Dimension so TW constraints are consistent
+        # with the arc cost (also real minutes).  Otherwise fall back to
+        # synthetic time derived from distance / average speed.
+        if optimize_by == "time" and time_matrix is not None:
+            def time_cb(from_idx, to_idx):
+                from_node = manager.IndexToNode(from_idx)
+                to_node = manager.IndexToNode(to_idx)
+                travel_min = max(1, int(time_matrix[from_node][to_node] / 60))
+                service_min = tw_data[from_node][2] if from_node > 0 else 0
+                return travel_min + service_min
+        else:
+            def time_cb(from_idx, to_idx):
+                from_node = manager.IndexToNode(from_idx)
+                to_node = manager.IndexToNode(to_idx)
+                travel_min = int(int_matrix[from_node][to_node] / max(speed_m_per_min, 1))
+                service_min = tw_data[from_node][2] if from_node > 0 else 0
+                return travel_min + service_min
 
         try:
             time_transit_idx = routing.RegisterTransitCallback(time_cb)
@@ -805,7 +835,7 @@ def _ortools_solve_group(depot_coord: tuple, group_node_indices: list,
             # Rebuild a fresh model without the time dimension
             manager = pywrapcp.RoutingIndexManager(n, 1, 0)
             routing = pywrapcp.RoutingModel(manager)
-            transit_idx2 = routing.RegisterTransitCallback(dist_cb)
+            transit_idx2 = routing.RegisterTransitCallback(arc_cb)
             routing.SetArcCostEvaluatorOfAllVehicles(transit_idx2)
 
     # ── Adaptive time limit based on cluster size ─────────────────────────────
@@ -1267,7 +1297,8 @@ def haversine_meters(c1: tuple, c2: tuple) -> int:
 
 def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None,
               store_time_windows: list = None,
-              max_stops_per_vehicle: int = None) -> list:
+              max_stops_per_vehicle: int = None,
+              optimize_by: str = "distance") -> list:
     """
     Solve VRP with efficiency as the primary objective (min total km / time).
 
@@ -1350,22 +1381,27 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
     non_empty_clusters = [c for c in clusters if c]
     # Phase A: fetch matrices for all clusters in parallel -----------------------
     def _fetch_matrix(cluster_nodes):
-        """Return (cluster_nodes, sub_matrix, source) for one cluster."""
+        """Return (cluster_nodes, sub_dist_matrix, sub_time_matrix, source) for one cluster.
+
+        sub_time_matrix is the real travel-time matrix (seconds) from GH/OSRM,
+        or None when only Haversine is available.  The caller decides whether to
+        use it based on the optimize_by flag.
+        """
         if len(cluster_nodes) == 1:
-            return (cluster_nodes, None, "hv_single")
+            return (cluster_nodes, None, None, "hv_single")
         group_indices = [0] + cluster_nodes
         group_coords = [all_coords[i] for i in group_indices]
         gh_result = get_cluster_matrix_gh(group_coords)
         if gh_result:
-            sub_matrix, _ = gh_result
-            return (cluster_nodes, sub_matrix, "gh")
+            sub_matrix, sub_time = gh_result
+            return (cluster_nodes, sub_matrix, sub_time, "gh")
         osrm_result = get_cluster_matrix_osrm(group_coords)
         if osrm_result:
-            sub_matrix, _ = osrm_result
-            return (cluster_nodes, sub_matrix, "osrm")
+            sub_matrix, sub_time = osrm_result
+            return (cluster_nodes, sub_matrix, sub_time, "osrm")
         group_indices2 = [0] + cluster_nodes
         sub_matrix = [[full_matrix[r][c] for c in group_indices2] for r in group_indices2]
-        return (cluster_nodes, sub_matrix, "hv")
+        return (cluster_nodes, sub_matrix, None, "hv")
 
     max_workers = min(len(non_empty_clusters), 8)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(max_workers, 1)) as pool:
@@ -1386,7 +1422,7 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
     osrm_clusters = 0
     hv_clusters = 0
 
-    for cluster_nodes, sub_matrix, source in matrix_results:
+    for cluster_nodes, sub_matrix, sub_time, source in matrix_results:
         if source == "hv_single":
             routes.append(cluster_nodes)
             hv_clusters += 1
@@ -1410,7 +1446,9 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
         try:
             ordered = _ortools_solve_group(all_coords[0], cluster_nodes, group_coords, sub_matrix,
                                            time_windows=cluster_tw,
-                                           time_limit_override=per_cluster_budget)
+                                           time_limit_override=per_cluster_budget,
+                                           time_matrix=sub_time,
+                                           optimize_by=optimize_by)
         except Exception as cluster_exc:
             logger.warning(
                 "solve_vrp: _ortools_solve_group raised for cluster of %d stops (%s) "
@@ -1962,6 +2000,7 @@ class RouteRequest(BaseModel):
     use_time_windows: Optional[bool] = False
     use_unload_time: Optional[bool] = False
     max_stops_per_vehicle: Optional[int] = None
+    optimize_by: str = "distance"  # "distance" | "time" — backward-compat default
 
 
 class CompanySettingsInput(BaseModel):
@@ -3068,10 +3107,20 @@ def build_route(body: RouteRequest):
             max_stops_cap, avg_stops,
         )
 
+    # Validate optimize_by
+    if body.optimize_by not in ("distance", "time"):
+        raise HTTPException(
+            status_code=422,
+            detail="optimize_by должен быть 'distance' или 'time'"
+        )
+    if body.optimize_by == "time":
+        logger.info("build_route: time-optimisation mode requested")
+
     try:
         vehicle_routes_indices, matrix_source = solve_vrp(
             all_coords, num_vehicles, capacities, demands, store_time_windows,
             max_stops_per_vehicle=max_stops_cap,
+            optimize_by=body.optimize_by,
         )
     except Exception as vrp_exc_1:
         logger.error("solve_vrp (with TW) failed:\n%s", traceback.format_exc())
@@ -3089,6 +3138,7 @@ def build_route(body: RouteRequest):
                 vehicle_routes_indices, matrix_source = solve_vrp(
                     all_coords, num_vehicles, capacities, demands, None,
                     max_stops_per_vehicle=max_stops_cap,
+                    optimize_by=body.optimize_by,
                 )
             except Exception as vrp_exc_2:
                 logger.error("solve_vrp (no TW) also failed:\n%s", traceback.format_exc())
@@ -3133,7 +3183,7 @@ def build_route(body: RouteRequest):
         # 117 min Yandex actual at 30 km/h = 58.5 km road).  Using 1.4 (conservative)
         # keeps ETA within ~40% of road reality, consistent with ROAD_FACTOR in
         # cost calculations.  Override via vehicle.average_speed for custom fleets.
-        ETA_ROAD_FACTOR = 1.4
+        ETA_ROAD_FACTOR = 2.0
         route_coords = [(depot_lat, depot_lon)]
         dist_m = 0
         cumulative_min = 0  # elapsed minutes since 09:00
@@ -3151,6 +3201,9 @@ def build_route(body: RouteRequest):
             leg_m = haversine_meters(prev_coord, curr_coord)
             dist_m += leg_m
             effective_speed = vehicle.average_speed if vehicle.average_speed else AVG_SPEED_KMH
+            # ETA_ROAD_FACTOR=2.0: empirically, Makhachkala road distances are
+            # ~2.1-2.6× Haversine (city centre session data). Using 2.0 gives
+            # ETA within ~20% of Yandex Navigator (vs ~60% underestimate at 1.4).
             leg_drive_min = max(1, int(leg_m * ETA_ROAD_FACTOR / 1000 / effective_speed * 60))
             cumulative_min += leg_drive_min
 
@@ -3229,6 +3282,7 @@ def build_route(body: RouteRequest):
         # Saved for historical replay — tells frontend whether estimated_minutes
         # includes service time (15 min/stop) or is drive-only
         "use_unload_time": bool(body.use_unload_time),
+        "optimize_by": body.optimize_by,
     }
 
     # Save session to DB

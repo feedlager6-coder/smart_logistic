@@ -75,6 +75,8 @@ export function RoutePage() {
   const [useTimeWindows, setUseTimeWindows] = useState(true);
   const [useUnloadTime, setUseUnloadTime] = useState(true);
   const [maxStopsPerVehicle, setMaxStopsPerVehicle] = useState<string>(""); // "" = no cap
+  const [optimizeBy, setOptimizeBy] = useState<"distance" | "time">("distance");
+  const [bulkVehicleCount, setBulkVehicleCount] = useState<string>("5");
 
   // Persist depot to localStorage on change
   useEffect(() => {
@@ -117,6 +119,17 @@ export function RoutePage() {
 
   const handleAddVehicle = () => {
     setVehicles([...vehicles, { id: Math.random().toString(), name: `Авто ${vehicles.length + 1}`, capacity_kg: "1500", average_speed: "" }]);
+  };
+
+  const handleBulkCreate = () => {
+    const count = Math.max(1, Math.min(50, parseInt(bulkVehicleCount) || 1));
+    const newVehicles: Vehicle[] = Array.from({ length: count }, (_, i) => ({
+      id: Math.random().toString(),
+      name: `Газель ${i + 1}`,
+      capacity_kg: "1500",
+      average_speed: "",
+    }));
+    setVehicles(newVehicles);
   };
 
   const handleRemoveVehicle = (id: string) => {
@@ -180,6 +193,7 @@ export function RoutePage() {
     const depotLatNum = depotLat ? parseFloat(depotLat) : undefined;
     const depotLonNum = depotLon ? parseFloat(depotLon) : undefined;
     buildRoute.mutate({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       data: {
         store_ids: Array.from(selectedStores),
         vehicles: vehicles.map(v => ({
@@ -192,7 +206,8 @@ export function RoutePage() {
         use_time_windows: useTimeWindows,
         use_unload_time: useUnloadTime,
         max_stops_per_vehicle: maxStopsPerVehicle ? parseInt(maxStopsPerVehicle) : null,
-      }
+        optimize_by: optimizeBy,
+      } as any
     }, {
       onSuccess: (result) => {
         if (result.session_id) {
@@ -392,19 +407,38 @@ export function RoutePage() {
         {/* Right Panel: Vehicles & Settings */}
         <div className="lg:col-span-3 space-y-6 flex flex-col lg:h-[calc(100vh-200px)]">
           <Card className="flex-1 flex flex-col overflow-hidden">
-            <CardHeader className="shrink-0 flex flex-row items-center justify-between pb-2">
-              <div>
-                <CardTitle>Транспорт</CardTitle>
-                <CardDescription>Укажите автомобили для распределения</CardDescription>
+            <CardHeader className="shrink-0 pb-2">
+              <div className="flex flex-row items-center justify-between">
+                <div>
+                  <CardTitle>Транспорт</CardTitle>
+                  <CardDescription>Укажите автомобили для распределения</CardDescription>
+                </div>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={handleSaveFleet} title="Сохранить текущий автопарк как шаблон">
+                    <Save className="w-4 h-4 mr-2" />
+                    Сохранить шаблон
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={handleAddVehicle}>
+                    <Plus className="w-4 h-4 mr-2" /> Добавить
+                  </Button>
+                </div>
               </div>
-              <div className="flex gap-2">
-                <Button variant="outline" size="sm" onClick={handleSaveFleet} title="Сохранить текущий автопарк как шаблон">
-                  <Save className="w-4 h-4 mr-2" />
-                  Сохранить шаблон
+              {/* Bulk vehicle creation */}
+              <div className="flex items-center gap-2 mt-3 pt-3 border-t">
+                <Label className="text-xs text-muted-foreground shrink-0">Кол-во автомобилей:</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={bulkVehicleCount}
+                  onChange={e => setBulkVehicleCount(e.target.value)}
+                  className="h-8 w-20 text-sm"
+                />
+                <Button size="sm" variant="secondary" onClick={handleBulkCreate} className="h-8 text-xs">
+                  <Truck className="w-3.5 h-3.5 mr-1.5" />
+                  Создать автомобили
                 </Button>
-                <Button variant="outline" size="sm" onClick={handleAddVehicle}>
-                  <Plus className="w-4 h-4 mr-2" /> Добавить
-                </Button>
+                <span className="text-xs text-muted-foreground hidden sm:inline">Заменит текущий список</span>
               </div>
             </CardHeader>
             <CardContent className="flex-1 overflow-hidden p-0">
@@ -490,6 +524,50 @@ export function RoutePage() {
                   <p className="text-sm text-muted-foreground">Добавление времени нахождения в точке</p>
                 </div>
                 <Switch checked={useUnloadTime} onCheckedChange={setUseUnloadTime} />
+              </div>
+
+              {/* Optimization mode */}
+              <div className="space-y-3">
+                <div>
+                  <Label className="text-base">Режим оптимизации</Label>
+                  <p className="text-sm text-muted-foreground mt-0.5">Что минимизировать при построении маршрутов</p>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setOptimizeBy("distance")}
+                    className={`flex flex-col gap-1 p-3 rounded-lg border text-left transition-colors ${
+                      optimizeBy === "distance"
+                        ? "border-primary bg-primary/5 text-foreground"
+                        : "border-border bg-background hover:bg-muted text-foreground"
+                    }`}
+                  >
+                    <span className="font-medium text-sm flex items-center gap-1.5">
+                      <span className={`w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center shrink-0 ${optimizeBy === "distance" ? "border-primary" : "border-muted-foreground"}`}>
+                        {optimizeBy === "distance" && <span className="w-1.5 h-1.5 rounded-full bg-primary block" />}
+                      </span>
+                      Минимум километров
+                    </span>
+                    <span className="text-xs text-muted-foreground pl-5">Меньше расход топлива и стоимость маршрута</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOptimizeBy("time")}
+                    className={`flex flex-col gap-1 p-3 rounded-lg border text-left transition-colors ${
+                      optimizeBy === "time"
+                        ? "border-primary bg-primary/5 text-foreground"
+                        : "border-border bg-background hover:bg-muted text-foreground"
+                    }`}
+                  >
+                    <span className="font-medium text-sm flex items-center gap-1.5">
+                      <span className={`w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center shrink-0 ${optimizeBy === "time" ? "border-primary" : "border-muted-foreground"}`}>
+                        {optimizeBy === "time" && <span className="w-1.5 h-1.5 rounded-full bg-primary block" />}
+                      </span>
+                      Минимум времени
+                    </span>
+                    <span className="text-xs text-muted-foreground pl-5">Быстрее доставка, возможен бо́льший пробег</span>
+                  </button>
+                </div>
               </div>
 
               <div className="space-y-2">
