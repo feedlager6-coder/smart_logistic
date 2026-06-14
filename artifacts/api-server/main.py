@@ -730,11 +730,15 @@ def _ortools_solve_group(depot_coord: tuple, group_node_indices: list,
     def dist_cb(from_idx, to_idx):
         return int_matrix[manager.IndexToNode(from_idx)][manager.IndexToNode(to_idx)]
 
-    # Time-mode arc callback: uses real GH/OSRM travel seconds → converted to
-    # minutes so the unit matches the Time Dimension (also in minutes).
+    # Time-mode arc callback: uses raw travel seconds from GH/OSRM.
+    # IMPORTANT: do NOT convert to minutes here.  Values of 1–30 (minutes) cause
+    # OR-Tools GLS to degenerate on dense clusters (≥ 20 stops) — with nearly all
+    # arcs costing 1 minute the penalty function cannot distinguish good from bad
+    # arcs, the solver enters an infinite evaluation loop, and the time limit is
+    # never checked.  Using raw seconds (60–1800) gives GLS adequate resolution.
     # Falls back to dist_cb when time_matrix is unavailable (Haversine clusters).
     if optimize_by == "time" and time_matrix is not None:
-        int_time_arc = [[max(1, int(v / 60)) for v in row] for row in time_matrix]
+        int_time_arc = [[max(1, int(v)) for v in row] for row in time_matrix]
         def arc_cb(from_idx, to_idx):
             return int_time_arc[manager.IndexToNode(from_idx)][manager.IndexToNode(to_idx)]
     else:
@@ -870,6 +874,31 @@ def _ortools_solve_group(depot_coord: tuple, group_node_indices: list,
 
     solution = routing.SolveWithParameters(params)
     if not solution:
+        # If time-mode found no solution, retry with distance objective as a safety net.
+        # This can happen on very small clusters where GLS finishes in < 1 iteration.
+        if optimize_by == "time" and time_matrix is not None:
+            logger.warning(
+                "OR-Tools time-mode found no solution for cluster of %d stops "
+                "— retrying with distance objective",
+                len(group_node_indices),
+            )
+            manager2 = pywrapcp.RoutingIndexManager(n, 1, 0)
+            routing2 = pywrapcp.RoutingModel(manager2)
+            int_matrix2 = [[int(v) for v in row] for row in dist_matrix]
+            def dist_cb2(from_idx, to_idx):
+                return int_matrix2[manager2.IndexToNode(from_idx)][manager2.IndexToNode(to_idx)]
+            transit_idx3 = routing2.RegisterTransitCallback(dist_cb2)
+            routing2.SetArcCostEvaluatorOfAllVehicles(transit_idx3)
+            solution = routing2.SolveWithParameters(params)
+            if solution:
+                ordered = []
+                idx2 = routing2.Start(0)
+                while not routing2.IsEnd(idx2):
+                    node = manager2.IndexToNode(idx2)
+                    if node != 0:
+                        ordered.append(group_node_indices[node - 1])
+                    idx2 = solution.Value(routing2.NextVar(idx2))
+                return ordered
         logger.warning(
             "OR-Tools found no solution for cluster of %d stops "
             "(time_windows=%s) — keeping original order",

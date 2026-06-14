@@ -15,3 +15,4 @@
 - [Global 401 handler pattern](global-401-handler.md) — QueryCache+MutationCache onError dispatches "api:unauthorized" DOM event; auth.tsx listens and calls fetchMe(); 401 from /me → login page. Prevents stale "Loading..." on protected pages.
 - [VRP balance benchmark results](vrp-balance-benchmark.md) — max_stops_per_vehicle=24 reduces ratio 3.9x→2.7x (−31%) at km cost −0.5%; Yandex gap is road-network (OSRM confirms SmartRoute faster by 2.2 min), not stop-ordering.
 - [Capacitated sweep rejected](capacitated-sweep.md) — fair benchmark (equal vehicle count) shows NEW is +6.5% worse on avg; +12.9% regression on session 35. Keep equal-angle sweep.
+- [OR-Tools time-mode hang: use seconds not minutes](ortools-time-arc-seconds.md) — int_time_arc must use raw seconds (max(1,int(v))), NOT minutes (max(1,int(v/60))). Minutes→values 1-30 cause GLS to hang on dense clusters ≥20 stops.
