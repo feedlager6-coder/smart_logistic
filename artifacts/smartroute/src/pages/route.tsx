@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { useListStores, useBuildRoute } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -404,215 +405,242 @@ export function RoutePage() {
           </CardContent>
         </Card>
 
-        {/* Right Panel: Vehicles & Settings */}
-        <div className="lg:col-span-3 space-y-6 flex flex-col lg:h-[calc(100vh-200px)]">
-          <Card className="flex-1 flex flex-col overflow-hidden">
-            <CardHeader className="shrink-0 pb-2">
-              <div className="flex flex-row items-center justify-between">
-                <div>
-                  <CardTitle>Транспорт</CardTitle>
-                  <CardDescription>Укажите автомобили для распределения</CardDescription>
-                </div>
-                <div className="flex gap-2">
-                  <Button variant="outline" size="sm" onClick={handleSaveFleet} title="Сохранить текущий автопарк как шаблон">
-                    <Save className="w-4 h-4 mr-2" />
-                    Сохранить шаблон
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={handleAddVehicle}>
-                    <Plus className="w-4 h-4 mr-2" /> Добавить
-                  </Button>
-                </div>
-              </div>
-              {/* Bulk vehicle creation */}
-              <div className="flex items-center gap-2 mt-3 pt-3 border-t">
-                <Label className="text-xs text-muted-foreground shrink-0">Кол-во автомобилей:</Label>
-                <Input
-                  type="number"
-                  min={1}
-                  max={50}
-                  value={bulkVehicleCount}
-                  onChange={e => setBulkVehicleCount(e.target.value)}
-                  className="h-8 w-20 text-sm"
-                />
-                <Button size="sm" variant="secondary" onClick={handleBulkCreate} className="h-8 text-xs">
-                  <Truck className="w-3.5 h-3.5 mr-1.5" />
-                  Создать автомобили
-                </Button>
-                <span className="text-xs text-muted-foreground hidden sm:inline">Заменит текущий список</span>
-              </div>
-            </CardHeader>
-            <CardContent className="flex-1 overflow-hidden p-0">
-              <ScrollArea className="h-full px-6 pb-4">
-                <div className="space-y-3 pt-2">
-                  {vehicles.map((vehicle) => (
-                    <div key={vehicle.id} className="flex items-center gap-3 p-3 rounded-lg border bg-card relative group">
-                      <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center text-primary shrink-0">
-                        <Truck className="w-4 h-4" />
+        {/* Right Panel: Tabs — Транспорт / Параметры */}
+        <div className="lg:col-span-3 flex flex-col h-[70vh] lg:h-[calc(100vh-200px)]">
+          <Tabs defaultValue="vehicles" className="flex flex-col h-full">
+
+            {/* Tab bar */}
+            <TabsList className="shrink-0 w-full mb-3">
+              <TabsTrigger value="vehicles" className="flex-1">
+                <Truck className="w-4 h-4 mr-2" />
+                Транспорт
+                <Badge variant="secondary" className="ml-2">{vehicles.length}</Badge>
+              </TabsTrigger>
+              <TabsTrigger value="settings" className="flex-1">
+                Параметры оптимизации
+              </TabsTrigger>
+            </TabsList>
+
+            {/* ── Vehicles tab ── */}
+            <TabsContent value="vehicles" className="flex-1 overflow-hidden flex flex-col mt-0">
+              <Card className="flex-1 flex flex-col overflow-hidden">
+                <CardHeader className="shrink-0 pb-2">
+                  <div className="flex flex-row items-center justify-between">
+                    <div>
+                      <CardTitle>Автомобили</CardTitle>
+                      <CardDescription>Название, вместимость и скорость</CardDescription>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button variant="outline" size="sm" onClick={handleSaveFleet} title="Сохранить автопарк как шаблон">
+                        <Save className="w-4 h-4 mr-2" />
+                        Шаблон
+                      </Button>
+                      <Button variant="outline" size="sm" onClick={handleAddVehicle}>
+                        <Plus className="w-4 h-4 mr-2" /> Добавить
+                      </Button>
+                    </div>
+                  </div>
+                  {/* Bulk create */}
+                  <div className="flex items-center gap-2 mt-3 pt-3 border-t flex-wrap">
+                    <Label className="text-xs text-muted-foreground shrink-0">Создать сразу:</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={50}
+                      value={bulkVehicleCount}
+                      onChange={e => setBulkVehicleCount(e.target.value)}
+                      className="h-8 w-20 text-sm"
+                    />
+                    <span className="text-xs text-muted-foreground">авт.</span>
+                    <Button size="sm" variant="secondary" onClick={handleBulkCreate} className="h-8 text-xs">
+                      <Truck className="w-3.5 h-3.5 mr-1.5" />
+                      Создать список
+                    </Button>
+                    <span className="text-xs text-muted-foreground hidden sm:inline">(заменит текущий)</span>
+                  </div>
+                </CardHeader>
+                <CardContent className="flex-1 overflow-hidden p-0">
+                  <ScrollArea className="h-full px-6 pb-4">
+                    <div className="space-y-3 pt-2">
+                      {vehicles.map((vehicle) => (
+                        <div key={vehicle.id} className="flex items-center gap-3 p-3 rounded-lg border bg-card">
+                          <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center text-primary shrink-0">
+                            <Truck className="w-4 h-4" />
+                          </div>
+                          <div className="flex-1 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                            <div className="space-y-1.5">
+                              <Label className="text-xs">Название / Водитель</Label>
+                              <Input
+                                value={vehicle.name}
+                                onChange={e => handleVehicleChange(vehicle.id, 'name', e.target.value)}
+                                className="h-8 text-sm"
+                              />
+                            </div>
+                            <div className="space-y-1.5">
+                              <Label className="text-xs">Вместимость (кг)</Label>
+                              <Input
+                                type="number"
+                                value={vehicle.capacity_kg}
+                                onChange={e => handleVehicleChange(vehicle.id, 'capacity_kg', e.target.value)}
+                                className="h-8 text-sm"
+                              />
+                            </div>
+                            <div className="space-y-1.5">
+                              <Label className="text-xs">Скорость (км/ч)</Label>
+                              <Input
+                                type="number"
+                                placeholder="авто"
+                                value={vehicle.average_speed}
+                                onChange={e => handleVehicleChange(vehicle.id, 'average_speed', e.target.value)}
+                                className="h-8 text-sm"
+                              />
+                            </div>
+                          </div>
+                          <div className="flex gap-1 shrink-0">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="w-8 h-8 text-muted-foreground hover:text-primary"
+                              title="Дублировать"
+                              onClick={() => handleDuplicateVehicle(vehicle.id)}
+                            >
+                              <Copy className="w-4 h-4" />
+                            </Button>
+                            {vehicles.length > 1 && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="w-8 h-8 text-muted-foreground hover:text-destructive"
+                                onClick={() => handleRemoveVehicle(vehicle.id)}
+                              >
+                                <X className="w-4 h-4" />
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </ScrollArea>
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            {/* ── Settings tab ── */}
+            <TabsContent value="settings" className="flex-1 overflow-hidden flex flex-col mt-0">
+              <Card className="flex-1 flex flex-col overflow-hidden">
+                <CardContent className="flex-1 overflow-auto pt-6">
+                  <div className="space-y-6">
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label className="text-base">Учитывать временные окна</Label>
+                        <p className="text-sm text-muted-foreground">Строгий контроль времени прибытия</p>
                       </div>
-                      <div className="flex-1 grid grid-cols-1 sm:grid-cols-3 gap-3">
-                        <div className="space-y-1.5">
-                          <Label className="text-xs">Название / Водитель</Label>
-                          <Input
-                            value={vehicle.name}
-                            onChange={e => handleVehicleChange(vehicle.id, 'name', e.target.value)}
-                            className="h-8 text-sm"
-                          />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label className="text-xs">Вместимость (кг)</Label>
-                          <Input
-                            type="number"
-                            value={vehicle.capacity_kg}
-                            onChange={e => handleVehicleChange(vehicle.id, 'capacity_kg', e.target.value)}
-                            className="h-8 text-sm"
-                          />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label className="text-xs">Скорость (км/ч)</Label>
-                          <Input
-                            type="number"
-                            placeholder="авто"
-                            value={vehicle.average_speed}
-                            onChange={e => handleVehicleChange(vehicle.id, 'average_speed', e.target.value)}
-                            className="h-8 text-sm"
-                          />
-                        </div>
+                      <Switch checked={useTimeWindows} onCheckedChange={setUseTimeWindows} />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label className="text-base">Учитывать время разгрузки</Label>
+                        <p className="text-sm text-muted-foreground">Добавление времени нахождения в точке</p>
                       </div>
-                      <div className="flex gap-1 shrink-0">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="w-8 h-8 text-muted-foreground hover:text-primary"
-                          title="Дублировать"
-                          onClick={() => handleDuplicateVehicle(vehicle.id)}
+                      <Switch checked={useUnloadTime} onCheckedChange={setUseUnloadTime} />
+                    </div>
+
+                    {/* Optimization mode */}
+                    <div className="space-y-3">
+                      <div>
+                        <Label className="text-base">Режим оптимизации</Label>
+                        <p className="text-sm text-muted-foreground mt-0.5">Что минимизировать при построении маршрутов</p>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setOptimizeBy("distance")}
+                          className={`flex flex-col gap-1 p-3 rounded-lg border text-left transition-colors ${
+                            optimizeBy === "distance"
+                              ? "border-primary bg-primary/5"
+                              : "border-border bg-background hover:bg-muted"
+                          }`}
                         >
-                          <Copy className="w-4 h-4" />
-                        </Button>
-                        {vehicles.length > 1 && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="w-8 h-8 text-muted-foreground hover:text-destructive"
-                            onClick={() => handleRemoveVehicle(vehicle.id)}
-                          >
-                            <X className="w-4 h-4" />
-                          </Button>
-                        )}
+                          <span className="font-medium text-sm flex items-center gap-1.5">
+                            <span className={`w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center shrink-0 ${optimizeBy === "distance" ? "border-primary" : "border-muted-foreground"}`}>
+                              {optimizeBy === "distance" && <span className="w-1.5 h-1.5 rounded-full bg-primary block" />}
+                            </span>
+                            Минимум километров
+                          </span>
+                          <span className="text-xs text-muted-foreground pl-5">Меньше расход топлива и стоимость</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setOptimizeBy("time")}
+                          className={`flex flex-col gap-1 p-3 rounded-lg border text-left transition-colors ${
+                            optimizeBy === "time"
+                              ? "border-primary bg-primary/5"
+                              : "border-border bg-background hover:bg-muted"
+                          }`}
+                        >
+                          <span className="font-medium text-sm flex items-center gap-1.5">
+                            <span className={`w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center shrink-0 ${optimizeBy === "time" ? "border-primary" : "border-muted-foreground"}`}>
+                              {optimizeBy === "time" && <span className="w-1.5 h-1.5 rounded-full bg-primary block" />}
+                            </span>
+                            Минимум времени
+                          </span>
+                          <span className="text-xs text-muted-foreground pl-5">Быстрее доставка, возможен бо́льший пробег</span>
+                        </button>
                       </div>
                     </div>
-                  ))}
-                </div>
-              </ScrollArea>
-            </CardContent>
-          </Card>
 
-          <Card className="shrink-0">
-            <CardHeader className="pb-4">
-              <CardTitle>Параметры оптимизации</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <Label className="text-base">Учитывать временные окна</Label>
-                  <p className="text-sm text-muted-foreground">Строгий контроль времени прибытия</p>
-                </div>
-                <Switch checked={useTimeWindows} onCheckedChange={setUseTimeWindows} />
-              </div>
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <Label className="text-base">Учитывать время разгрузки</Label>
-                  <p className="text-sm text-muted-foreground">Добавление времени нахождения в точке</p>
-                </div>
-                <Switch checked={useUnloadTime} onCheckedChange={setUseUnloadTime} />
-              </div>
+                    {/* Max stops */}
+                    <div className="space-y-2">
+                      <Label className="text-base">Макс. точек на машину</Label>
+                      <p className="text-sm text-muted-foreground">
+                        Ограничивает нагрузку на водителя. Рекомендуется 24 при дисбалансе.
+                      </p>
+                      <div className="flex gap-2 flex-wrap">
+                        {["", "30", "26", "24"].map(val => (
+                          <button
+                            key={val}
+                            type="button"
+                            onClick={() => setMaxStopsPerVehicle(val)}
+                            className={`px-3 py-1.5 rounded-md text-sm font-medium border transition-colors ${
+                              maxStopsPerVehicle === val
+                                ? "bg-primary text-primary-foreground border-primary"
+                                : "bg-background text-foreground border-border hover:bg-muted"
+                            }`}
+                          >
+                            {val === "" ? "Без лимита" : `≤${val}`}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
 
-              {/* Optimization mode */}
-              <div className="space-y-3">
-                <div>
-                  <Label className="text-base">Режим оптимизации</Label>
-                  <p className="text-sm text-muted-foreground mt-0.5">Что минимизировать при построении маршрутов</p>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setOptimizeBy("distance")}
-                    className={`flex flex-col gap-1 p-3 rounded-lg border text-left transition-colors ${
-                      optimizeBy === "distance"
-                        ? "border-primary bg-primary/5 text-foreground"
-                        : "border-border bg-background hover:bg-muted text-foreground"
-                    }`}
-                  >
-                    <span className="font-medium text-sm flex items-center gap-1.5">
-                      <span className={`w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center shrink-0 ${optimizeBy === "distance" ? "border-primary" : "border-muted-foreground"}`}>
-                        {optimizeBy === "distance" && <span className="w-1.5 h-1.5 rounded-full bg-primary block" />}
-                      </span>
-                      Минимум километров
-                    </span>
-                    <span className="text-xs text-muted-foreground pl-5">Меньше расход топлива и стоимость маршрута</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setOptimizeBy("time")}
-                    className={`flex flex-col gap-1 p-3 rounded-lg border text-left transition-colors ${
-                      optimizeBy === "time"
-                        ? "border-primary bg-primary/5 text-foreground"
-                        : "border-border bg-background hover:bg-muted text-foreground"
-                    }`}
-                  >
-                    <span className="font-medium text-sm flex items-center gap-1.5">
-                      <span className={`w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center shrink-0 ${optimizeBy === "time" ? "border-primary" : "border-muted-foreground"}`}>
-                        {optimizeBy === "time" && <span className="w-1.5 h-1.5 rounded-full bg-primary block" />}
-                      </span>
-                      Минимум времени
-                    </span>
-                    <span className="text-xs text-muted-foreground pl-5">Быстрее доставка, возможен бо́льший пробег</span>
-                  </button>
-                </div>
-              </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </TabsContent>
 
-              <div className="space-y-2">
-                <Label className="text-base">Макс. точек на машину</Label>
-                <p className="text-sm text-muted-foreground">
-                  Ограничивает нагрузку на водителя. Рекомендуется 24 при дисбалансе.
-                </p>
-                <div className="flex gap-2 flex-wrap">
-                  {["", "30", "26", "24"].map(val => (
-                    <button
-                      key={val}
-                      type="button"
-                      onClick={() => setMaxStopsPerVehicle(val)}
-                      className={`px-3 py-1.5 rounded-md text-sm font-medium border transition-colors ${
-                        maxStopsPerVehicle === val
-                          ? "bg-primary text-primary-foreground border-primary"
-                          : "bg-background text-foreground border-border hover:bg-muted"
-                      }`}
-                    >
-                      {val === "" ? "Без лимита" : `≤${val}`}
-                    </button>
-                  ))}
-                </div>
-              </div>
+          </Tabs>
 
-              <Button
-                className="w-full h-14 text-lg shadow-lg shadow-primary/20"
-                size="lg"
-                onClick={handleBuild}
-                disabled={buildRoute.isPending || selectedStores.size === 0 || vehicles.length === 0}
-              >
-                {buildRoute.isPending ? (
-                  <>
-                    <Loader2 className="w-5 h-5 animate-spin mr-3" />
-                    ⏳ Оптимизирую маршруты...
-                  </>
-                ) : (
-                  <>
-                    <RouteIcon className="w-5 h-5 mr-3" />
-                    🚀 Построить маршруты
-                  </>
-                )}
-              </Button>
-            </CardContent>
-          </Card>
+          {/* Build button — always visible outside tabs */}
+          <Button
+            className="w-full h-14 text-lg shadow-lg shadow-primary/20 mt-3 shrink-0"
+            size="lg"
+            onClick={handleBuild}
+            disabled={buildRoute.isPending || selectedStores.size === 0 || vehicles.length === 0}
+          >
+            {buildRoute.isPending ? (
+              <>
+                <Loader2 className="w-5 h-5 animate-spin mr-3" />
+                ⏳ Оптимизирую маршруты...
+              </>
+            ) : (
+              <>
+                <RouteIcon className="w-5 h-5 mr-3" />
+                🚀 Построить маршруты
+              </>
+            )}
+          </Button>
         </div>
 
       </div>
