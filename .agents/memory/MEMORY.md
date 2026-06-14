@@ -16,3 +16,5 @@
 - [VRP balance benchmark results](vrp-balance-benchmark.md) — max_stops_per_vehicle=24 reduces ratio 3.9x→2.7x (−31%) at km cost −0.5%; Yandex gap is road-network (OSRM confirms SmartRoute faster by 2.2 min), not stop-ordering.
 - [Capacitated sweep rejected](capacitated-sweep.md) — fair benchmark (equal vehicle count) shows NEW is +6.5% worse on avg; +12.9% regression on session 35. Keep equal-angle sweep.
 - [OR-Tools time-mode hang: use seconds not minutes](ortools-time-arc-seconds.md) — int_time_arc must use raw seconds (max(1,int(v))), NOT minutes (max(1,int(v/60))). Minutes→values 1-30 cause GLS to hang on dense clusters ≥20 stops.
+- [OSRM ETA post-solve pattern](osrm-eta-post-solve.md) — ETA via parallel OSRM Table API calls after solve_vrp; reads durations[i][i+1]; discard if any leg > 7200s (sea/unreachable); solve_vrp unchanged; adds ~1-2s.
+- [auto_cap max_stops pattern](auto-cap-max-stops.md) — effective_max_stops = ceil(avg × 1.5) applied when user omits max_stops_per_vehicle; symmetric to existing 0.70×avg floor; prevents 34/8/7 imbalance.

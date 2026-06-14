@@ -514,6 +514,56 @@ def get_cluster_matrix_osrm(coords: list) -> Optional[tuple]:
     return None
 
 
+def _fetch_route_leg_times_osrm(ordered_coords: list) -> Optional[list]:
+    """
+    Fetch per-leg travel times (seconds) for a finalised route via OSRM Table API.
+
+    Called AFTER solve_vrp has produced the final stop order — this is a separate,
+    ETA-only call that does NOT influence routing decisions.  Falls back gracefully
+    (returns None) on any network error, rate-limit, or unexpected response.
+
+    Args:
+        ordered_coords: [(lat, lon), ...] in visit order, depot at index 0.
+
+    Returns:
+        List of N-1 ints (seconds per leg) matching the consecutive stop pairs,
+        or None if OSRM is unavailable — caller uses Haversine formula instead.
+    """
+    global _osrm_rate_limited_until
+
+    if len(ordered_coords) < 2 or len(ordered_coords) > OSRM_MAX_LOCATIONS:
+        return None
+
+    if time.time() < _osrm_rate_limited_until:
+        return None
+
+    coord_str = ";".join(f"{lon},{lat}" for lat, lon in ordered_coords)
+    url = f"{OSRM_BASE_URL}/table/v1/driving/{coord_str}?annotations=duration"
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "SmartRoute/1.0 (delivery-route-optimizer)"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if data.get("code") != "Ok":
+            return None
+        durations = data.get("durations")
+        if not durations or len(durations) < len(ordered_coords):
+            return None
+        # Extract consecutive leg times: durations[i][i+1] = travel seconds from stop i → i+1
+        return [max(1, int(durations[i][i + 1])) for i in range(len(ordered_coords) - 1)]
+    except urllib.error.HTTPError as exc:
+        if exc.code in (429, 503):
+            _osrm_rate_limited_until = time.time() + OSRM_RATE_LIMIT_TTL
+        logger.warning(
+            "OSRM ETA HTTP %d for route of %d stops", exc.code, len(ordered_coords)
+        )
+    except Exception as exc:
+        logger.warning("OSRM ETA call failed (%d stops): %s", len(ordered_coords), exc)
+    return None
+
+
 def _build_haversine_matrix(coords: list) -> list:
     """Build a full NxN distance matrix (metres) using Haversine."""
     n = len(coords)
@@ -3137,6 +3187,21 @@ def build_route(body: RouteRequest):
             max_stops_cap, avg_stops,
         )
 
+    # ── Auto-cap: apply ceil(avg × 1.5) when user did not specify a limit ─────
+    # Prevents extreme imbalances like 34 / 8 / 7 stops caused by geographic
+    # clustering without a ceiling.  Symmetric counterpart to the 0.70×avg floor
+    # already applied by _rebalance_min_stops.  Silently logged; user can still
+    # override by selecting one of the manual ≤N buttons in the UI.
+    effective_max_stops = max_stops_cap
+    if effective_max_stops is None and len(store_list) > 0 and num_vehicles > 0:
+        _auto_avg = len(store_list) / num_vehicles
+        effective_max_stops = math.ceil(_auto_avg * 1.5)
+        logger.info(
+            "build_route: auto max_stops_per_vehicle=%d "
+            "(%.0f stores / %d vehicles, avg=%.1f × 1.5)",
+            effective_max_stops, len(store_list), num_vehicles, _auto_avg,
+        )
+
     # Validate optimize_by
     if body.optimize_by not in ("distance", "time"):
         raise HTTPException(
@@ -3149,7 +3214,7 @@ def build_route(body: RouteRequest):
     try:
         vehicle_routes_indices, matrix_source = solve_vrp(
             all_coords, num_vehicles, capacities, demands, store_time_windows,
-            max_stops_per_vehicle=max_stops_cap,
+            max_stops_per_vehicle=effective_max_stops,
             optimize_by=body.optimize_by,
         )
     except Exception as vrp_exc_1:
@@ -3167,7 +3232,7 @@ def build_route(body: RouteRequest):
             try:
                 vehicle_routes_indices, matrix_source = solve_vrp(
                     all_coords, num_vehicles, capacities, demands, None,
-                    max_stops_per_vehicle=max_stops_cap,
+                    max_stops_per_vehicle=effective_max_stops,
                     optimize_by=body.optimize_by,
                 )
             except Exception as vrp_exc_2:
@@ -3194,6 +3259,45 @@ def build_route(body: RouteRequest):
 
     logger.info("solve_vrp result: %s routes", len(vehicle_routes_indices))
 
+    # ── OSRM ETA: fetch real road travel times for each finalised route ────────
+    # Separate post-solve calls — do NOT affect routing decisions.
+    # We call OSRM once per route with the final ordered coordinates and read
+    # consecutive leg times from the returned duration matrix diagonal.
+    # Falls back to Haversine formula (ETA_ROAD_FACTOR) if OSRM unavailable.
+    _route_leg_times: list = [None] * len(body.vehicles)
+    _eta_coord_lists: list = []
+    for _vi_eta, _v_eta in enumerate(body.vehicles):
+        if _vi_eta >= len(vehicle_routes_indices) or not vehicle_routes_indices[_vi_eta]:
+            _eta_coord_lists.append(None)
+            continue
+        _coords_eta = [(depot_lat, depot_lon)]
+        for _idx_eta in vehicle_routes_indices[_vi_eta]:
+            _sidx_eta = _idx_eta - 1
+            if 0 <= _sidx_eta < len(store_list):
+                _s_eta = store_list[_sidx_eta]
+                _coords_eta.append((_s_eta["lat"], _s_eta["lon"]))
+        _eta_coord_lists.append(_coords_eta if len(_coords_eta) >= 2 else None)
+
+    _eta_workers = min(len([c for c in _eta_coord_lists if c is not None]), 8)
+    if _eta_workers > 0:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=_eta_workers) as _eta_pool:
+            _eta_futures = {
+                _eta_pool.submit(_fetch_route_leg_times_osrm, _coords): _vi
+                for _vi, _coords in enumerate(_eta_coord_lists)
+                if _coords is not None
+            }
+            for _fut, _vi in _eta_futures.items():
+                try:
+                    _route_leg_times[_vi] = _fut.result()
+                except Exception:
+                    pass
+
+    _osrm_eta_ok = sum(1 for t in _route_leg_times if t is not None)
+    logger.info(
+        "OSRM ETA prefetch: %d/%d routes have real road times (fallback=Haversine for rest)",
+        _osrm_eta_ok, len(body.vehicles),
+    )
+
     # Build result
     routes = []
     total_km = 0.0
@@ -3207,17 +3311,24 @@ def build_route(body: RouteRequest):
 
         ROUTE_START_MINUTES = 9 * 60  # 09:00 departure from depot
         route_stores = []
-        # ETA_ROAD_FACTOR converts Haversine straight-line km to realistic road km
-        # (urban detours, one-way streets).  Empirically measured at 2.59× for
-        # Makhachkala city centre (session 49, Route 9: 27.1 km Haversine →
-        # 117 min Yandex actual at 30 km/h = 58.5 km road).  Using 1.4 (conservative)
-        # keeps ETA within ~40% of road reality, consistent with ROAD_FACTOR in
-        # cost calculations.  Override via vehicle.average_speed for custom fleets.
+        # ETA_ROAD_FACTOR: Haversine → road km conversion.  Used ONLY as fallback
+        # when OSRM leg times are unavailable for this route.
         ETA_ROAD_FACTOR = 2.0
         route_coords = [(depot_lat, depot_lon)]
         dist_m = 0
         cumulative_min = 0  # elapsed minutes since 09:00
         prev_coord = (depot_lat, depot_lon)
+        # Per-route OSRM leg times (seconds); None → use Haversine fallback
+        leg_times = _route_leg_times[vi] if vi < len(_route_leg_times) else None
+        # Sanity-check: any leg > 2 h (7 200 s) signals an unreachable/sea location
+        # — discard the whole route's OSRM data and fall back to Haversine.
+        if leg_times is not None and any(t > 7200 for t in leg_times):
+            logger.warning(
+                "OSRM ETA route %d: discarded — leg > 2h (likely unreachable coordinate)",
+                vi,
+            )
+            leg_times = None
+        leg_idx = 0  # cursor into leg_times list
 
         for order, idx in enumerate(route_indices, 1):
             store_idx = idx - 1  # node 0 = depot, node i = store_list[i-1]
@@ -3231,10 +3342,13 @@ def build_route(body: RouteRequest):
             leg_m = haversine_meters(prev_coord, curr_coord)
             dist_m += leg_m
             effective_speed = vehicle.average_speed if vehicle.average_speed else AVG_SPEED_KMH
-            # ETA_ROAD_FACTOR=2.0: empirically, Makhachkala road distances are
-            # ~2.1-2.6× Haversine (city centre session data). Using 2.0 gives
-            # ETA within ~20% of Yandex Navigator (vs ~60% underestimate at 1.4).
-            leg_drive_min = max(1, int(leg_m * ETA_ROAD_FACTOR / 1000 / effective_speed * 60))
+            if leg_times is not None and leg_idx < len(leg_times):
+                # Real OSRM road time — most accurate
+                leg_drive_min = max(1, int(leg_times[leg_idx] / 60))
+            else:
+                # Haversine fallback (OSRM unavailable for this leg)
+                leg_drive_min = max(1, int(leg_m * ETA_ROAD_FACTOR / 1000 / effective_speed * 60))
+            leg_idx += 1
             cumulative_min += leg_drive_min
 
             # Estimated arrival time at this stop
@@ -3269,7 +3383,11 @@ def build_route(body: RouteRequest):
 
         unload_min = sum(s["unload_minutes"] for s in store_list if s["id"] in [rs["store_id"] for rs in route_stores]) if body.use_unload_time else 0
         eff_spd = vehicle.average_speed if vehicle.average_speed else AVG_SPEED_KMH
-        drive_min = int(km * ETA_ROAD_FACTOR / eff_spd * 60)
+        if leg_times is not None:
+            # Sum of all OSRM leg times for this route (seconds → minutes)
+            drive_min = max(1, int(sum(leg_times) / 60))
+        else:
+            drive_min = int(km * ETA_ROAD_FACTOR / eff_spd * 60)
         est_minutes = drive_min + unload_min
 
         # depot (route_coords[0]) остаётся первой точкой — Яндекс заменит его

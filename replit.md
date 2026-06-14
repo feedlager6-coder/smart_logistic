@@ -134,6 +134,9 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 - **Глобальный 401-handler**: `App.tsx` содержит `QueryCache` + `MutationCache` с `onError`, который при получении `ApiError` со статусом 401 диспатчит кастомный DOM-event `api:unauthorized`. `auth.tsx` слушает этот event → вызывает `fetchMe()`. Если `/api/auth/me` тоже возвращает 401 → `isAuthenticated = false` → login page показывается автоматически.
 - **TanStack Query v5 keepPreviousData**: `keepPreviousData: true` удалён из TanStack Query v5 (v5.100.9). Заменять на `staleTime` или `placeholderData`. В generated-хуках использовать `as any` для несовместимых опций.
 - **История маршрутов error state**: `history.tsx` имеет полный error state (Alert + retry button) при ошибке запроса, не бесконечный "Загрузка данных...".
+- **ETA через OSRM (Stable 1.0)**: после `solve_vrp` для каждого финального маршрута выполняется отдельный параллельный OSRM-запрос (`_fetch_route_leg_times_osrm`). Возвращает `list[int]` (секунды на плечо), читает `durations[i][i+1]` из Table API. Если плечо > 7200 сек (2 ч) — весь маршрут дисквалифицируется, fallback на Haversine×2.0. `solve_vrp` не трогается. Добавляет ~1–2 сек к построению (9 параллельных вызовов).
+- **auto_cap max_stops_per_vehicle**: если пользователь не выбрал ручной лимит, система автоматически применяет `effective_max_stops = ceil(avg × 1.5)`. Симметрично полу 0.70×avg из `_rebalance_min_stops`. Передаётся в `solve_vrp` как `effective_max_stops` (не перезаписывает `body.max_stops_per_vehicle`). Предотвращает сценарии 34/8/7 при плотных районах.
+- **optimize_by скрыт из UI**: переключатель "Минимум км / Минимум времени" убран из `route.tsx`. Код и API параметр сохранены — всегда шлётся `"distance"` как default. Полевые тесты не показали измеримой разницы между режимами.
 
 ## Gotchas
 

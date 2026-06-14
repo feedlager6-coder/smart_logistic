@@ -547,50 +547,6 @@ export function RoutePage() {
                       <Switch checked={useUnloadTime} onCheckedChange={setUseUnloadTime} />
                     </div>
 
-                    {/* Optimization mode */}
-                    <div className="space-y-3">
-                      <div>
-                        <Label className="text-base">Режим оптимизации</Label>
-                        <p className="text-sm text-muted-foreground mt-0.5">Что минимизировать при построении маршрутов</p>
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setOptimizeBy("distance")}
-                          className={`flex flex-col gap-1 p-3 rounded-lg border text-left transition-colors ${
-                            optimizeBy === "distance"
-                              ? "border-primary bg-primary/5"
-                              : "border-border bg-background hover:bg-muted"
-                          }`}
-                        >
-                          <span className="font-medium text-sm flex items-center gap-1.5">
-                            <span className={`w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center shrink-0 ${optimizeBy === "distance" ? "border-primary" : "border-muted-foreground"}`}>
-                              {optimizeBy === "distance" && <span className="w-1.5 h-1.5 rounded-full bg-primary block" />}
-                            </span>
-                            Минимум километров
-                          </span>
-                          <span className="text-xs text-muted-foreground pl-5">Меньше расход топлива и стоимость</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setOptimizeBy("time")}
-                          className={`flex flex-col gap-1 p-3 rounded-lg border text-left transition-colors ${
-                            optimizeBy === "time"
-                              ? "border-primary bg-primary/5"
-                              : "border-border bg-background hover:bg-muted"
-                          }`}
-                        >
-                          <span className="font-medium text-sm flex items-center gap-1.5">
-                            <span className={`w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center shrink-0 ${optimizeBy === "time" ? "border-primary" : "border-muted-foreground"}`}>
-                              {optimizeBy === "time" && <span className="w-1.5 h-1.5 rounded-full bg-primary block" />}
-                            </span>
-                            Минимум времени
-                          </span>
-                          <span className="text-xs text-muted-foreground pl-5">Быстрее доставка, возможен бо́льший пробег</span>
-                        </button>
-                      </div>
-                    </div>
-
                     {/* Max stops */}
                     <div className="space-y-2">
                       <Label className="text-base">Макс. точек на машину</Label>
