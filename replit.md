@@ -27,7 +27,8 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 
 | Переменная | Обязательно | Примечание |
 |-----------|-------------|-----------|
-| `DATABASE_URL` | ✅ авто | Устанавливается PostgreSQL плагином |
+| `DATABASE_URL` | ✅ авто | Устанавливается PostgreSQL плагином Railway |
+| `PG_CONNECTION_URL` | Опционально | Переопределяет `DATABASE_URL` (Replit dev env или кастомный Postgres) |
 | `YANDEX_GEOCODER_API_KEY` | Рекомендуется | Быстрый геокодинг российских адресов |
 | `GRAPHHOPPER_API_KEY` | Опционально | Реальные дороги в матрицах расстояний |
 | `ALLOWED_ORIGINS` | Опционально | CORS origins (default `*` = ок для single-service) |
@@ -69,7 +70,7 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 - **Orval/TanStack Query mismatch**: `useGetRouteSession` в result.tsx использует `as any` для опции `enabled` из-за несовместимости версий
 - **Yandex URL → coords**: `parse_yandex_link()` парсит `whatshere[point]=LON,LAT` (не LAT,LON!). При импорте из Excel адрес = результат обратного геокодинга Nominatim, fallback = `"lat, lon"` строка (НЕ сам URL)
 - **2GIS тайлы**: Leaflet использует `tile{s}.maps.2gis.com/tiles?x={x}&y={y}&z={z}&v=1`, subdomains="0123". Тайлы загружаются как img — CORS не применяется
-- **Inter-route Or-opt**: `_inter_route_relocate()` запускается после всех TSP (шаг 5 в `solve_vrp`). Работает только при ≤80 точках. Логирует сохранение км. Не меняет распределение если уже оптимально. **Важно: не обнуляет маршруты** — если в маршруте остался 1 стоп, он не переносится (защита от исчезновения машин).
+- **Inter-route Or-opt**: `_inter_route_relocate()` запускается после всех TSP (шаг 5 в `solve_vrp`). **Адаптивное число итераций** (ограничение ≤80 точек удалено): ≤80 стор → 5 итераций; ≤150 → 3; ≤300 → 2; >300 → 1. Логирует сохранение км. Не меняет распределение если уже оптимально. **Важно: не обнуляет маршруты** — если в маршруте остался 1 стоп, он не переносится (защита от исчезновения машин).
 - **max_stops_per_vehicle**: опциональный параметр `POST /api/route/build`. Реализован через `_rebalance_max_stops()` — симметрично `_rebalance_min_stops()`. Перемещает избыточные точки из перегруженных маршрутов с минимальным km-штрафом. Бенчмарк (120 стор / 9 машин): cap=24 → ratio 3.9x→2.7x (−31%), km −0.5%. UI: кнопки "Без лимита / ≤30 / ≤26 / ≤24" в разделе "Параметры оптимизации". Валидация: cap не может быть меньше avg_stops (иначе 422).
 - **ETA breakdown**: `POST /api/route/build` response включает `drive_minutes` (только езда) и `service_minutes` (время обслуживания, 0 если use_unload_time=false) в addition к `estimated_minutes` (сумма, обратная совместимость). Результат также сохраняет `use_unload_time: bool` в result_json. Frontend показывает `"X ч Y мин (езда Z мин)"` при наличии service_minutes > 0.
 - **Яндекс.Навигатор лимит 20 точек**: мобильное приложение не строит маршрут при `rtext` > 20 точек. Константа `YANDEX_NAV_MAX_STOPS = 20`. Склад включён как **первая точка** rtext-ссылки — Яндекс заменяет её GPS-позицией водителя (водитель стоит на складе), все магазины (точки 2…N) сохраняются. Сегментация: склад + 19 магазинов = 20 точек; сегмент 2+ стартует с последнего магазина предыдущего. В ответе: `yandex_urls: list[str]` + `yandex_url: str` (backward compat = первый сегмент). Фронтенд показывает отдельные кнопки и amber-предупреждение при нескольких сегментах.
@@ -137,6 +138,65 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 - **ETA через OSRM (Stable 1.0)**: после `solve_vrp` для каждого финального маршрута выполняется отдельный параллельный OSRM-запрос (`_fetch_route_leg_times_osrm`). Возвращает `list[int]` (секунды на плечо), читает `durations[i][i+1]` из Table API. Если плечо > 7200 сек (2 ч) — весь маршрут дисквалифицируется, fallback на Haversine×2.0. `solve_vrp` не трогается. Добавляет ~1–2 сек к построению (9 параллельных вызовов).
 - **auto_cap max_stops_per_vehicle**: если пользователь не выбрал ручной лимит, система автоматически применяет `effective_max_stops = ceil(avg × 1.5)`. Симметрично полу 0.70×avg из `_rebalance_min_stops`. Передаётся в `solve_vrp` как `effective_max_stops` (не перезаписывает `body.max_stops_per_vehicle`). Предотвращает сценарии 34/8/7 при плотных районах.
 - **optimize_by скрыт из UI**: переключатель "Минимум км / Минимум времени" убран из `route.tsx`. Код и API параметр сохранены — всегда шлётся `"distance"` как default. Полевые тесты не показали измеримой разницы между режимами.
+
+## Production Audit — Stable 1.0 (14 Jun 2026)
+
+Независимая проверка перед деплоем. Код читался напрямую, без опоры на предыдущие ответы.
+
+### Мёртвый код
+- **`_cluster_by_capacitated_sweep`** (строка 664, ~70 строк) — определена, но **нигде не вызывается**. `solve_vrp` использует `_cluster_by_sweep` (строка 1448). Функция инертна, риска нет, но является избыточным кодом.
+
+### Скрытые UI-параметры, влияющие на backend
+| Параметр | UI | Backend |
+|---|---|---|
+| `optimize_by` | Скрыт (всегда "distance") | Валидируется, передаётся в OR-Tools. Time-path жив в коде, но не используется. |
+| `average_speed` | Видим | Используется для Haversine ETA когда OSRM недоступен |
+| `use_time_windows`, `use_unload_time`, `max_stops_per_vehicle` | Видимы | Полностью активны |
+
+### Анализ циклов на зависание
+| Цикл | Где | Ограничение | Вывод |
+|---|---|---|---|
+| `while improved` | `_two_opt_route` | Каждый swap строго уменьшает стоимость → конечная сходимость | SAFE |
+| `while changed` | `_rebalance_min_stops` | Каждая итерация перемещает один стоп → ≤ total_stops итераций | SAFE |
+| `while changed` | `_rebalance_max_stops` | Bounded oversized routes count + `break` на каждом шаге | SAFE |
+| `for iteration in range(max_iter)` | `_inter_route_relocate` | Жёсткий bound max_iter (≤5) | SAFE |
+| `while len(routes) < num_vehicles` | solve_vrp step 4 | Каждая итерация добавляет маршрут + `break` при len<2 | SAFE |
+
+### Race conditions
+- `_osrm_rate_limited_until` (float), `_gh_plan_limit` (int) — записываются из нескольких потоков без lock. CPython GIL делает запись float/int атомарной. Worst case: два одновременных билда — один видит stale значение. Результат: лишний OSRM-вызов или пропуск rate limit на секунду. Graceful degradation, не hard failure.
+- `import_jobs` dict — daemon-thread пишет, main-thread читает. Отдельные dict-операции GIL-safe в CPython. Безопасно для MVP.
+
+### Повторные OSRM-запросы
+- **Матрицы кластеров** (`get_cluster_matrix_osrm`): есть кэш `_matrix_cache` — повторные вызовы с теми же координатами возвращают кэшированный результат.
+- **ETA prefetch** (`_fetch_route_leg_times_osrm`): кэша нет. Один вызов на маршрут (9 для 9 машин), параллельно, ≤8 workers. Не повторные — у каждой машины уникальный маршрут.
+
+### Утечки памяти
+- `import_jobs: dict` — растёт без ограничений (нет TTL, нет cleanup). Комментарий в коде: "TTL not needed for MVP". Один Excel-файл ~50KB. 1000 импортов = ~50MB. Низкий риск для MVP.
+- `_matrix_cache`: без eviction. Растёт при многих разных билдах. ~80KB на запись × 100 = ~8MB. Низкий риск.
+
+### DB-подключения
+- Нет connection pool. Каждый API-запрос: `psycopg2.connect()` → query → `close()`. PostgreSQL default: 100 connections. При единственном пользователе — ок. При нагрузочном тесте (>50 concurrent запросов) — риск "too many connections". Паттерн pre-existed Stable 1.0.
+
+### Риски при нагрузке по числу точек
+| Объём | relocate_iters | OSRM cluster fit | Оценка времени | Риск |
+|---|---|---|---|---|
+| 100 стор / 9 машин | 3 | ✅ (≤100 точек) | ~20-30s | Низкий |
+| 150 стор / 9 машин | 3 | ✅ | ~25-40s | Низкий |
+| 300 стор / 9 машин | 2 | ✅ (~33 стора/кластер) | ~45-70s | Средний (на грани FastAPI timeout) |
+| 300 стор / 50 машин | 2 | ✅ (~6 стор/кластер) | ~30-50s | Средний |
+
+При 300 стор + OSRM rate-limit → Haversine fallback на оставшиеся кластеры. Graceful degradation.
+
+### Изменения за последние сессии (Stable 1.0)
+1. **`_fetch_route_leg_times_osrm`** — новая функция, post-solve ETA via OSRM Table API. `solve_vrp` не тронут.
+2. **`effective_max_stops = ceil(avg × 1.5)`** — auto_cap в `build_route`, нет влияния на алгоритм при уже-сбалансированном распределении.
+3. **`optimize_by` hidden from UI** — `route.tsx` всегда шлёт "distance", кнопки убраны.
+4. **`PG_CONNECTION_URL` priority** — `DATABASE_URL = os.environ.get("PG_CONNECTION_URL") or os.environ.get("DATABASE_URL", "")`.
+
+### Вердикт
+**✅ SAFE FOR DEPLOY** — все новые изменения изолированы, fallback-цепочки полные, while-циклы bounded.
+
+---
 
 ## Gotchas
 
