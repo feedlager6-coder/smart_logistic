@@ -77,7 +77,8 @@ async def security_headers_middleware(request: Request, call_next):
         )
     return response
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
+# PG_CONNECTION_URL overrides Replit's managed DATABASE_URL (use for Railway or custom Postgres)
+DATABASE_URL = os.environ.get("PG_CONNECTION_URL") or os.environ.get("DATABASE_URL", "")
 
 # ── JWT / Auth ────────────────────────────────────────────────────────────────
 _JWT_SECRET_ENV = os.environ.get("JWT_SECRET", "")
