@@ -4,7 +4,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import { Settings, Save, Fuel, Gauge, Calculator, TrendingDown } from "lucide-react";
+import { Settings, Save, Fuel, Gauge, Calculator, TrendingDown, Users } from "lucide-react";
+import { useAuth } from "@/context/auth";
+import { UsersPanel } from "@/components/UsersPanel";
 
 interface CompanySettings {
   fuel_price: number;
@@ -16,8 +18,12 @@ function calcCostPerKm(fuelPrice: number, consumption: number): number {
   return Math.round((fuelPrice * consumption) / 100 * 100) / 100;
 }
 
+type Tab = "fuel" | "users";
+
 export function SettingsPage() {
   const { toast } = useToast();
+  const { isAdmin } = useAuth();
+  const [activeTab, setActiveTab] = useState<Tab>("fuel");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -80,7 +86,7 @@ export function SettingsPage() {
     : 0;
 
   return (
-    <div className="space-y-8 pb-10 max-w-2xl">
+    <div className="space-y-8 pb-10 max-w-3xl">
       {/* Header */}
       <div>
         <h1 className="text-3xl font-bold tracking-tight flex items-center gap-3">
@@ -90,131 +96,163 @@ export function SettingsPage() {
           Настройки компании
         </h1>
         <p className="text-muted-foreground mt-2">
-          Параметры топлива — применяются при расчёте экономии в каждом новом маршруте
+          Параметры топлива и управление пользователями
         </p>
       </div>
 
-      {/* Input card */}
-      <Card className="border-border">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Fuel className="w-5 h-5 text-primary" />
-            Параметры топлива
-          </CardTitle>
-          <CardDescription>
-            Укажите актуальные данные вашего автопарка — система будет считать экономию точно
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-            {/* Fuel price */}
-            <div className="space-y-2">
-              <Label htmlFor="fuel_price" className="flex items-center gap-1.5">
-                <Fuel className="w-3.5 h-3.5 text-muted-foreground" />
-                Цена топлива, ₽/литр
-              </Label>
-              <Input
-                id="fuel_price"
-                type="number"
-                min="1"
-                step="0.5"
-                value={fuelPrice}
-                onChange={e => setFuelPrice(e.target.value)}
-                placeholder="67"
-                className="text-base"
-              />
-              <p className="text-xs text-muted-foreground">Дизель или бензин по вашей заправке</p>
-            </div>
+      {/* Tabs */}
+      <div className="flex gap-1 border-b border-border">
+        <button
+          onClick={() => setActiveTab("fuel")}
+          className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === "fuel"
+              ? "border-primary text-primary"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <Fuel className="w-4 h-4" />
+          Параметры топлива
+        </button>
+        {isAdmin && (
+          <button
+            onClick={() => setActiveTab("users")}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+              activeTab === "users"
+                ? "border-primary text-primary"
+                : "border-transparent text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <Users className="w-4 h-4" />
+            Пользователи
+          </button>
+        )}
+      </div>
 
-            {/* Consumption */}
-            <div className="space-y-2">
-              <Label htmlFor="consumption" className="flex items-center gap-1.5">
-                <Gauge className="w-3.5 h-3.5 text-muted-foreground" />
-                Расход топлива, л/100 км
-              </Label>
-              <Input
-                id="consumption"
-                type="number"
-                min="1"
-                step="0.5"
-                value={consumption}
-                onChange={e => setConsumption(e.target.value)}
-                placeholder="13"
-                className="text-base"
-              />
-              <p className="text-xs text-muted-foreground">Для Газели — обычно 11–15 л/100 км</p>
-            </div>
-          </div>
+      {/* Fuel tab */}
+      {activeTab === "fuel" && (
+        <div className="space-y-8">
+          <Card className="border-border">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Fuel className="w-5 h-5 text-primary" />
+                Параметры топлива
+              </CardTitle>
+              <CardDescription>
+                Укажите актуальные данные вашего автопарка — система будет считать экономию точно
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                <div className="space-y-2">
+                  <Label htmlFor="fuel_price" className="flex items-center gap-1.5">
+                    <Fuel className="w-3.5 h-3.5 text-muted-foreground" />
+                    Цена топлива, ₽/литр
+                  </Label>
+                  <Input
+                    id="fuel_price"
+                    type="number"
+                    min="1"
+                    step="0.5"
+                    value={fuelPrice}
+                    onChange={e => setFuelPrice(e.target.value)}
+                    placeholder="67"
+                    className="text-base"
+                  />
+                  <p className="text-xs text-muted-foreground">Дизель или бензин по вашей заправке</p>
+                </div>
 
-          <Button onClick={handleSave} disabled={saving} className="gap-2 w-full sm:w-auto">
-            <Save className="w-4 h-4" />
-            {saving ? "Сохраняю…" : "Сохранить настройки"}
-          </Button>
-        </CardContent>
-      </Card>
-
-      {/* Live calculator card */}
-      <Card className="border-border bg-muted/30">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Calculator className="w-4 h-4 text-primary" />
-            Расчёт стоимости километра
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {/* Formula breakdown */}
-          <div className="space-y-2 text-sm">
-            <div className="flex items-center justify-between py-2 border-b border-border">
-              <span className="text-muted-foreground font-mono">
-                {fuelPrice || "—"} ₽/л × {consumption || "—"} л / 100 км
-              </span>
-              <span className="font-semibold tabular-nums">
-                {fuelComponent > 0 ? `${fuelComponent} ₽/км` : "—"}
-              </span>
-            </div>
-            <div className="flex items-center justify-between py-2">
-              <span className="text-lg font-bold text-foreground">Итого</span>
-              <span className="text-2xl font-extrabold text-primary tabular-nums">
-                {costPerKm > 0 ? `${costPerKm} ₽/км` : "—"}
-              </span>
-            </div>
-          </div>
-
-          {/* Savings preview */}
-          {costPerKm > 0 && (
-            <div className="rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 p-4">
-              <div className="flex items-center gap-2 mb-3">
-                <TrendingDown className="w-4 h-4 text-emerald-600" />
-                <span className="text-sm font-semibold text-emerald-800 dark:text-emerald-300">Пример экономии</span>
+                <div className="space-y-2">
+                  <Label htmlFor="consumption" className="flex items-center gap-1.5">
+                    <Gauge className="w-3.5 h-3.5 text-muted-foreground" />
+                    Расход топлива, л/100 км
+                  </Label>
+                  <Input
+                    id="consumption"
+                    type="number"
+                    min="1"
+                    step="0.5"
+                    value={consumption}
+                    onChange={e => setConsumption(e.target.value)}
+                    placeholder="13"
+                    className="text-base"
+                  />
+                  <p className="text-xs text-muted-foreground">Для Газели — обычно 11–15 л/100 км</p>
+                </div>
               </div>
-              <div className="grid grid-cols-3 gap-3 text-center">
-                {[
-                  { km: 20, label: "−20 км" },
-                  { km: 50, label: "−50 км" },
-                  { km: 100, label: "−100 км" },
-                ].map(({ km, label }) => {
-                  const saved = Math.round(km * 1.4 * costPerKm);
-                  return (
-                    <div key={km} className="bg-white dark:bg-card rounded-lg px-2 py-2 shadow-sm">
-                      <div className="text-xs text-muted-foreground">{label}/день</div>
-                      <div className="text-base font-bold text-emerald-600">{saved} ₽/день</div>
-                      <div className="text-xs text-muted-foreground">{saved * 22} ₽/мес</div>
-                    </div>
-                  );
-                })}
+
+              <Button onClick={handleSave} disabled={saving} className="gap-2 w-full sm:w-auto">
+                <Save className="w-4 h-4" />
+                {saving ? "Сохраняю…" : "Сохранить настройки"}
+              </Button>
+            </CardContent>
+          </Card>
+
+          <Card className="border-border bg-muted/30">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Calculator className="w-4 h-4 text-primary" />
+                Расчёт стоимости километра
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2 text-sm">
+                <div className="flex items-center justify-between py-2 border-b border-border">
+                  <span className="text-muted-foreground font-mono">
+                    {fuelPrice || "—"} ₽/л × {consumption || "—"} л / 100 км
+                  </span>
+                  <span className="font-semibold tabular-nums">
+                    {fuelComponent > 0 ? `${fuelComponent} ₽/км` : "—"}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between py-2">
+                  <span className="text-lg font-bold text-foreground">Итого</span>
+                  <span className="text-2xl font-extrabold text-primary tabular-nums">
+                    {costPerKm > 0 ? `${costPerKm} ₽/км` : "—"}
+                  </span>
+                </div>
               </div>
-              <p className="text-xs text-muted-foreground mt-3">
-                Расчёт: сэкономленные км × 1.4 (коэф. дорог) × {costPerKm} ₽/км
+
+              {costPerKm > 0 && (
+                <div className="rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <TrendingDown className="w-4 h-4 text-emerald-600" />
+                    <span className="text-sm font-semibold text-emerald-800 dark:text-emerald-300">Пример экономии</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-3 text-center">
+                    {[
+                      { km: 20, label: "−20 км" },
+                      { km: 50, label: "−50 км" },
+                      { km: 100, label: "−100 км" },
+                    ].map(({ km, label }) => {
+                      const saved = Math.round(km * 1.4 * costPerKm);
+                      return (
+                        <div key={km} className="bg-white dark:bg-card rounded-lg px-2 py-2 shadow-sm">
+                          <div className="text-xs text-muted-foreground">{label}/день</div>
+                          <div className="text-base font-bold text-emerald-600">{saved} ₽/день</div>
+                          <div className="text-xs text-muted-foreground">{saved * 22} ₽/мес</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-3">
+                    Расчёт: сэкономленные км × 1.4 (коэф. дорог) × {costPerKm} ₽/км
+                  </p>
+                </div>
+              )}
+
+              <p className="text-xs text-muted-foreground">
+                Формула: <span className="font-mono">стоимость км = цена топлива × расход / 100</span>.
+                Новые настройки применяются к маршрутам, построенным <strong>после сохранения</strong>.
               </p>
-            </div>
-          )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
-          <p className="text-xs text-muted-foreground">
-            Формула: <span className="font-mono">стоимость км = цена топлива × расход / 100</span>.
-            Новые настройки применяются к маршрутам, построенным <strong>после сохранения</strong>.
-          </p>
-        </CardContent>
-      </Card>
+      {/* Users tab (admin only) */}
+      {activeTab === "users" && isAdmin && (
+        <UsersPanel />
+      )}
     </div>
   );
 }

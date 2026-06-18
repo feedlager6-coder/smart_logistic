@@ -2,12 +2,14 @@ import React, { createContext, useContext, useState, useEffect, useCallback } fr
 
 interface AuthUser {
   username: string;
+  is_admin: boolean;
 }
 
 interface AuthContextValue {
   user: AuthUser | null;
   isLoading: boolean;
   isAuthenticated: boolean;
+  isAdmin: boolean;
   logout: () => Promise<void>;
   refetch: () => Promise<void>;
 }
@@ -23,7 +25,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const res = await fetch("/api/auth/me", { credentials: "include" });
       if (res.ok) {
         const data = await res.json();
-        setUser({ username: data.username });
+        setUser({ username: data.username, is_admin: Boolean(data.is_admin) });
       } else {
         setUser(null);
       }
@@ -59,6 +61,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         user,
         isLoading,
         isAuthenticated: user !== null,
+        isAdmin: user?.is_admin ?? false,
         logout,
         refetch: fetchMe,
       }}

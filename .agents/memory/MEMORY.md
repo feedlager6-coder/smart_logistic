@@ -18,3 +18,4 @@
 - [OR-Tools time-mode hang: use seconds not minutes](ortools-time-arc-seconds.md) — int_time_arc must use raw seconds (max(1,int(v))), NOT minutes (max(1,int(v/60))). Minutes→values 1-30 cause GLS to hang on dense clusters ≥20 stops.
 - [OSRM ETA post-solve pattern](osrm-eta-post-solve.md) — ETA via parallel OSRM Table API calls after solve_vrp; reads durations[i][i+1]; discard if any leg > 7200s (sea/unreachable); solve_vrp unchanged; adds ~1-2s.
 - [auto_cap max_stops pattern](auto-cap-max-stops.md) — effective_max_stops = ceil(avg × 1.5) applied when user omits max_stops_per_vehicle; symmetric to existing 0.70×avg floor; prevents 34/8/7 imbalance.
+- [Multi-user data isolation](multi-user-isolation.md) — owner_id (FK→users.id) on stores/route_sessions/company_settings; all CRUD/analytics filtered by owner_id; admin endpoints at /api/admin/users; is_admin/is_active on users; settings per-user via get_company_settings(user_id).

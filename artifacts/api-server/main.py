@@ -1340,13 +1340,23 @@ def init_db():
     cur.execute("""
         ALTER TABLE route_sessions ADD COLUMN IF NOT EXISTS cost_per_km DOUBLE PRECISION
     """)
+    # ── Multi-user isolation: owner_id columns ────────────────────────────────
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE")
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP")
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE")
+    cur.execute("ALTER TABLE stores ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id)")
+    cur.execute("ALTER TABLE route_sessions ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id)")
+    cur.execute("ALTER TABLE company_settings ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_stores_owner ON stores(owner_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner ON route_sessions(owner_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_settings_owner ON company_settings(owner_id)")
     conn.commit()
     cur.close()
     conn.close()
 
 
-def get_company_settings() -> dict:
-    """Read cost model settings from DB (single row). Returns defaults if table is empty."""
+def get_company_settings(user_id: int = None) -> dict:
+    """Read cost model settings from DB (per-user row). Returns defaults if no row exists."""
     _defaults = {
         "fuel_price": 67.0,
         "fuel_consumption": 13.0,
@@ -1355,7 +1365,13 @@ def get_company_settings() -> dict:
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT fuel_price, fuel_consumption, cost_per_km FROM company_settings ORDER BY id LIMIT 1")
+        if user_id is not None:
+            cur.execute(
+                "SELECT fuel_price, fuel_consumption, cost_per_km FROM company_settings WHERE owner_id = %s LIMIT 1",
+                (user_id,)
+            )
+        else:
+            cur.execute("SELECT fuel_price, fuel_consumption, cost_per_km FROM company_settings ORDER BY id LIMIT 1")
         row = cur.fetchone()
         cur.close()
         conn.close()
@@ -1776,34 +1792,44 @@ def geocode_address(address: str) -> Optional[tuple]:
     return result
 
 
-def find_nearby_stores(lat: float, lon: float, radius_m: float = 20, exclude_id: int = None) -> list:
+def find_nearby_stores(lat: float, lon: float, radius_m: float = 20, exclude_id: int = None, owner_id: int = None) -> list:
     """Return stores within radius_m metres of (lat, lon), sorted by distance.
-    Uses a degree-based bounding box pre-filter then exact Haversine check."""
+    Uses a degree-based bounding box pre-filter then exact Haversine check.
+    If owner_id is provided, only looks within that user's stores."""
     try:
         delta = radius_m / 111320.0
         conn = get_db()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        owner_clause = "AND owner_id = %s" if owner_id is not None else ""
         if exclude_id is not None:
+            params = [lat, lon, exclude_id, lat, delta, lon, delta]
+            if owner_id is not None:
+                params.append(owner_id)
             cur.execute(
-                """SELECT id, name, address, lat, lon,
+                f"""SELECT id, name, address, lat, lon,
                     SQRT(POWER((lat-%s)*111320.0,2)
                          + POWER((lon-%s)*111320.0*COS(RADIANS(lat)),2)) AS dist_m
                    FROM stores
                    WHERE id != %s AND lat IS NOT NULL
                      AND ABS(lat-%s) < %s AND ABS(lon-%s) < %s
+                     {owner_clause}
                    ORDER BY dist_m LIMIT 5""",
-                (lat, lon, exclude_id, lat, delta, lon, delta),
+                params,
             )
         else:
+            params = [lat, lon, lat, delta, lon, delta]
+            if owner_id is not None:
+                params.append(owner_id)
             cur.execute(
-                """SELECT id, name, address, lat, lon,
+                f"""SELECT id, name, address, lat, lon,
                     SQRT(POWER((lat-%s)*111320.0,2)
                          + POWER((lon-%s)*111320.0*COS(RADIANS(lat)),2)) AS dist_m
                    FROM stores
                    WHERE lat IS NOT NULL
                      AND ABS(lat-%s) < %s AND ABS(lon-%s) < %s
+                     {owner_clause}
                    ORDER BY dist_m LIMIT 5""",
-                (lat, lon, lat, delta, lon, delta),
+                params,
             )
         rows = cur.fetchall()
         cur.close()
@@ -2113,8 +2139,8 @@ async def startup():
     # It was a one-time dev migration that ran when the DB held old Moscow demo data.
     # Calling it on every startup is catastrophically dangerous for production clients
     # in any Russian city with lat > 50 (Moscow, SPb, Novosibirsk, Yekaterinburg, etc.).
-    seed_demo_data()
-    seed_admin_user()
+    admin_id = seed_admin_user()  # migrates legacy NULL owner_id data to admin
+    seed_demo_data(owner_id=admin_id)  # seeds only if admin has no stores
 
 
 def migrate_moscow_stores():
@@ -2142,10 +2168,15 @@ def migrate_moscow_stores():
         conn.close()
 
 
-def seed_demo_data():
+def seed_demo_data(owner_id: int = None):
+    """Seed demo stores and route sessions for a specific user (owner_id).
+    Only seeds if that user has no stores yet."""
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT COUNT(*) as cnt FROM stores")
+    if owner_id is not None:
+        cur.execute("SELECT COUNT(*) as cnt FROM stores WHERE owner_id = %s", (owner_id,))
+    else:
+        cur.execute("SELECT COUNT(*) as cnt FROM stores")
     row = cur.fetchone()
     # Seed if empty, or if only a handful remain after migration
     if row["cnt"] >= 3:
@@ -2166,9 +2197,9 @@ def seed_demo_data():
 
     for name, address, lat, lon, status in demo_stores:
         cur.execute(
-            """INSERT INTO stores (name, address, lat, lon, geocode_status, time_window_from, time_window_to, unload_minutes)
-               VALUES (%s, %s, %s, %s, %s, '09:00', '18:00', 15)""",
-            (name, address, lat, lon, status)
+            """INSERT INTO stores (name, address, lat, lon, geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
+               VALUES (%s, %s, %s, %s, %s, '09:00', '18:00', 15, %s)""",
+            (name, address, lat, lon, status, owner_id)
         )
 
     # Seed some historical route sessions
@@ -2178,9 +2209,9 @@ def seed_demo_data():
         total_km = 80 + (i * 7) % 40
         saved_km = total_km * 0.23
         cur.execute(
-            """INSERT INTO route_sessions (date, num_vehicles, total_km, saved_km, saved_rub, num_points)
-               VALUES (%s, %s, %s, %s, %s, %s)""",
-            (str(d), 2 + i % 3, round(total_km, 1), round(saved_km, 1), round(saved_km * 1.4 * 31), 8 + i % 6)
+            """INSERT INTO route_sessions (date, num_vehicles, total_km, saved_km, saved_rub, num_points, owner_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (str(d), 2 + i % 3, round(total_km, 1), round(saved_km, 1), round(saved_km * 1.4 * 31), 8 + i % 6, owner_id)
         )
 
     conn.commit()
@@ -2226,32 +2257,53 @@ def _decode_token(token: str) -> Optional[str]:
         return None
 
 
-def seed_admin_user():
-    """Create the admin user from ADMIN_PASSWORD env var if not exists."""
+def seed_admin_user() -> Optional[int]:
+    """Create the admin user from ADMIN_PASSWORD env var if not exists.
+    Sets is_admin=TRUE. Migrates legacy (NULL owner_id) data to admin.
+    Returns the admin user ID, or None on failure."""
     if not ADMIN_PASSWORD:
         logger.warning(
             "ADMIN_PASSWORD env var is not set — admin user will NOT be created. "
             "Set ADMIN_PASSWORD to enable login."
         )
-        return
+        return None
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
-        cur.execute("SELECT id FROM users WHERE username = %s", ("admin",))
+        cur.execute("SELECT id, is_admin FROM users WHERE username = %s", ("admin",))
         row = cur.fetchone()
         if row is None:
             hashed = _hash_password(ADMIN_PASSWORD)
             cur.execute(
-                "INSERT INTO users (username, password_hash) VALUES (%s, %s)",
+                "INSERT INTO users (username, password_hash, is_admin, is_active) VALUES (%s, %s, TRUE, TRUE) RETURNING id",
                 ("admin", hashed),
             )
+            admin_id = cur.fetchone()["id"]
             conn.commit()
-            logger.info("Admin user created.")
+            logger.info("Admin user created (id=%d).", admin_id)
         else:
-            logger.info("Admin user already exists — skipping creation.")
+            admin_id = row["id"]
+            # Ensure is_admin flag is set on existing admin account
+            if not row.get("is_admin"):
+                cur.execute("UPDATE users SET is_admin = TRUE, is_active = TRUE WHERE id = %s", (admin_id,))
+                conn.commit()
+            logger.info("Admin user already exists (id=%d).", admin_id)
+
+        # One-time migration: assign stores/sessions/settings with NULL owner_id to admin
+        cur.execute("UPDATE stores SET owner_id = %s WHERE owner_id IS NULL", (admin_id,))
+        migrated_stores = cur.rowcount
+        cur.execute("UPDATE route_sessions SET owner_id = %s WHERE owner_id IS NULL", (admin_id,))
+        migrated_sessions = cur.rowcount
+        cur.execute("UPDATE company_settings SET owner_id = %s WHERE owner_id IS NULL", (admin_id,))
+        conn.commit()
+        if migrated_stores > 0 or migrated_sessions > 0:
+            logger.info("Migrated %d stores and %d sessions to admin (owner_id=%d).",
+                        migrated_stores, migrated_sessions, admin_id)
+        return admin_id
     except Exception as exc:
         logger.error("seed_admin_user failed: %s", exc)
         conn.rollback()
+        return None
     finally:
         cur.close()
         conn.close()
@@ -2283,7 +2335,36 @@ async def auth_middleware(request: Request, call_next):
             content={"detail": "Токен недействителен или истёк. Войдите снова."},
         )
 
+    # Load user from DB on every request: checks is_active, populates user_id and is_admin
+    try:
+        _conn = get_db()
+        _cur = _conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        _cur.execute(
+            "SELECT id, is_active, is_admin FROM users WHERE username = %s",
+            (username,)
+        )
+        _user_row = _cur.fetchone()
+        _cur.close()
+        _conn.close()
+    except Exception as _exc:
+        logger.error("Auth middleware DB error: %s", _exc)
+        _user_row = None
+
+    if not _user_row:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Пользователь не найден. Войдите снова."},
+        )
+
+    if not _user_row.get("is_active", True):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Аккаунт отключён. Обратитесь к администратору."},
+        )
+
     request.state.username = username
+    request.state.user_id = _user_row["id"]
+    request.state.is_admin = bool(_user_row.get("is_admin", False))
     return await call_next(request)
 
 
@@ -2316,17 +2397,32 @@ async def login(request: Request, response: Response):
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
-        cur.execute("SELECT password_hash FROM users WHERE username = %s", (username,))
+        cur.execute("SELECT password_hash, is_active, is_admin FROM users WHERE username = %s", (username,))
         row = cur.fetchone()
     finally:
         cur.close()
         conn.close()
 
-    if not row or not _verify_password(password, row["password_hash"]):
+    if not row:
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль")
+    if not row.get("is_active", True):
+        raise HTTPException(status_code=401, detail="Аккаунт отключён. Обратитесь к администратору.")
+    if not _verify_password(password, row["password_hash"]):
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
 
+    # Update last_login_at
+    try:
+        _lconn = get_db()
+        _lcur = _lconn.cursor()
+        _lcur.execute("UPDATE users SET last_login_at = NOW() WHERE username = %s", (username,))
+        _lconn.commit()
+        _lcur.close()
+        _lconn.close()
+    except Exception:
+        pass
+
     token = _create_access_token(username)
-    resp = JSONResponse(content={"ok": True, "username": username})
+    resp = JSONResponse(content={"ok": True, "username": username, "is_admin": bool(row.get("is_admin", False))})
     resp.set_cookie(
         key=JWT_COOKIE_NAME,
         value=token,
@@ -2353,7 +2449,29 @@ async def me(request: Request):
     username = getattr(request.state, "username", None)
     if not username:
         raise HTTPException(status_code=401, detail="Не авторизован")
-    return {"username": username}
+    return {
+        "username": username,
+        "user_id": getattr(request.state, "user_id", None),
+        "is_admin": getattr(request.state, "is_admin", False),
+    }
+
+
+# ── Auth helpers ──────────────────────────────────────────────────────────────
+
+def get_user_id(request: Request) -> int:
+    """Return the current user's ID from request state (set by auth middleware)."""
+    uid = getattr(request.state, "user_id", None)
+    if uid is None:
+        raise HTTPException(status_code=401, detail="Не авторизован")
+    return uid
+
+
+def require_admin(request: Request) -> int:
+    """Return current user ID if they are an admin, else raise 403."""
+    uid = get_user_id(request)
+    if not getattr(request.state, "is_admin", False):
+        raise HTTPException(status_code=403, detail="Доступ запрещён. Только для администраторов.")
+    return uid
 
 
 # ── Business routes ───────────────────────────────────────────────────────────
@@ -2364,10 +2482,11 @@ def health_check():
 
 
 @app.get("/api/stores")
-def list_stores():
+def list_stores(request: Request):
+    uid = get_user_id(request)
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM stores ORDER BY id")
+    cur.execute("SELECT * FROM stores WHERE owner_id = %s ORDER BY id", (uid,))
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -2375,7 +2494,8 @@ def list_stores():
 
 
 @app.post("/api/stores", status_code=201)
-def create_store(body: StoreInput, force: bool = Query(False, description="Пропустить предупреждение о дубликате")):
+def create_store(request: Request, body: StoreInput, force: bool = Query(False, description="Пропустить предупреждение о дубликате")):
+    uid = get_user_id(request)
     if not body.name or not body.name.strip():
         raise HTTPException(status_code=422, detail="Название магазина не может быть пустым")
     if not body.yandex_url and not body.address and not body.city and body.lat is None:
@@ -2424,7 +2544,7 @@ def create_store(body: StoreInput, force: bool = Query(False, description="Пр�
 
     # Duplicate detection (skip if force=True)
     if lat is not None and lon is not None and not force:
-        nearby = find_nearby_stores(lat, lon, radius_m=20)
+        nearby = find_nearby_stores(lat, lon, radius_m=20, owner_id=uid)
         if nearby:
             near = nearby[0]
             raise HTTPException(
@@ -2451,10 +2571,10 @@ def create_store(body: StoreInput, force: bool = Query(False, description="Пр�
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        """INSERT INTO stores (name, address, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+        """INSERT INTO stores (name, address, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
         (body.name.strip(), address, lat, lon, map_url,
-         status, body.time_window_from, body.time_window_to, body.unload_minutes)
+         status, body.time_window_from, body.time_window_to, body.unload_minutes, uid)
     )
     row = cur.fetchone()
     conn.commit()
@@ -2561,7 +2681,8 @@ def download_stores_template():
 
 
 @app.post("/api/stores/import")
-async def import_stores(file: UploadFile = File(...)):
+async def import_stores(request: Request, file: UploadFile = File(...)):
+    owner_id = get_user_id(request)
     if not OPENPYXL_AVAILABLE:
         raise HTTPException(status_code=500, detail="openpyxl not installed")
 
@@ -2700,7 +2821,7 @@ async def import_stores(file: UploadFile = File(...)):
         # Duplicate detection (non-blocking — warn only)
         dup_warning = None
         if lat is not None and lon is not None:
-            nearby = find_nearby_stores(lat, lon, radius_m=20)
+            nearby = find_nearby_stores(lat, lon, radius_m=20, owner_id=owner_id)
             if nearby:
                 near = nearby[0]
                 dup_warning = {
@@ -2717,9 +2838,9 @@ async def import_stores(file: UploadFile = File(...)):
             conn = get_db()
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cur.execute(
-                """INSERT INTO stores (name, address, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
-                (name, address, lat, lon, final_map_url, status, tw_from, tw_to, unload)
+                """INSERT INTO stores (name, address, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+                (name, address, lat, lon, final_map_url, status, tw_from, tw_to, unload, owner_id)
             )
             db_row = cur.fetchone()
             conn.commit()
@@ -2842,7 +2963,7 @@ async def preview_import(file: UploadFile = File(...)):
     }
 
 
-def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optional[dict] = None) -> None:
+def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optional[dict] = None, owner_id: int = None) -> None:
     """Run Excel import synchronously, updating job dict for progress tracking.
     Called from background thread by /api/stores/import/start endpoint.
     mapping: optional dict with column indices {name, address, city, yandex, unload, tw_from, tw_to}."""
@@ -3005,9 +3126,9 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
             conn2 = get_db()
             cur2 = conn2.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cur2.execute(
-                """INSERT INTO stores (name, address, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
-                (name, address, lat, lon, final_map_url, status, tw_from, tw_to, unload),
+                """INSERT INTO stores (name, address, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+                (name, address, lat, lon, final_map_url, status, tw_from, tw_to, unload, owner_id),
             )
             db_row = cur2.fetchone()
             conn2.commit(); cur2.close(); conn2.close()
@@ -3038,9 +3159,10 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
 
 
 @app.post("/api/stores/import/start", status_code=202)
-async def start_import_stores(file: UploadFile = File(...), mapping: Optional[str] = Form(None)):
+async def start_import_stores(request: Request, file: UploadFile = File(...), mapping: Optional[str] = Form(None)):
     """Start async background import. Returns job_id for progress polling.
     mapping: optional JSON string with column indices {name, address, city, yandex, unload, tw_from, tw_to}."""
+    uid = get_user_id(request)
     if not OPENPYXL_AVAILABLE:
         raise HTTPException(status_code=500, detail="openpyxl not installed")
     content = await file.read()
@@ -3056,19 +3178,23 @@ async def start_import_stores(file: UploadFile = File(...), mapping: Optional[st
     job: dict = {
         "total": 0, "processed": 0, "imported": 0, "failed": 0,
         "done": False, "stores": [], "duplicates": [], "error": None, "deduped": 0,
+        "owner_id": uid,
     }
     import_jobs[job_id] = job
-    t = threading.Thread(target=_import_process_content_sync, args=(content, job, parsed_mapping), daemon=True)
+    t = threading.Thread(target=_import_process_content_sync, args=(content, job, parsed_mapping, uid), daemon=True)
     t.start()
     return {"job_id": job_id}
 
 
 @app.get("/api/stores/import/progress/{job_id}")
-def get_import_progress(job_id: str):
+def get_import_progress(job_id: str, request: Request):
     """Poll import job progress. Returns current counters + done flag."""
+    uid = get_user_id(request)
     if job_id not in import_jobs:
         raise HTTPException(status_code=404, detail="Import job not found")
     job = import_jobs[job_id]
+    if job.get("owner_id") is not None and job["owner_id"] != uid:
+        raise HTTPException(status_code=403, detail="Нет доступа к этому заданию импорта")
     return {
         "job_id": job_id,
         "total": job["total"],
@@ -3082,11 +3208,14 @@ def get_import_progress(job_id: str):
 
 
 @app.get("/api/stores/import/result/{job_id}")
-def get_import_result(job_id: str):
+def get_import_result(job_id: str, request: Request):
     """Fetch final result of a completed import job."""
+    uid = get_user_id(request)
     if job_id not in import_jobs:
         raise HTTPException(status_code=404, detail="Import job not found")
     job = import_jobs[job_id]
+    if job.get("owner_id") is not None and job["owner_id"] != uid:
+        raise HTTPException(status_code=403, detail="Нет доступа к этому заданию импорта")
     return {
         "total": job["total"],
         "imported": job["imported"],
@@ -3102,10 +3231,11 @@ def get_import_result(job_id: str):
 
 
 @app.get("/api/stores/{id}")
-def get_store(id: int):
+def get_store(id: int, request: Request):
+    uid = get_user_id(request)
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM stores WHERE id = %s", (id,))
+    cur.execute("SELECT * FROM stores WHERE id = %s AND owner_id = %s", (id, uid))
     row = cur.fetchone()
     cur.close()
     conn.close()
@@ -3115,10 +3245,11 @@ def get_store(id: int):
 
 
 @app.put("/api/stores/{id}")
-def update_store(id: int, body: StoreUpdate):
+def update_store(id: int, body: StoreUpdate, request: Request):
+    uid = get_user_id(request)
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM stores WHERE id = %s", (id,))
+    cur.execute("SELECT * FROM stores WHERE id = %s AND owner_id = %s", (id, uid))
     existing = cur.fetchone()
     if not existing:
         cur.close()
@@ -3165,8 +3296,8 @@ def update_store(id: int, body: StoreUpdate):
 
     if fields:
         set_clause = ", ".join(f"{k} = %s" for k in fields)
-        values = list(fields.values()) + [id]
-        cur.execute(f"UPDATE stores SET {set_clause} WHERE id = %s RETURNING *", values)
+        values = list(fields.values()) + [id, uid]
+        cur.execute(f"UPDATE stores SET {set_clause} WHERE id = %s AND owner_id = %s RETURNING *", values)
         row = cur.fetchone()
         conn.commit()
     else:
@@ -3178,10 +3309,11 @@ def update_store(id: int, body: StoreUpdate):
 
 
 @app.delete("/api/stores/{id}", status_code=204)
-def delete_store(id: int):
+def delete_store(id: int, request: Request):
+    uid = get_user_id(request)
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("DELETE FROM stores WHERE id = %s", (id,))
+    cur.execute("DELETE FROM stores WHERE id = %s AND owner_id = %s", (id, uid))
     deleted = cur.rowcount
     conn.commit()
     cur.close()
@@ -3191,10 +3323,11 @@ def delete_store(id: int):
 
 
 @app.post("/api/stores/{id}/geocode")
-def geocode_store(id: int):
+def geocode_store(id: int, request: Request):
+    uid = get_user_id(request)
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM stores WHERE id = %s", (id,))
+    cur.execute("SELECT * FROM stores WHERE id = %s AND owner_id = %s", (id, uid))
     store = cur.fetchone()
     if not store:
         cur.close()
@@ -3207,8 +3340,8 @@ def geocode_store(id: int):
     status = "found" if coords else "not_found"
 
     cur.execute(
-        "UPDATE stores SET lat = %s, lon = %s, geocode_status = %s WHERE id = %s RETURNING *",
-        (lat, lon, status, id)
+        "UPDATE stores SET lat = %s, lon = %s, geocode_status = %s WHERE id = %s AND owner_id = %s RETURNING *",
+        (lat, lon, status, id, uid)
     )
     row = cur.fetchone()
     conn.commit()
@@ -3218,7 +3351,8 @@ def geocode_store(id: int):
 
 
 @app.post("/api/route/build")
-def build_route(body: RouteRequest):
+def build_route(request: Request, body: RouteRequest):
+    uid = get_user_id(request)
     if not body.store_ids:
         raise HTTPException(status_code=400, detail="No stores selected")
     if not body.vehicles:
@@ -3234,7 +3368,11 @@ def build_route(body: RouteRequest):
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
     placeholders = ",".join(["%s"] * len(body.store_ids))
-    cur.execute(f"SELECT * FROM stores WHERE id IN ({placeholders})", body.store_ids)
+    # Filter by owner_id to prevent cross-user store access
+    cur.execute(
+        f"SELECT * FROM stores WHERE id IN ({placeholders}) AND owner_id = %s",
+        (*body.store_ids, uid)
+    )
     stores_rows = {r["id"]: r for r in cur.fetchall()}
     cur.close()
     conn.close()
@@ -3558,7 +3696,7 @@ def build_route(body: RouteRequest):
             "whatsapp_url": wurl,
         })
 
-    _cost_settings = get_company_settings()
+    _cost_settings = get_company_settings(user_id=uid)
     savings = calculate_savings(
         total_km,
         store_list,      # passed in original input order — used as baseline
@@ -3587,11 +3725,11 @@ def build_route(body: RouteRequest):
         conn2 = get_db()
         cur2 = conn2.cursor()
         cur2.execute(
-            """INSERT INTO route_sessions (date, num_vehicles, total_km, saved_km, saved_rub, num_points, cost_per_km, result_json)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+            """INSERT INTO route_sessions (date, num_vehicles, total_km, saved_km, saved_rub, num_points, cost_per_km, result_json, owner_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
             (str(date.today()), num_vehicles, round(total_km, 1),
              savings["saved_km"], savings["saved_rub_day"], len(store_list),
-             savings.get("cost_per_km"), json.dumps(result))
+             savings.get("cost_per_km"), json.dumps(result), uid)
         )
         session_id = cur2.fetchone()[0]
         result["session_id"] = session_id
@@ -3613,10 +3751,11 @@ def build_route(body: RouteRequest):
 
 
 @app.get("/api/route/sessions/{id}")
-def get_route_session(id: int):
+def get_route_session(id: int, request: Request):
+    uid = get_user_id(request)
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT result_json FROM route_sessions WHERE id = %s", (id,))
+    cur.execute("SELECT result_json FROM route_sessions WHERE id = %s AND owner_id = %s", (id, uid))
     row = cur.fetchone()
     cur.close()
     conn.close()
@@ -3626,12 +3765,13 @@ def get_route_session(id: int):
 
 
 @app.delete("/api/route/sessions/{id}")
-def delete_route_session(id: int):
+def delete_route_session(id: int, request: Request):
     """Удалить сессию маршрута по ID."""
+    uid = get_user_id(request)
     conn = get_db()
     cur = conn.cursor()
     try:
-        cur.execute("DELETE FROM route_sessions WHERE id = %s", (id,))
+        cur.execute("DELETE FROM route_sessions WHERE id = %s AND owner_id = %s", (id, uid))
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Route session not found")
         conn.commit()
@@ -3642,8 +3782,9 @@ def delete_route_session(id: int):
 
 
 @app.get("/api/route/sessions")
-def list_route_sessions(page: int = 1, page_size: int = 20):
+def list_route_sessions(request: Request, page: int = 1, page_size: int = 20):
     """Список сессий маршрутов с пагинацией."""
+    uid = get_user_id(request)
     if page < 1:
         page = 1
     if page_size < 1 or page_size > 200:
@@ -3651,15 +3792,16 @@ def list_route_sessions(page: int = 1, page_size: int = 20):
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
-        cur.execute("SELECT COUNT(*) as total FROM route_sessions")
+        cur.execute("SELECT COUNT(*) as total FROM route_sessions WHERE owner_id = %s", (uid,))
         total = int(cur.fetchone()["total"])
         offset = (page - 1) * page_size
         cur.execute(
             """SELECT id, date, num_vehicles, total_km, saved_km, saved_rub, num_points, created_at
                FROM route_sessions
+               WHERE owner_id = %s
                ORDER BY created_at DESC
                LIMIT %s OFFSET %s""",
-            (page_size, offset),
+            (uid, page_size, offset),
         )
         rows = cur.fetchall()
         return {
@@ -3686,14 +3828,16 @@ def list_route_sessions(page: int = 1, page_size: int = 20):
 
 
 @app.get("/api/settings")
-def get_settings_endpoint():
-    """Получить текущие параметры расчёта стоимости км."""
-    return get_company_settings()
+def get_settings_endpoint(request: Request):
+    """Получить текущие параметры расчёта стоимости км (для текущего пользователя)."""
+    uid = get_user_id(request)
+    return get_company_settings(user_id=uid)
 
 
 @app.put("/api/settings")
-def update_settings_endpoint(body: CompanySettingsInput):
+def update_settings_endpoint(request: Request, body: CompanySettingsInput):
     """Обновить параметры расчёта стоимости км. cost_per_km = fuel_price × consumption / 100."""
+    uid = get_user_id(request)
     if body.fuel_price <= 0 or body.fuel_consumption <= 0:
         raise HTTPException(status_code=400, detail="Все параметры должны быть положительными числами")
     cost_per_km = round(body.fuel_price * body.fuel_consumption / 100.0, 2)
@@ -3703,12 +3847,13 @@ def update_settings_endpoint(body: CompanySettingsInput):
         cur.execute("""
             UPDATE company_settings
                SET fuel_price=%s, fuel_consumption=%s, cost_per_km=%s, updated_at=NOW()
-        """, (body.fuel_price, body.fuel_consumption, cost_per_km))
+             WHERE owner_id=%s
+        """, (body.fuel_price, body.fuel_consumption, cost_per_km, uid))
         if cur.rowcount == 0:
             cur.execute("""
-                INSERT INTO company_settings (fuel_price, fuel_consumption, cost_per_km)
-                VALUES (%s, %s, %s)
-            """, (body.fuel_price, body.fuel_consumption, cost_per_km))
+                INSERT INTO company_settings (fuel_price, fuel_consumption, cost_per_km, owner_id)
+                VALUES (%s, %s, %s, %s)
+            """, (body.fuel_price, body.fuel_consumption, cost_per_km, uid))
         conn.commit()
     finally:
         cur.close()
@@ -3721,7 +3866,8 @@ def update_settings_endpoint(body: CompanySettingsInput):
 
 
 @app.get("/api/analytics/summary")
-def get_analytics_summary():
+def get_analytics_summary(request: Request):
+    uid = get_user_id(request)
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
@@ -3732,7 +3878,8 @@ def get_analytics_summary():
             COALESCE(SUM(saved_rub), 0) as saved_rub,
             COALESCE(AVG(num_points), 0) as avg_points_per_route
         FROM route_sessions
-    """)
+        WHERE owner_id = %s
+    """, (uid,))
     row = cur.fetchone()
     cur.close()
     conn.close()
@@ -3746,11 +3893,12 @@ def get_analytics_summary():
 
 
 @app.get("/api/analytics/daily")
-def get_analytics_daily(date_from: Optional[str] = None, date_to: Optional[str] = None):
+def get_analytics_daily(request: Request, date_from: Optional[str] = None, date_to: Optional[str] = None):
+    uid = get_user_id(request)
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    params: list = []
-    conditions: list = []
+    params: list = [uid]
+    conditions: list = ["owner_id = %s"]
     if date_from:
         conditions.append("date >= %s")
         params.append(date_from)
@@ -3788,11 +3936,12 @@ def get_analytics_daily(date_from: Optional[str] = None, date_to: Optional[str] 
 
 
 @app.get("/api/analytics/monthly")
-def get_analytics_monthly(date_from: Optional[str] = None, date_to: Optional[str] = None):
+def get_analytics_monthly(request: Request, date_from: Optional[str] = None, date_to: Optional[str] = None):
+    uid = get_user_id(request)
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    params: list = []
-    conditions: list = []
+    params: list = [uid]
+    conditions: list = ["owner_id = %s"]
     if date_from:
         conditions.append("date >= %s")
         params.append(date_from)
@@ -3828,12 +3977,13 @@ def get_analytics_monthly(date_from: Optional[str] = None, date_to: Optional[str
 
 
 @app.get("/api/analytics/vehicle-load")
-def get_analytics_vehicle_load(date_from: Optional[str] = None, date_to: Optional[str] = None):
+def get_analytics_vehicle_load(request: Request, date_from: Optional[str] = None, date_to: Optional[str] = None):
     """Среднее количество точек на машину по дням."""
+    uid = get_user_id(request)
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    params: list = []
-    conditions = ["num_vehicles > 0", "num_points > 0"]
+    params: list = [uid]
+    conditions = ["owner_id = %s", "num_vehicles > 0", "num_points > 0"]
     if date_from:
         conditions.append("date >= %s")
         params.append(date_from)
@@ -3869,7 +4019,8 @@ def get_analytics_vehicle_load(date_from: Optional[str] = None, date_to: Optiona
 
 
 @app.get("/api/analytics/top-stores")
-def get_top_stores():
+def get_top_stores(request: Request):
+    uid = get_user_id(request)
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
@@ -3879,10 +4030,11 @@ def get_top_stores():
             COUNT(rss.id) as visit_count
         FROM stores s
         LEFT JOIN route_session_stores rss ON rss.store_id = s.id
+        WHERE s.owner_id = %s
         GROUP BY s.id, s.name
         ORDER BY visit_count DESC
         LIMIT 10
-    """)
+    """, (uid,))
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -3894,6 +4046,160 @@ def get_top_stores():
         }
         for r in rows
     ]
+
+
+# ── Admin endpoints ────────────────────────────────────────────────────────────
+
+class AdminUserCreate(BaseModel):
+    username: str
+    password: str
+    is_admin: bool = False
+
+class AdminUserUpdate(BaseModel):
+    password: Optional[str] = None
+    is_admin: Optional[bool] = None
+    is_active: Optional[bool] = None
+
+
+@app.get("/api/admin/users")
+def admin_list_users(request: Request):
+    require_admin(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        SELECT u.id, u.username, u.is_admin, u.is_active, u.created_at, u.last_login_at,
+               COUNT(DISTINCT s.id) as stores_count,
+               COUNT(DISTINCT rs.id) as sessions_count
+        FROM users u
+        LEFT JOIN stores s ON s.owner_id = u.id
+        LEFT JOIN route_sessions rs ON rs.owner_id = u.id
+        GROUP BY u.id, u.username, u.is_admin, u.is_active, u.created_at, u.last_login_at
+        ORDER BY u.created_at DESC
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [
+        {
+            "id": r["id"],
+            "username": r["username"],
+            "is_admin": bool(r["is_admin"]),
+            "is_active": bool(r["is_active"]),
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "last_login_at": r["last_login_at"].isoformat() if r["last_login_at"] else None,
+            "stores_count": int(r["stores_count"] or 0),
+            "sessions_count": int(r["sessions_count"] or 0),
+        }
+        for r in rows
+    ]
+
+
+@app.post("/api/admin/users", status_code=201)
+def admin_create_user(request: Request, body: AdminUserCreate):
+    require_admin(request)
+    if not body.username.strip():
+        raise HTTPException(status_code=422, detail="Логин не может быть пустым")
+    if len(body.password) < 4:
+        raise HTTPException(status_code=422, detail="Пароль должен быть не менее 4 символов")
+    hashed = _bcrypt_lib.hashpw(body.password.encode(), _bcrypt_lib.gensalt()).decode()
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            "INSERT INTO users (username, password_hash, is_admin, is_active) VALUES (%s, %s, %s, %s) RETURNING id, username, is_admin, is_active, created_at",
+            (body.username.strip(), hashed, body.is_admin, True)
+        )
+        row = cur.fetchone()
+        conn.commit()
+        return {
+            "id": row["id"],
+            "username": row["username"],
+            "is_admin": bool(row["is_admin"]),
+            "is_active": bool(row["is_active"]),
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "stores_count": 0,
+            "sessions_count": 0,
+        }
+    except Exception as e:
+        conn.rollback()
+        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+            raise HTTPException(status_code=409, detail="Пользователь с таким логином уже существует")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.patch("/api/admin/users/{user_id}")
+def admin_update_user(user_id: int, request: Request, body: AdminUserUpdate):
+    require_admin(request)
+    current_uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT id, username, is_admin, is_active FROM users WHERE id = %s", (user_id,))
+    target = cur.fetchone()
+    if not target:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    # Prevent admin from deactivating or removing admin rights from themselves
+    if user_id == current_uid:
+        if body.is_active is False:
+            raise HTTPException(status_code=400, detail="Нельзя деактивировать свой аккаунт")
+        if body.is_admin is False:
+            raise HTTPException(status_code=400, detail="Нельзя снять права администратора у себя")
+    sets = []
+    params = []
+    if body.password is not None:
+        if len(body.password) < 4:
+            raise HTTPException(status_code=422, detail="Пароль должен быть не менее 4 символов")
+        hashed = _bcrypt_lib.hashpw(body.password.encode(), _bcrypt_lib.gensalt()).decode()
+        sets.append("password_hash = %s")
+        params.append(hashed)
+    if body.is_admin is not None:
+        sets.append("is_admin = %s")
+        params.append(body.is_admin)
+    if body.is_active is not None:
+        sets.append("is_active = %s")
+        params.append(body.is_active)
+    if not sets:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=422, detail="Нет полей для обновления")
+    params.append(user_id)
+    cur.execute(
+        f"UPDATE users SET {', '.join(sets)} WHERE id = %s RETURNING id, username, is_admin, is_active",
+        params
+    )
+    row = cur.fetchone()
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "is_admin": bool(row["is_admin"]),
+        "is_active": bool(row["is_active"]),
+    }
+
+
+@app.delete("/api/admin/users/{user_id}", status_code=200)
+def admin_delete_user(user_id: int, request: Request):
+    require_admin(request)
+    current_uid = get_user_id(request)
+    if user_id == current_uid:
+        raise HTTPException(status_code=400, detail="Нельзя удалить свой аккаунт")
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+    if cur.rowcount == 0:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"ok": True}
 
 
 # ── Production static file serving ────────────────────────────────────────────
