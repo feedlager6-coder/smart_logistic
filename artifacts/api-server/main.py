@@ -15,7 +15,7 @@ from typing import Optional
 import secrets
 import psycopg2
 import psycopg2.extras
-from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Depends, Request, Response
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
@@ -2742,9 +2742,110 @@ async def import_stores(file: UploadFile = File(...)):
     }
 
 
-def _import_process_content_sync(content_bytes: bytes, job: dict) -> None:
+def _normalize_for_dedup(s) -> str:
+    """Lowercase, trim, collapse whitespace — used as dedup key for (name, address)."""
+    import re as _re_dedup
+    return _re_dedup.sub(r'\s+', ' ', str(s or "").lower().strip())
+
+
+# ── Extended keyword lists (SmartRoute + 1C terms) ─────────────────────────
+_KWORDS_NAME    = ["контрагент", "клиент", "покупатель", "store name", "назван", "name", "store_name"]
+_KWORDS_ADDRESS = ["адрес доставки", "адрес", "address"]
+_KWORDS_CITY    = ["город", "city"]
+_KWORDS_YANDEX  = ["ссылка яндекс", "яндекс", "yandex", "ссылка"]
+_KWORDS_UNLOAD  = ["разгрузка", "unload"]
+_KWORDS_FROM    = ["время с", "open_time", "с (", "time_from"]
+_KWORDS_TO      = ["время до", "close_time", "до (", "time_to"]
+
+
+def _detect_col(header_lower: list, candidates: list) -> Optional[int]:
+    for kw in candidates:
+        for i, h in enumerate(header_lower):
+            if kw in h:
+                return i
+    return None
+
+
+@app.post("/api/stores/import/preview")
+async def preview_import(file: UploadFile = File(...)):
+    """Read Excel file, return columns + first rows + auto-detected column mapping.
+    Used by the frontend to show a mapping dialog before the actual import."""
+    if not OPENPYXL_AVAILABLE:
+        raise HTTPException(status_code=500, detail="openpyxl not installed")
+    content = await file.read()
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(content))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Не удалось открыть Excel файл: {e}")
+    ws = wb.active
+
+    raw_headers = list(next(ws.iter_rows(min_row=1, max_row=1, values_only=True), []))
+    columns = [str(c).strip() if c is not None else f"Колонка {i+1}" for i, c in enumerate(raw_headers)]
+    header_lower = [c.lower() for c in columns]
+
+    # Collect all data rows (skip ← hint rows)
+    all_data_rows = [
+        r for r in ws.iter_rows(min_row=2, values_only=True)
+        if r and any(c is not None for c in r)
+        and not str(r[0] or "").strip().startswith("←")
+    ]
+    total_rows = len(all_data_rows)
+
+    # First 5 rows for preview table
+    preview_rows = []
+    for row in all_data_rows[:5]:
+        preview_rows.append([
+            str(c).strip() if c is not None else ""
+            for c in list(row) + [""] * max(0, len(columns) - len(row))
+        ][:len(columns)])
+
+    # Auto-detect column mapping
+    c_name    = _detect_col(header_lower, _KWORDS_NAME)
+    c_address = _detect_col(header_lower, _KWORDS_ADDRESS)
+    c_city    = _detect_col(header_lower, _KWORDS_CITY)
+    c_yandex  = _detect_col(header_lower, _KWORDS_YANDEX)
+    c_unload  = _detect_col(header_lower, _KWORDS_UNLOAD)
+    c_from    = _detect_col(header_lower, _KWORDS_FROM)
+    c_to      = _detect_col(header_lower, _KWORDS_TO)
+
+    # Positional fallback for unrecognised headers (old SmartRoute template)
+    if c_name is None:
+        c_name = 0
+    if c_address is None and c_yandex is None and len(columns) > 1:
+        c_address = 1
+
+    # Count unique points after dedup (name + address) for info display
+    seen: set = set()
+    for row in all_data_rows:
+        def _gv(idx):
+            if idx is None or idx >= len(row): return ""
+            return str(row[idx] or "").strip()
+        n = _normalize_for_dedup(_gv(c_name))
+        a = _normalize_for_dedup(_gv(c_address))
+        if n:
+            seen.add((n, a))
+
+    return {
+        "columns": columns,
+        "rows": preview_rows,
+        "total_rows": total_rows,
+        "unique_count": len(seen),
+        "mapping": {
+            "name":    c_name,
+            "address": c_address,
+            "city":    c_city,
+            "yandex":  c_yandex,
+            "unload":  c_unload,
+            "tw_from": c_from,
+            "tw_to":   c_to,
+        },
+    }
+
+
+def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optional[dict] = None) -> None:
     """Run Excel import synchronously, updating job dict for progress tracking.
-    Called from background thread by /api/stores/import/start endpoint."""
+    Called from background thread by /api/stores/import/start endpoint.
+    mapping: optional dict with column indices {name, address, city, yandex, unload, tw_from, tw_to}."""
     if not OPENPYXL_AVAILABLE:
         job["error"] = "openpyxl not installed"
         job["done"] = True
@@ -2759,23 +2860,30 @@ def _import_process_content_sync(content_bytes: bytes, job: dict) -> None:
     ws = wb.active
     header_row = [str(c).strip().lower() if c else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True), [])]
 
-    def _col(candidates):
-        for name in candidates:
-            for i, h in enumerate(header_row):
-                if name in h:
-                    return i
-        return None
-
-    c_name   = _col(["назван", "name", "store_name"])
-    c_yandex = _col(["ссылка яндекс", "яндекс", "yandex", "ссылка"])
-    c_addr   = _col(["адрес", "address"])
-    c_city   = _col(["город", "city"])
-    c_lat    = _col(["широта", "lat", "latitude"])
-    c_lon    = _col(["долгота", "lon", "longitude"])
-    c_mapurl = _col(["map_url", "ссылка на карт"])
-    c_unload = _col(["разгрузка", "unload"])
-    c_from   = _col(["время с", "open_time", "с (", "time_from"])
-    c_to     = _col(["время до", "close_time", "до (", "time_to"])
+    # ── Column indices: use caller-supplied mapping, else auto-detect ──────────
+    if mapping:
+        c_name   = mapping.get("name")
+        c_yandex = mapping.get("yandex")
+        c_addr   = mapping.get("address")
+        c_city   = mapping.get("city")
+        c_unload = mapping.get("unload")
+        c_from   = mapping.get("tw_from")
+        c_to     = mapping.get("tw_to")
+        # lat/lon/mapurl always auto-detected (not exposed in mapping UI)
+        c_lat    = _detect_col(header_row, ["широта", "lat", "latitude"])
+        c_lon    = _detect_col(header_row, ["долгота", "lon", "longitude"])
+        c_mapurl = _detect_col(header_row, ["map_url", "ссылка на карт"])
+    else:
+        c_name   = _detect_col(header_row, _KWORDS_NAME)
+        c_yandex = _detect_col(header_row, _KWORDS_YANDEX)
+        c_addr   = _detect_col(header_row, _KWORDS_ADDRESS)
+        c_city   = _detect_col(header_row, _KWORDS_CITY)
+        c_lat    = _detect_col(header_row, ["широта", "lat", "latitude"])
+        c_lon    = _detect_col(header_row, ["долгота", "lon", "longitude"])
+        c_mapurl = _detect_col(header_row, ["map_url", "ссылка на карт"])
+        c_unload = _detect_col(header_row, _KWORDS_UNLOAD)
+        c_from   = _detect_col(header_row, _KWORDS_FROM)
+        c_to     = _detect_col(header_row, _KWORDS_TO)
 
     if c_name is None:
         c_name = 0
@@ -2792,18 +2900,36 @@ def _import_process_content_sync(content_bytes: bytes, job: dict) -> None:
         r for r in ws.iter_rows(min_row=2, values_only=True)
         if r and r[0] and not str(r[0]).strip().startswith("←")
     ]
-    total_rows = len(all_rows)
+
+    # ── Deduplication by (normalize(name), normalize(address)) ───────────────
+    # Typical 1C export: same store appears once per product line.
+    # We collapse all duplicate (name+address) pairs to a single row BEFORE geocoding.
+    seen_dedup: dict = {}
+    deduped_rows = []
+    for row in all_rows:
+        n_key = _normalize_for_dedup(_get(row, c_name, ""))
+        a_key = _normalize_for_dedup(_get(row, c_addr, ""))
+        key = (n_key, a_key)
+        if n_key and key not in seen_dedup:
+            seen_dedup[key] = True
+            deduped_rows.append(row)
+    skipped_dedup = len(all_rows) - len(deduped_rows)
+    if skipped_dedup:
+        logger.info("Import dedup: removed %d duplicate rows, %d unique points remain", skipped_dedup, len(deduped_rows))
+
+    total_rows = len(deduped_rows)
     job["total"] = total_rows
+    job["deduped"] = skipped_dedup
     imported, failed = 0, 0
     stores_out: list = []
     duplicates: list = []
 
-    for i, row in enumerate(all_rows, start=1):
-        name      = str(_get(row, c_name, "")).strip()
+    for i, row in enumerate(deduped_rows, start=1):
+        name       = str(_get(row, c_name, "")).strip()
         yandex_url = str(_get(row, c_yandex, "")).strip() or None
-        city      = str(_get(row, c_city, "")).strip()
-        raw_addr  = str(_get(row, c_addr, "")).strip()
-        address   = f"{city}, {raw_addr}" if city and city not in raw_addr else raw_addr
+        city       = str(_get(row, c_city, "")).strip()
+        raw_addr   = str(_get(row, c_addr, "")).strip()
+        address    = f"{city}, {raw_addr}" if city and city not in raw_addr else raw_addr
         if not address:
             address = city
 
@@ -2897,22 +3023,32 @@ def _import_process_content_sync(content_bytes: bytes, job: dict) -> None:
 
     job["stores"] = stores_out
     job["done"] = True
-    logger.info("Import job done: %d imported, %d failed, %d duplicates", imported, failed, len(duplicates))
+    logger.info("Import job done: %d imported, %d failed, %d duplicates, %d deduped",
+                imported, failed, len(duplicates), skipped_dedup)
 
 
 @app.post("/api/stores/import/start", status_code=202)
-async def start_import_stores(file: UploadFile = File(...)):
-    """Start async background import. Returns job_id for progress polling."""
+async def start_import_stores(file: UploadFile = File(...), mapping: Optional[str] = Form(None)):
+    """Start async background import. Returns job_id for progress polling.
+    mapping: optional JSON string with column indices {name, address, city, yandex, unload, tw_from, tw_to}."""
     if not OPENPYXL_AVAILABLE:
         raise HTTPException(status_code=500, detail="openpyxl not installed")
     content = await file.read()
+
+    parsed_mapping: Optional[dict] = None
+    if mapping:
+        try:
+            parsed_mapping = json.loads(mapping)
+        except Exception:
+            raise HTTPException(status_code=422, detail="mapping must be valid JSON")
+
     job_id = _uuid.uuid4().hex[:8]
     job: dict = {
         "total": 0, "processed": 0, "imported": 0, "failed": 0,
-        "done": False, "stores": [], "duplicates": [], "error": None,
+        "done": False, "stores": [], "duplicates": [], "error": None, "deduped": 0,
     }
     import_jobs[job_id] = job
-    t = threading.Thread(target=_import_process_content_sync, args=(content, job), daemon=True)
+    t = threading.Thread(target=_import_process_content_sync, args=(content, job, parsed_mapping), daemon=True)
     t.start()
     return {"job_id": job_id}
 

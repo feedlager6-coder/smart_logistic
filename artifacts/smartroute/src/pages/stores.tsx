@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store, ChevronDown, ChevronUp, ExternalLink, Link, Pencil } from "lucide-react";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useToast } from "@/hooks/use-toast";
+import { ImportMappingDialog } from "@/components/ImportMappingDialog";
 
 export function StoresPage() {
   const { data: storesData, isLoading } = useListStores();
@@ -27,6 +28,9 @@ export function StoresPage() {
   const [timeTo, setTimeTo] = useState("18:00");
   const [unloadMinutes, setUnloadMinutes] = useState("15");
   const [showSettings, setShowSettings] = useState(false);
+
+  // Import — mapping dialog state
+  const [pendingImportFile, setPendingImportFile] = useState<File | null>(null);
 
   // Import progress state
   const [importStatus, setImportStatus] = useState<string | null>(null);
@@ -199,26 +203,17 @@ export function StoresPage() {
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = "";
-
-    setImportLoading(true);
-    setImportStatus("Загружаю файл...");
-    setImportProgress(null);
-
-    const formData = new FormData();
-    formData.append("file", file);
-
-    fetch("/api/stores/import/start", { method: "POST", body: formData })
-      .then((r) => r.json())
-      .then(({ job_id }) => {
-        setImportStatus("Геокодирую адреса...");
-        pollImportJob(job_id);
-      })
-      .catch(() => {
-        setImportLoading(false);
-        setImportStatus(null);
-        toast({ title: "Ошибка импорта", description: "Не удалось начать импорт", variant: "destructive" });
-      });
+    // Show mapping dialog — actual import starts from the dialog
+    setPendingImportFile(file);
   };
+
+  const handleImportStarted = useCallback((jobId: string) => {
+    setPendingImportFile(null);
+    setImportLoading(true);
+    setImportStatus("Геокодирую адреса...");
+    setImportProgress(null);
+    pollImportJob(jobId);
+  }, [pollImportJob]);
 
   const handleDownloadTemplate = async () => {
     try {
@@ -328,6 +323,15 @@ export function StoresPage() {
           </Label>
         </div>
       </div>
+
+      {/* Mapping dialog — shown after file selection, before import starts */}
+      {pendingImportFile && (
+        <ImportMappingDialog
+          file={pendingImportFile}
+          onClose={() => setPendingImportFile(null)}
+          onImportStarted={handleImportStarted}
+        />
+      )}
 
       {/* Import progress banner */}
       {importStatus && (
