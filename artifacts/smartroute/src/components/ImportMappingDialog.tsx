@@ -2,11 +2,13 @@ import { useState, useEffect } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2, AlertCircle, Info } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 
 const LS_KEY = "smartroute_import_mapping";
+const LS_CITY_KEY = "smartroute_import_default_city";
 
 interface MappingState {
   name: number | null;
@@ -35,7 +37,7 @@ interface Props {
 const FIELD_LABELS: { key: keyof MappingState; label: string; required: boolean }[] = [
   { key: "name",    label: "Название магазина",       required: true  },
   { key: "address", label: "Адрес",                   required: false },
-  { key: "city",    label: "Город",                   required: false },
+  { key: "city",    label: "Город (колонка)",          required: false },
   { key: "yandex",  label: "Ссылка Яндекс",           required: false },
   { key: "unload",  label: "Время разгрузки (мин)",   required: false },
   { key: "tw_from", label: "Временное окно — с",      required: false },
@@ -80,6 +82,9 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
     name: null, address: null, city: null, yandex: null,
     unload: null, tw_from: null, tw_to: null,
   });
+  const [defaultCity, setDefaultCity] = useState<string>(() => {
+    try { return localStorage.getItem(LS_CITY_KEY) ?? ""; } catch { return ""; }
+  });
   const [importing, setImporting] = useState(false);
 
   useEffect(() => {
@@ -93,13 +98,11 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
       .then((data: PreviewData) => {
         setPreview(data);
 
-        // Merge auto-detected mapping with last saved mapping from localStorage
         let merged: MappingState = { ...data.mapping };
         try {
           const saved = localStorage.getItem(LS_KEY);
           if (saved) {
             const parsed = JSON.parse(saved) as Partial<MappingState>;
-            // Only apply saved if columns count matches (same file format)
             merged = { ...merged, ...parsed };
           }
         } catch {}
@@ -120,14 +123,19 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
     if (mapping.name === null) return;
     setImporting(true);
 
-    // Save mapping to localStorage for next time
     try {
       localStorage.setItem(LS_KEY, JSON.stringify(mapping));
+      localStorage.setItem(LS_CITY_KEY, defaultCity.trim());
     } catch {}
+
+    const fullMapping = {
+      ...mapping,
+      default_city: defaultCity.trim() || null,
+    };
 
     const fd = new FormData();
     fd.append("file", file);
-    fd.append("mapping", JSON.stringify(mapping));
+    fd.append("mapping", JSON.stringify(fullMapping));
 
     fetch("/api/stores/import/start", { method: "POST", body: fd })
       .then((r) => r.json())
@@ -141,12 +149,13 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
   };
 
   const deduped = preview ? preview.total_rows - preview.unique_count : 0;
+  const cityColSelected = mapping.city !== null;
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Настройка импорта Excel</DialogTitle>
+          <DialogTitle>Настройка импорта Excel / 1С</DialogTitle>
           <DialogDescription>
             Проверьте, какие колонки файла соответствуют полям SmartRoute.
           </DialogDescription>
@@ -184,6 +193,18 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
               )}
             </div>
 
+            {/* Info hint */}
+            <div className="flex gap-2 rounded-lg border border-blue-200 bg-blue-50 dark:border-blue-900 dark:bg-blue-950/40 p-3 text-sm text-blue-800 dark:text-blue-200">
+              <Info className="w-4 h-4 mt-0.5 shrink-0 text-blue-500" />
+              <div className="space-y-1">
+                <p className="font-medium">Для максимальной точности геокодинга рекомендуется:</p>
+                <ul className="list-disc list-inside space-y-0.5 text-blue-700 dark:text-blue-300">
+                  <li>указывать город (колонку или поле ниже);</li>
+                  <li>добавить ссылку Яндекс.Карт, если она есть в выгрузке.</li>
+                </ul>
+              </div>
+            </div>
+
             {/* Mapping selects */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {FIELD_LABELS.map(({ key, label, required }) => (
@@ -199,6 +220,27 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
                   />
                 </div>
               ))}
+            </div>
+
+            {/* Default city input — shown when no city column is selected */}
+            <div className="space-y-1.5">
+              <Label htmlFor="default-city" className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                Город по умолчанию
+                {cityColSelected && (
+                  <span className="ml-2 text-[10px] normal-case font-normal text-muted-foreground/60">(колонка выбрана — поле игнорируется)</span>
+                )}
+              </Label>
+              <Input
+                id="default-city"
+                value={defaultCity}
+                onChange={(e) => setDefaultCity(e.target.value)}
+                placeholder="Например: Махачкала"
+                disabled={cityColSelected}
+                className="h-8 text-sm"
+              />
+              <p className="text-[11px] text-muted-foreground">
+                Используется, если в файле нет колонки с городом. Адрес будет передан как «{defaultCity.trim() || "Город"}, улица дом».
+              </p>
             </div>
 
             {mapping.name === null && (

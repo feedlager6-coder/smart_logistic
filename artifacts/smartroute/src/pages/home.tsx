@@ -1,5 +1,5 @@
 import { useGetAnalyticsSummary } from "@workspace/api-client-react";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Link } from "wouter";
 import { 
@@ -11,7 +11,11 @@ import {
   Box,
   MapPin,
   CheckCircle2,
-  BarChart3
+  BarChart3,
+  FileSpreadsheet,
+  Navigation,
+  Users,
+  Zap
 } from "lucide-react";
 
 export function HomePage() {
@@ -30,11 +34,11 @@ export function HomePage() {
         
         <div className="space-y-4 max-w-3xl relative z-10 px-4">
           <h1 className="text-4xl md:text-6xl font-extrabold tracking-tight text-foreground">
-            SmartRoute — умная логистика <br className="hidden md:inline" />
-            <span className="text-primary">для вашего бизнеса</span>
+            SmartRoute — автоматическая<br className="hidden md:inline" />
+            <span className="text-primary"> маршрутизация доставки</span>
           </h1>
           <p className="text-lg md:text-xl text-muted-foreground max-w-2xl mx-auto">
-            Оптимизируйте доставку, снижайте транспортные расходы и управляйте автопарком в единой профессиональной платформе.
+            Загружайте заявки из Excel или 1С — система мгновенно распределит точки между водителями и отправит маршруты прямо в Яндекс Навигатор.
           </p>
         </div>
 
@@ -42,7 +46,7 @@ export function HomePage() {
           <Link href="/route">
             <Button size="lg" className="h-12 px-8 text-base shadow-lg shadow-primary/20 gap-2">
               <Map className="w-5 h-5" />
-              Начать работу
+              Построить маршруты
             </Button>
           </Link>
           <Link href="/stores">
@@ -109,35 +113,68 @@ export function HomePage() {
       </section>
 
       {/* Features */}
-      <section className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="p-6 bg-card border border-border rounded-2xl space-y-4">
-          <div className="w-12 h-12 bg-primary/10 text-primary rounded-xl flex items-center justify-center">
-            <TrendingDown className="w-6 h-6" />
+      <section className="space-y-4">
+        <h2 className="text-2xl font-bold tracking-tight">Как это работает</h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="p-6 bg-card border border-border rounded-2xl space-y-4">
+            <div className="w-12 h-12 bg-primary/10 text-primary rounded-xl flex items-center justify-center">
+              <FileSpreadsheet className="w-6 h-6" />
+            </div>
+            <h3 className="text-xl font-semibold">Импорт Excel и 1С</h3>
+            <p className="text-muted-foreground leading-relaxed">
+              Загружайте выгрузку из любой системы — SmartRoute автоматически определит колонки и дедуплицирует заявки. Поддержка форматов 1С, Excel и ссылок Яндекс.Карт.
+            </p>
           </div>
-          <h3 className="text-xl font-semibold">До 30% экономии топлива</h3>
-          <p className="text-muted-foreground leading-relaxed">
-            Наш алгоритм строит оптимальные маршруты, минимизируя холостой пробег и перекрестные поездки.
-          </p>
-        </div>
 
-        <div className="p-6 bg-card border border-border rounded-2xl space-y-4">
-          <div className="w-12 h-12 bg-primary/10 text-primary rounded-xl flex items-center justify-center">
-            <Truck className="w-6 h-6" />
+          <div className="p-6 bg-card border border-border rounded-2xl space-y-4">
+            <div className="w-12 h-12 bg-primary/10 text-primary rounded-xl flex items-center justify-center">
+              <Users className="w-6 h-6" />
+            </div>
+            <h3 className="text-xl font-semibold">Автораспределение по водителям</h3>
+            <p className="text-muted-foreground leading-relaxed">
+              Поддержка от 1 до 50 машин. Алгоритм OR-Tools автоматически распределяет точки с учётом временных окон, нагрузки и географии района.
+            </p>
           </div>
-          <h3 className="text-xl font-semibold">Поддержка 1-50 авто</h3>
-          <p className="text-muted-foreground leading-relaxed">
-            Автоматическое распределение точек между машинами с учетом их грузоподъемности и габаритов.
-          </p>
-        </div>
 
-        <div className="p-6 bg-card border border-border rounded-2xl space-y-4">
-          <div className="w-12 h-12 bg-primary/10 text-primary rounded-xl flex items-center justify-center">
-            <Clock className="w-6 h-6" />
+          <div className="p-6 bg-card border border-border rounded-2xl space-y-4">
+            <div className="w-12 h-12 bg-primary/10 text-primary rounded-xl flex items-center justify-center">
+              <Navigation className="w-6 h-6" />
+            </div>
+            <h3 className="text-xl font-semibold">Яндекс Навигатор + WhatsApp</h3>
+            <p className="text-muted-foreground leading-relaxed">
+              Готовый маршрут открывается в Яндекс Навигаторе одним нажатием. Отправка водителю через WhatsApp — без ввода адресов вручную.
+            </p>
           </div>
-          <h3 className="text-xl font-semibold">Окна доставки</h3>
-          <p className="text-muted-foreground leading-relaxed">
-            Учет времени работы магазинов и времени на разгрузку. Водитель приедет точно в срок.
-          </p>
+
+          <div className="p-6 bg-card border border-border rounded-2xl space-y-4">
+            <div className="w-12 h-12 bg-primary/10 text-primary rounded-xl flex items-center justify-center">
+              <Zap className="w-6 h-6" />
+            </div>
+            <h3 className="text-xl font-semibold">Быстрый расчёт</h3>
+            <p className="text-muted-foreground leading-relaxed">
+              Маршруты для 100 точек и 9 машин строятся за 20–30 секунд. Реальные дороги через OSRM, умная пост-оптимизация сокращает пробег на 15–40%.
+            </p>
+          </div>
+
+          <div className="p-6 bg-card border border-border rounded-2xl space-y-4">
+            <div className="w-12 h-12 bg-primary/10 text-primary rounded-xl flex items-center justify-center">
+              <Clock className="w-6 h-6" />
+            </div>
+            <h3 className="text-xl font-semibold">Временные окна</h3>
+            <p className="text-muted-foreground leading-relaxed">
+              Учёт времени работы магазинов и времени на разгрузку. Ориентировочное время прибытия в каждую точку рассчитывается автоматически.
+            </p>
+          </div>
+
+          <div className="p-6 bg-card border border-border rounded-2xl space-y-4">
+            <div className="w-12 h-12 bg-emerald-500/10 text-emerald-600 rounded-xl flex items-center justify-center">
+              <TrendingDown className="w-6 h-6" />
+            </div>
+            <h3 className="text-xl font-semibold">До 30% экономии топлива</h3>
+            <p className="text-muted-foreground leading-relaxed">
+              Оптимизация маршрутов минимизирует холостой пробег. Встроенная аналитика показывает сэкономленные километры и рубли за любой период.
+            </p>
+          </div>
         </div>
       </section>
     </div>

@@ -301,7 +301,7 @@ export function StoresPage() {
         <div className="flex items-center gap-2 flex-wrap">
           <Button variant="outline" size="sm" onClick={handleDownloadTemplate}>
             <Download className="w-4 h-4 mr-2" />
-            Скачать шаблон
+            Скачать шаблон SmartRoute
           </Button>
           <Label htmlFor="import-file" className="cursor-pointer">
             <div className={`flex items-center gap-2 h-9 px-3 rounded-md font-medium text-sm transition-colors border ${importLoading ? "opacity-60 pointer-events-none bg-muted text-muted-foreground" : "bg-secondary text-secondary-foreground hover:bg-secondary/80"}`}>
@@ -310,7 +310,7 @@ export function StoresPage() {
               ) : (
                 <Upload className="w-4 h-4" />
               )}
-              Импорт из Excel
+              Импорт Excel / 1С
             </div>
             <input
               id="import-file"

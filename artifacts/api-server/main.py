@@ -2862,18 +2862,20 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
 
     # ── Column indices: use caller-supplied mapping, else auto-detect ──────────
     if mapping:
-        c_name   = mapping.get("name")
-        c_yandex = mapping.get("yandex")
-        c_addr   = mapping.get("address")
-        c_city   = mapping.get("city")
-        c_unload = mapping.get("unload")
-        c_from   = mapping.get("tw_from")
-        c_to     = mapping.get("tw_to")
+        c_name      = mapping.get("name")
+        c_yandex    = mapping.get("yandex")
+        c_addr      = mapping.get("address")
+        c_city      = mapping.get("city")
+        c_unload    = mapping.get("unload")
+        c_from      = mapping.get("tw_from")
+        c_to        = mapping.get("tw_to")
+        default_city = str(mapping.get("default_city") or "").strip()
         # lat/lon/mapurl always auto-detected (not exposed in mapping UI)
         c_lat    = _detect_col(header_row, ["широта", "lat", "latitude"])
         c_lon    = _detect_col(header_row, ["долгота", "lon", "longitude"])
         c_mapurl = _detect_col(header_row, ["map_url", "ссылка на карт"])
     else:
+        default_city = ""
         c_name   = _detect_col(header_row, _KWORDS_NAME)
         c_yandex = _detect_col(header_row, _KWORDS_YANDEX)
         c_addr   = _detect_col(header_row, _KWORDS_ADDRESS)
@@ -2927,7 +2929,7 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
     for i, row in enumerate(deduped_rows, start=1):
         name       = str(_get(row, c_name, "")).strip()
         yandex_url = str(_get(row, c_yandex, "")).strip() or None
-        city       = str(_get(row, c_city, "")).strip()
+        city       = str(_get(row, c_city, "")).strip() or default_city
         raw_addr   = str(_get(row, c_addr, "")).strip()
         address    = f"{city}, {raw_addr}" if city and city not in raw_addr else raw_addr
         if not address:

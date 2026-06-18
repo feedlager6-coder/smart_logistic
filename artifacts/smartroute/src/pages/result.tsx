@@ -6,6 +6,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check, AlertTriangle, Printer, Info, Settings } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap } from "react-leaflet";
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
@@ -206,7 +207,18 @@ export function ResultPage() {
                 <p className="font-semibold text-base leading-tight truncate">{stop.store_name}</p>
                 <p className="text-sm text-muted-foreground mt-0.5 truncate">{stop.address}</p>
                 {stop.arrive_by && (
-                  <p className="text-sm text-primary font-medium mt-1">⏱ {stop.arrive_by}</p>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <p className="text-sm text-primary font-medium mt-1 cursor-help inline-flex items-center gap-1">
+                          ⏱ Ориент. {stop.arrive_by}
+                        </p>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs text-xs">
+                        Время рассчитано автоматически и является приблизительным. Точное время определяется навигатором водителя с учётом текущей дорожной ситуации.
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
                 )}
               </div>
             </div>
@@ -522,15 +534,24 @@ export function ResultPage() {
                   </div>
                   <div className="flex items-center gap-4 text-sm text-muted-foreground mt-2">
                     <span className="flex items-center gap-1"><MapPin className="w-4 h-4" /> {Math.round(route.total_km)} км</span>
-                    {(route as any).service_minutes > 0 ? (
-                      <span className="flex items-center gap-1" title={`Езда: ${(route as any).drive_minutes ?? 0} мин + Обслуживание: ${(route as any).service_minutes} мин`}>
-                        <Clock className="w-4 h-4" />
-                        {Math.floor((route.estimated_minutes ?? 0) / 60)} ч {(route.estimated_minutes ?? 0) % 60} мин
-                        <span className="text-xs text-muted-foreground/70 ml-1">(езда {(route as any).drive_minutes ?? 0} мин)</span>
-                      </span>
-                    ) : (
-                      <span className="flex items-center gap-1"><Clock className="w-4 h-4" /> ~{Math.floor((route.estimated_minutes ?? 0) / 60)} ч {(route.estimated_minutes ?? 0) % 60} мин</span>
-                    )}
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          {(route as any).service_minutes > 0 ? (
+                            <span className="flex items-center gap-1 cursor-help">
+                              <Clock className="w-4 h-4" />
+                              {Math.floor((route.estimated_minutes ?? 0) / 60)} ч {(route.estimated_minutes ?? 0) % 60} мин
+                              <span className="text-xs text-muted-foreground/70 ml-1">(езда {(route as any).drive_minutes ?? 0} мин)</span>
+                            </span>
+                          ) : (
+                            <span className="flex items-center gap-1 cursor-help"><Clock className="w-4 h-4" /> ~{Math.floor((route.estimated_minutes ?? 0) / 60)} ч {(route.estimated_minutes ?? 0) % 60} мин</span>
+                          )}
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-xs text-xs">
+                          Ориентировочное время маршрута. Рассчитано автоматически, точное время определяется навигатором водителя.
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                   </div>
                 </CardHeader>
                 <CardContent className="p-0 flex-1">
@@ -548,9 +569,18 @@ export function ResultPage() {
                             <p className="font-medium text-sm leading-none truncate">{stop.store_name}</p>
                             <p className="text-xs text-muted-foreground truncate">{stop.address}</p>
                             {stop.arrive_by && (
-                              <p className="text-xs text-emerald-600 font-medium mt-1">
-                                Прибытие: {stop.arrive_by}
-                              </p>
+                              <TooltipProvider>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <p className="text-xs text-emerald-600 font-medium mt-1 cursor-help">
+                                      Ориент. прибытие: {stop.arrive_by}
+                                    </p>
+                                  </TooltipTrigger>
+                                  <TooltipContent className="max-w-xs text-xs">
+                                    Время рассчитано автоматически и является приблизительным. Точное время определяется навигатором водителя с учётом текущей дорожной ситуации.
+                                  </TooltipContent>
+                                </Tooltip>
+                              </TooltipProvider>
                             )}
                           </div>
                         </div>
