@@ -2995,8 +2995,9 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
             if nearby:
                 near = nearby[0]
                 dup_warning = {
-                    "row": i, "name": name,
+                    "row": i, "name": name, "address": address,
                     "existing_id": near["id"], "existing_name": near["name"],
+                    "existing_address": near.get("address") or "",
                     "dist_m": round(float(near["dist_m"]), 1),
                 }
 
@@ -3013,6 +3014,7 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
             stores_out.append(store_row_to_dict(db_row))
             imported += 1
             if dup_warning:
+                dup_warning["new_store_id"] = db_row["id"]
                 duplicates.append(dup_warning)
         except Exception as e:
             logger.error("Import job row %d failed: %s", i, e)
@@ -3023,10 +3025,16 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
         job["failed"] = failed
         job["duplicates"] = duplicates
 
+    geocoded_found = sum(1 for s in stores_out if s.get("geocode_status") == "found")
+    geocoded_not_found = sum(1 for s in stores_out if s.get("geocode_status") != "found")
+
     job["stores"] = stores_out
+    job["geocoded_found"] = geocoded_found
+    job["geocoded_not_found"] = geocoded_not_found
+    job["deduped"] = skipped_dedup
     job["done"] = True
-    logger.info("Import job done: %d imported, %d failed, %d duplicates, %d deduped",
-                imported, failed, len(duplicates), skipped_dedup)
+    logger.info("Import job done: %d imported (%d geocoded, %d no-coords), %d failed, %d duplicates, %d deduped",
+                imported, geocoded_found, geocoded_not_found, failed, len(duplicates), skipped_dedup)
 
 
 @app.post("/api/stores/import/start", status_code=202)
@@ -3085,6 +3093,9 @@ def get_import_result(job_id: str):
         "failed": job["failed"],
         "stores": job.get("stores", []),
         "duplicates": job.get("duplicates", []),
+        "deduped": job.get("deduped", 0),
+        "geocoded_found": job.get("geocoded_found", 0),
+        "geocoded_not_found": job.get("geocoded_not_found", 0),
         "done": job["done"],
         "error": job.get("error"),
     }

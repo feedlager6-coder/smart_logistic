@@ -11,6 +11,7 @@ import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store, Chevron
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useToast } from "@/hooks/use-toast";
 import { ImportMappingDialog } from "@/components/ImportMappingDialog";
+import { ImportResultDialog, type ImportResult } from "@/components/ImportResultDialog";
 
 export function StoresPage() {
   const { data: storesData, isLoading } = useListStores();
@@ -36,8 +37,9 @@ export function StoresPage() {
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [importLoading, setImportLoading] = useState(false);
   const [importProgress, setImportProgress] = useState<{ total: number; processed: number; imported: number; failed: number } | null>(null);
+  const [importResult, setImportResult] = useState<ImportResult | null>(null);
 
-  // Duplicate warning state
+  // Single-store duplicate warning state (manual add)
   const [dupWarning, setDupWarning] = useState<{
     message: string;
     existing: { id: number; name: string; address: string; dist_m: number };
@@ -184,19 +186,24 @@ export function StoresPage() {
               setImportLoading(false);
               setImportStatus(null);
               setImportProgress(null);
-              const dupMsg = (result.duplicates?.length ?? 0) > 0
-                ? `, найдено ${result.duplicates.length} возможных дубликатов`
-                : "";
-              toast({
-                title: "Импорт завершён",
-                description: `Загружено ${result.imported} из ${result.total} строк${result.failed > 0 ? `, ошибок: ${result.failed}` : ""}${dupMsg}.`,
-              });
               queryClient.invalidateQueries({ queryKey: getListStoresQueryKey() });
+              // Show detailed result dialog (geocoding stats + duplicates)
+              setImportResult(result as ImportResult);
             })
             .catch(() => { setImportLoading(false); setImportStatus(null); setImportProgress(null); });
         }
       })
       .catch(() => setTimeout(() => pollImportJob(job_id), 1500));
+  }, [queryClient]);
+
+  const handleDeleteDuplicates = useCallback(async (ids: number[]) => {
+    await Promise.all(
+      ids.map((id) =>
+        fetch(`/api/stores/${id}`, { method: "DELETE" }).catch(() => {})
+      )
+    );
+    queryClient.invalidateQueries({ queryKey: getListStoresQueryKey() });
+    toast({ title: `Удалено ${ids.length} дублирующих точек` });
   }, [queryClient, toast]);
 
   const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -330,6 +337,15 @@ export function StoresPage() {
           file={pendingImportFile}
           onClose={() => setPendingImportFile(null)}
           onImportStarted={handleImportStarted}
+        />
+      )}
+
+      {/* Import result dialog — geocoding stats + duplicates resolution */}
+      {importResult && (
+        <ImportResultDialog
+          result={importResult}
+          onClose={() => setImportResult(null)}
+          onDeleteDuplicates={handleDeleteDuplicates}
         />
       )}
 

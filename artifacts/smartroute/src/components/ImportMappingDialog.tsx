@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Loader2, AlertCircle, Info } from "lucide-react";
+import { Loader2, AlertCircle, Info, Clock, AlertTriangle } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 
 const LS_KEY = "smartroute_import_mapping";
@@ -43,6 +43,15 @@ const FIELD_LABELS: { key: keyof MappingState; label: string; required: boolean 
   { key: "tw_from", label: "Временное окно — с",      required: false },
   { key: "tw_to",   label: "Временное окно — до",     required: false },
 ];
+
+function getEtaLabel(count: number): string {
+  if (count <= 30) return "менее 30 сек";
+  if (count <= 80) return "около 1 мин";
+  if (count <= 150) return "1–2 мин";
+  if (count <= 250) return "2–4 мин";
+  if (count <= 400) return "4–7 мин";
+  return "7–12 мин";
+}
 
 function ColSelect({
   value,
@@ -86,6 +95,7 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
     try { return localStorage.getItem(LS_CITY_KEY) ?? ""; } catch { return ""; }
   });
   const [importing, setImporting] = useState(false);
+  const [showCityWarning, setShowCityWarning] = useState(false);
 
   useEffect(() => {
     const fd = new FormData();
@@ -117,9 +127,14 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
 
   const setField = (key: keyof MappingState, val: number | null) => {
     setMapping((prev) => ({ ...prev, [key]: val }));
+    // Reset city warning if user picks a city column or changes anything
+    if (key === "city") setShowCityWarning(false);
   };
 
-  const handleImport = () => {
+  const cityColSelected = mapping.city !== null;
+  const hasCityInfo = cityColSelected || defaultCity.trim().length > 0;
+
+  const startImport = () => {
     if (mapping.name === null) return;
     setImporting(true);
 
@@ -148,8 +163,18 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
       });
   };
 
+  const handleImport = () => {
+    if (mapping.name === null) return;
+    // Warn if no city info — but don't block, just show alert first
+    if (!hasCityInfo && !showCityWarning) {
+      setShowCityWarning(true);
+      return;
+    }
+    startImport();
+  };
+
   const deduped = preview ? preview.total_rows - preview.unique_count : 0;
-  const cityColSelected = mapping.city !== null;
+  const eta = preview ? getEtaLabel(preview.unique_count) : null;
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -178,17 +203,23 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
         {preview && !loading && (
           <div className="space-y-5">
             {/* Stats row */}
-            <div className="flex flex-wrap gap-4 text-sm">
+            <div className="flex flex-wrap gap-4 text-sm items-center">
               <span className="text-muted-foreground">
                 Строк в файле: <b className="text-foreground">{preview.total_rows}</b>
               </span>
               <span className="text-muted-foreground">
-                Уникальных точек после дедупликации: <b className="text-foreground">{preview.unique_count}</b>
+                Уникальных точек: <b className="text-foreground">{preview.unique_count}</b>
               </span>
               {deduped > 0 && (
                 <span className="flex items-center gap-1 text-amber-600">
                   <Info className="w-3.5 h-3.5" />
                   {deduped} дубликат{deduped === 1 ? "" : deduped < 5 ? "а" : "ов"} объединено
+                </span>
+              )}
+              {eta && (
+                <span className="flex items-center gap-1 text-muted-foreground">
+                  <Clock className="w-3.5 h-3.5" />
+                  Ожидаемое время: <b className="text-foreground ml-1">{eta}</b>
                 </span>
               )}
             </div>
@@ -233,7 +264,7 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
               <Input
                 id="default-city"
                 value={defaultCity}
-                onChange={(e) => setDefaultCity(e.target.value)}
+                onChange={(e) => { setDefaultCity(e.target.value); setShowCityWarning(false); }}
                 placeholder="Например: Махачкала"
                 disabled={cityColSelected}
                 className="h-8 text-sm"
@@ -242,6 +273,18 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
                 Используется, если в файле нет колонки с городом. Адрес будет передан как «{defaultCity.trim() || "Город"}, улица дом».
               </p>
             </div>
+
+            {/* City warning — shown when user tries to import without city */}
+            {showCityWarning && !hasCityInfo && (
+              <Alert className="border-amber-300 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-700">
+                <AlertTriangle className="w-4 h-4 text-amber-600" />
+                <AlertDescription className="text-amber-800 dark:text-amber-300">
+                  <span className="font-semibold">Город не указан.</span> Без города геокодирование может дать неточные результаты — адреса могут найтись в другом городе или вовсе не найтись.
+                  <br />
+                  <span className="text-sm">Укажите город выше или нажмите «Продолжить без города».</span>
+                </AlertDescription>
+              </Alert>
+            )}
 
             {mapping.name === null && (
               <Alert variant="destructive" className="py-2">
@@ -287,6 +330,16 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
           <Button variant="outline" onClick={onClose} disabled={importing}>
             Отмена
           </Button>
+          {showCityWarning && !hasCityInfo ? (
+            <Button
+              variant="outline"
+              onClick={startImport}
+              disabled={importing || mapping.name === null}
+              className="border-amber-400 text-amber-800 hover:bg-amber-50 dark:text-amber-300 dark:hover:bg-amber-950/40"
+            >
+              Продолжить без города
+            </Button>
+          ) : null}
           <Button
             onClick={handleImport}
             disabled={loading || !!error || importing || mapping.name === null}
@@ -296,6 +349,8 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
                 <Loader2 className="w-4 h-4 animate-spin mr-2" />
                 Запускаю...
               </>
+            ) : showCityWarning && !hasCityInfo ? (
+              "Указать город"
             ) : (
               `Начать импорт (${preview?.unique_count ?? "?"} точек)`
             )}
