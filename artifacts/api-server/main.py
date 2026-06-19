@@ -1418,6 +1418,22 @@ def init_db():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_admin ON admin_audit_log(admin_user_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created ON admin_audit_log(created_at DESC)")
+    # ── Persistent geocoding cache ─────────────────────────────────────────────
+    # Replaces ephemeral in-memory dict; survives restarts, prevents redundant
+    # Yandex API calls on re-import. Only successful results (lat/lon != NULL)
+    # are stored. Admins can purge individual entries to force re-geocode.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS geocode_cache (
+            id SERIAL PRIMARY KEY,
+            normalized_address TEXT NOT NULL UNIQUE,
+            lat DOUBLE PRECISION NOT NULL,
+            lon DOUBLE PRECISION NOT NULL,
+            source TEXT DEFAULT 'unknown',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_geocode_cache_addr ON geocode_cache(normalized_address)")
     conn.commit()
     cur.close()
     conn.close()
@@ -1840,23 +1856,72 @@ def geocode_address_nominatim(address: str) -> Optional[tuple]:
     return None
 
 
+def _geocache_db_lookup(cache_key: str) -> Optional[tuple]:
+    """Check persistent DB geocoding cache. Returns (lat, lon) or None."""
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT lat, lon FROM geocode_cache WHERE normalized_address = %s LIMIT 1", (cache_key,))
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        if row:
+            return (float(row["lat"]), float(row["lon"]))
+    except Exception as e:
+        logger.debug("geocache_db_lookup error: %s", e)
+    return None
+
+
+def _geocache_db_store(cache_key: str, lat: float, lon: float, source: str = "unknown"):
+    """Store successful geocoding result in persistent DB cache."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO geocode_cache (normalized_address, lat, lon, source, updated_at)
+               VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+               ON CONFLICT (normalized_address)
+               DO UPDATE SET lat=EXCLUDED.lat, lon=EXCLUDED.lon,
+                             source=EXCLUDED.source, updated_at=CURRENT_TIMESTAMP""",
+            (cache_key, lat, lon, source)
+        )
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        logger.debug("geocache_db_store error: %s", e)
+
+
 def geocode_address(address: str) -> Optional[tuple]:
     """
     Geocode an address, trying Yandex Geocoder first (fast, no rate limit),
-    then falling back to Nominatim.  Results are cached in-memory.
+    then falling back to Nominatim.
+    Lookup order: in-memory cache → persistent DB cache → Yandex → Nominatim.
+    Only successful results are stored (never caches 'not found').
     """
     cache_key = address.strip().lower()
+
+    # ── Level 1: in-memory cache (fastest, ephemeral) ────────────────────────
     if cache_key in geocode_cache:
         return geocode_cache[cache_key]
 
-    # ── Primary: Yandex Geocoder ──────────────────────────────────────────────
-    result = geocode_address_yandex(address)
+    # ── Level 2: persistent DB cache (survives restarts) ─────────────────────
+    db_hit = _geocache_db_lookup(cache_key)
+    if db_hit is not None:
+        geocode_cache[cache_key] = db_hit
+        return db_hit
 
-    # ── Fallback: Nominatim ───────────────────────────────────────────────────
+    # ── Level 3: Yandex Geocoder ─────────────────────────────────────────────
+    result = geocode_address_yandex(address)
+    source = "yandex"
+
+    # ── Level 4: Nominatim fallback ───────────────────────────────────────────
     if result is None:
         result = geocode_address_nominatim(address)
+        source = "nominatim"
 
+    # Cache result in memory always; persist to DB only on success
     geocode_cache[cache_key] = result
+    if result is not None:
+        _geocache_db_store(cache_key, result[0], result[1], source)
+
     return result
 
 
@@ -3098,22 +3163,95 @@ async def preview_import(request: Request, file: UploadFile = File(...)):
             seen.add((n, a))
 
     # ── Cross-check against existing DB stores for this user ─────────────────
-    # Count how many of the unique (name, address) pairs from the file already
-    # exist in the database. This lets the UI warn before importing duplicates.
+    # For each unique file row, check multiple identity signals:
+    #   1. name + address  → "name_address" (strong, likely duplicate)
+    #   2. address only    → "address_only" (same building, different tenant — NOT auto-dup)
+    #   3. Yandex URL      → "yandex_url"   (same link, strong signal)
+    # Returns per-row matches so the UI can explain WHY each row is flagged.
+    matches: list = []
     existing_count = 0
     try:
         conn_p = get_db()
         cur_p = conn_p.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur_p.execute("SELECT name, address FROM stores WHERE owner_id = %s", (uid,))
+        cur_p.execute("SELECT id, name, address, map_url FROM stores WHERE owner_id = %s", (uid,))
         db_rows = cur_p.fetchall()
         cur_p.close(); conn_p.close()
-        db_keys: set = set()
+
+        # Build lookup maps
+        db_by_name_addr: dict = {}   # (norm_name, norm_addr) → {id, name, address}
+        db_by_addr: dict = {}        # norm_addr → list of {id, name, address}
+        db_by_yandex: dict = {}      # normalized url → {id, name, address}
         for dbr in db_rows:
             dn = _normalize_for_dedup(dbr["name"] or "")
             da = _normalize_for_dedup(dbr["address"] or "")
+            store_ref = {"id": dbr["id"], "name": dbr["name"], "address": dbr["address"]}
             if dn:
-                db_keys.add((dn, da))
-        existing_count = sum(1 for key in seen if key in db_keys)
+                db_by_name_addr[(dn, da)] = store_ref
+            if da:
+                db_by_addr.setdefault(da, []).append(store_ref)
+            if dbr.get("map_url"):
+                url_key = str(dbr["map_url"]).strip().lower()
+                db_by_yandex[url_key] = store_ref
+
+        matched_keys: set = set()
+        for row in all_data_rows:
+            def _gv2(idx, _row=row):
+                if idx is None or idx >= len(_row): return ""
+                return str(_row[idx] or "").strip()
+            fn = _normalize_for_dedup(_gv2(c_name))
+            fa_raw = _normalize_for_dedup(_gv2(c_address)) if c_address is not None else ""
+            fy_url = _gv2(c_yandex).strip().lower() if c_yandex is not None else ""
+            if not fn:
+                continue
+            key = (fn, fa_raw)
+            if key in matched_keys:
+                continue
+            matched_keys.add(key)
+
+            file_name  = _gv2(c_name)
+            file_addr  = _gv2(c_address) if c_address is not None else ""
+
+            # Signal 1: name + address exact match
+            hit = db_by_name_addr.get((fn, fa_raw))
+            if hit:
+                matches.append({
+                    "file_name": file_name, "file_address": file_addr,
+                    "existing_id": hit["id"], "existing_name": hit["name"],
+                    "existing_address": hit["address"],
+                    "reason": "name_address",
+                    "is_likely_duplicate": True,
+                })
+                continue
+
+            # Signal 2: Yandex URL match
+            if fy_url and fy_url in db_by_yandex:
+                hit = db_by_yandex[fy_url]
+                matches.append({
+                    "file_name": file_name, "file_address": file_addr,
+                    "existing_id": hit["id"], "existing_name": hit["name"],
+                    "existing_address": hit["address"],
+                    "reason": "yandex_url",
+                    "is_likely_duplicate": True,
+                })
+                continue
+
+            # Signal 3: same address, different name (same building, different tenant)
+            if fa_raw and fa_raw in db_by_addr:
+                candidates = db_by_addr[fa_raw]
+                # Only flag if no name match (different-name tenants at same address)
+                different_name_hits = [c for c in candidates if _normalize_for_dedup(c["name"]) != fn]
+                if different_name_hits:
+                    hit = different_name_hits[0]
+                    matches.append({
+                        "file_name": file_name, "file_address": file_addr,
+                        "existing_id": hit["id"], "existing_name": hit["name"],
+                        "existing_address": hit["address"],
+                        "reason": "address_only",
+                        "is_likely_duplicate": False,
+                    })
+                    continue
+
+        existing_count = sum(1 for m in matches if m["is_likely_duplicate"])
     except Exception as e:
         logger.warning("preview_import: DB check failed: %s", e)
 
@@ -3126,6 +3264,7 @@ async def preview_import(request: Request, file: UploadFile = File(...)):
         "unique_count": len(seen),
         "existing_count": existing_count,
         "new_count": new_count,
+        "matches": matches,
         "mapping": {
             "name":    c_name,
             "address": c_address,
@@ -3255,9 +3394,15 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
             continue
 
         # ── Check if this row already exists in DB ────────────────────────────
+        # Try both raw_addr (as in file) and full address (city+raw_addr, as stored in DB)
+        # to handle the case where city is in a separate column and was prepended on create.
         row_name_key = _normalize_for_dedup(name)
-        row_addr_key = _normalize_for_dedup(raw_addr) if raw_addr else ""
-        existing_store_id = existing_db_keys.get((row_name_key, row_addr_key))
+        row_addr_key_raw  = _normalize_for_dedup(raw_addr) if raw_addr else ""
+        row_addr_key_full = _normalize_for_dedup(address)  if address  else row_addr_key_raw
+        existing_store_id = (
+            existing_db_keys.get((row_name_key, row_addr_key_raw)) or
+            existing_db_keys.get((row_name_key, row_addr_key_full))
+        )
 
         if existing_store_id and import_mode == "new_only":
             # Skip — store already exists and user wants new-only mode
@@ -3320,11 +3465,32 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
             nearby = find_nearby_stores(lat, lon, radius_m=20, owner_id=owner_id)
             if nearby:
                 near = nearby[0]
+                new_name_norm = _normalize_for_dedup(name)
+                near_name_norm = _normalize_for_dedup(near.get("name") or "")
+                near_addr_norm = _normalize_for_dedup(near.get("address") or "")
+                new_addr_norm  = _normalize_for_dedup(address)
+                same_name = new_name_norm == near_name_norm
+                # Address similarity: one is substring of the other (handles city-prefix differences)
+                same_addr = bool(near_addr_norm and new_addr_norm and (
+                    near_addr_norm in new_addr_norm or new_addr_norm in near_addr_norm
+                ))
+                if same_name and same_addr:
+                    match_reason = "name_address"
+                    is_likely_duplicate = True
+                elif same_name:
+                    match_reason = "name_coords"
+                    is_likely_duplicate = True
+                else:
+                    # Different names at the same location — just a proximity note, not a duplicate
+                    match_reason = "coords_only"
+                    is_likely_duplicate = False
                 dup_warning = {
                     "row": i, "name": name, "address": address,
                     "existing_id": near["id"], "existing_name": near["name"],
                     "existing_address": near.get("address") or "",
                     "dist_m": round(float(near["dist_m"]), 1),
+                    "match_reason": match_reason,
+                    "is_likely_duplicate": is_likely_duplicate,
                 }
 
         try:
@@ -4469,7 +4635,7 @@ def admin_update_user(user_id: int, request: Request, body: AdminUserUpdate):
     row = cur.fetchone()
     # Audit each changed field
     if body.password is not None:
-        _audit_log(conn, current_uid, user_id, target["username"], "password_changed", "")
+        _audit_log(conn, current_uid, user_id, target["username"], "password_reset_by_admin", "")
     if body.is_admin is not None:
         _audit_log(conn, current_uid, user_id, target["username"],
                    "admin_granted" if body.is_admin else "admin_removed", "")
@@ -4562,6 +4728,71 @@ def admin_audit_log(request: Request, limit: int = 100):
         }
         for r in rows
     ]
+
+
+@app.get("/api/admin/geocode-cache")
+def admin_list_geocode_cache(request: Request, limit: int = 100, offset: int = 0):
+    """List entries in the persistent geocoding cache. Admin-only."""
+    require_admin(request)
+    limit = max(1, min(limit, 500))
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT COUNT(*) FROM geocode_cache")
+    total = cur.fetchone()["count"]
+    cur.execute(
+        "SELECT id, normalized_address, lat, lon, source, created_at, updated_at FROM geocode_cache ORDER BY updated_at DESC LIMIT %s OFFSET %s",
+        (limit, max(0, offset))
+    )
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    return {
+        "total": total,
+        "items": [
+            {
+                "id": r["id"],
+                "address": r["normalized_address"],
+                "lat": float(r["lat"]),
+                "lon": float(r["lon"]),
+                "source": r["source"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.delete("/api/admin/geocode-cache/{entry_id}", status_code=200)
+def admin_delete_geocode_cache_entry(entry_id: int, request: Request):
+    """Delete a single geocoding cache entry so the address will be re-geocoded. Admin-only."""
+    require_admin(request)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT normalized_address FROM geocode_cache WHERE id = %s", (entry_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        raise HTTPException(status_code=404, detail="Запись не найдена")
+    addr = row[0]
+    cur.execute("DELETE FROM geocode_cache WHERE id = %s", (entry_id,))
+    conn.commit(); cur.close(); conn.close()
+    # Also evict from in-memory cache so next geocode call goes to API
+    geocode_cache.pop(addr, None)
+    return {"ok": True, "deleted_address": addr}
+
+
+@app.delete("/api/admin/geocode-cache", status_code=200)
+def admin_clear_geocode_cache(request: Request):
+    """Purge the entire geocoding cache. Admin-only. Use with caution."""
+    require_admin(request)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM geocode_cache")
+    count = cur.fetchone()[0]
+    cur.execute("DELETE FROM geocode_cache")
+    conn.commit(); cur.close(); conn.close()
+    geocode_cache.clear()
+    return {"ok": True, "deleted_count": count}
 
 
 # ── Production static file serving ────────────────────────────────────────────

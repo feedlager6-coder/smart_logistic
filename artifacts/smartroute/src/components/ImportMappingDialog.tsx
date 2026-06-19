@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Loader2, AlertCircle, Info, Clock, AlertTriangle, CheckCircle2, PlusCircle, RefreshCw } from "lucide-react";
+import { Loader2, AlertCircle, Info, Clock, AlertTriangle, CheckCircle2, PlusCircle, RefreshCw, MapPin, Link2 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 
 const LS_KEY = "smartroute_import_mapping";
@@ -22,6 +22,16 @@ interface MappingState {
   tw_to: number | null;
 }
 
+interface MatchEntry {
+  file_name: string;
+  file_address: string;
+  existing_id: number;
+  existing_name: string;
+  existing_address: string;
+  reason: "name_address" | "yandex_url" | "address_only";
+  is_likely_duplicate: boolean;
+}
+
 interface PreviewData {
   columns: string[];
   rows: string[][];
@@ -29,8 +39,27 @@ interface PreviewData {
   unique_count: number;
   existing_count: number;
   new_count: number;
+  matches: MatchEntry[];
   mapping: MappingState;
 }
+
+const REASON_META: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
+  name_address: {
+    label: "Совпадает название и адрес",
+    icon: <CheckCircle2 className="w-3.5 h-3.5 text-red-500" />,
+    color: "text-red-700 bg-red-50 border-red-200",
+  },
+  yandex_url: {
+    label: "Совпадает ссылка Яндекс",
+    icon: <Link2 className="w-3.5 h-3.5 text-orange-500" />,
+    color: "text-orange-700 bg-orange-50 border-orange-200",
+  },
+  address_only: {
+    label: "Совпадает адрес (разные названия)",
+    icon: <MapPin className="w-3.5 h-3.5 text-blue-500" />,
+    color: "text-blue-700 bg-blue-50 border-blue-200",
+  },
+};
 
 interface Props {
   file: File;
@@ -202,6 +231,9 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
   const eta = preview ? getEtaLabel(preview.unique_count) : null;
 
   const hasExisting = preview && preview.existing_count > 0;
+  const likelyDups = preview?.matches?.filter(m => m.is_likely_duplicate) ?? [];
+  const addressOnlyMatches = preview?.matches?.filter(m => !m.is_likely_duplicate) ?? [];
+  const [showMatchDetails, setShowMatchDetails] = useState(false);
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -252,29 +284,85 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
             </div>
 
             {/* Existing vs new breakdown — shown when there are matches in DB */}
-            {hasExisting && (
+            {(hasExisting || addressOnlyMatches.length > 0) && (
               <div className="rounded-lg border overflow-hidden">
-                <div className="bg-muted/40 px-4 py-2 border-b">
+                <div className="bg-muted/40 px-4 py-2 border-b flex items-center justify-between">
                   <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                     Сравнение с базой данных
                   </p>
+                  {(likelyDups.length > 0 || addressOnlyMatches.length > 0) && (
+                    <button
+                      type="button"
+                      onClick={() => setShowMatchDetails(v => !v)}
+                      className="text-xs text-primary hover:underline"
+                    >
+                      {showMatchDetails ? "Скрыть детали" : "Показать детали"}
+                    </button>
+                  )}
                 </div>
-                <div className="grid grid-cols-2 divide-x">
+
+                {/* Counters */}
+                <div className={`grid divide-x ${addressOnlyMatches.length > 0 ? "grid-cols-3" : "grid-cols-2"}`}>
                   <div className="px-4 py-3 flex items-center gap-3">
                     <PlusCircle className="w-5 h-5 text-green-600 shrink-0" />
                     <div>
-                      <div className="text-xl font-bold text-green-700">{preview.new_count}</div>
+                      <div className="text-xl font-bold text-green-700">{preview!.new_count}</div>
                       <div className="text-xs text-muted-foreground">новых магазинов</div>
                     </div>
                   </div>
-                  <div className="px-4 py-3 flex items-center gap-3">
-                    <CheckCircle2 className="w-5 h-5 text-blue-500 shrink-0" />
-                    <div>
-                      <div className="text-xl font-bold text-blue-700">{preview.existing_count}</div>
-                      <div className="text-xs text-muted-foreground">уже существующих</div>
+                  {likelyDups.length > 0 && (
+                    <div className="px-4 py-3 flex items-center gap-3">
+                      <CheckCircle2 className="w-5 h-5 text-red-500 shrink-0" />
+                      <div>
+                        <div className="text-xl font-bold text-red-700">{likelyDups.length}</div>
+                        <div className="text-xs text-muted-foreground">вероятных дублей</div>
+                      </div>
                     </div>
-                  </div>
+                  )}
+                  {addressOnlyMatches.length > 0 && (
+                    <div className="px-4 py-3 flex items-center gap-3">
+                      <MapPin className="w-5 h-5 text-blue-500 shrink-0" />
+                      <div>
+                        <div className="text-xl font-bold text-blue-700">{addressOnlyMatches.length}</div>
+                        <div className="text-xs text-muted-foreground">разные магазины по адресу</div>
+                      </div>
+                    </div>
+                  )}
                 </div>
+
+                {/* Per-row match details */}
+                {showMatchDetails && preview!.matches && preview!.matches.length > 0 && (
+                  <div className="border-t divide-y max-h-52 overflow-y-auto">
+                    {preview!.matches.map((m, idx) => {
+                      const meta = REASON_META[m.reason] ?? REASON_META.address_only;
+                      return (
+                        <div key={idx} className="px-4 py-2.5 flex flex-col gap-0.5">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded border ${meta.color}`}>
+                              {meta.icon}
+                              {meta.label}
+                            </span>
+                            {!m.is_likely_duplicate && (
+                              <span className="text-[10px] text-muted-foreground italic">
+                                (разные названия — не является дублём)
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs flex gap-2 mt-0.5">
+                            <span className="text-muted-foreground w-12 shrink-0">Файл:</span>
+                            <span className="font-medium">{m.file_name}</span>
+                            {m.file_address && <span className="text-muted-foreground truncate">{m.file_address}</span>}
+                          </div>
+                          <div className="text-xs flex gap-2">
+                            <span className="text-muted-foreground w-12 shrink-0">В базе:</span>
+                            <span className="font-medium">{m.existing_name}</span>
+                            {m.existing_address && <span className="text-muted-foreground truncate">{m.existing_address}</span>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
 

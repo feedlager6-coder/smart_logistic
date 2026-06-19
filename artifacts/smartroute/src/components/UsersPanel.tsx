@@ -47,15 +47,16 @@ const PLANS = [
 ];
 
 const ACTION_LABELS: Record<string, { label: string; color: string }> = {
-  user_created:   { label: "Создан",           color: "bg-emerald-100 text-emerald-700" },
-  user_deleted:   { label: "Удалён",           color: "bg-red-100 text-red-700" },
-  password_changed: { label: "Пароль",         color: "bg-slate-100 text-slate-600" },
-  admin_granted:  { label: "Стал Admin",       color: "bg-blue-100 text-blue-700" },
-  admin_removed:  { label: "Снят Admin",       color: "bg-orange-100 text-orange-700" },
-  user_blocked:   { label: "Заблокирован",     color: "bg-red-100 text-red-700" },
-  user_unblocked: { label: "Разблокирован",    color: "bg-emerald-100 text-emerald-700" },
-  plan_changed:   { label: "Тариф изменён",    color: "bg-violet-100 text-violet-700" },
-  note_changed:   { label: "Заметка",          color: "bg-slate-100 text-slate-600" },
+  user_created:           { label: "Создан",           color: "bg-emerald-100 text-emerald-700" },
+  user_deleted:           { label: "Удалён",           color: "bg-red-100 text-red-700" },
+  password_changed:       { label: "Пароль изменён",   color: "bg-slate-100 text-slate-600" },
+  password_reset_by_admin:{ label: "Пароль сброшен",   color: "bg-amber-100 text-amber-700" },
+  admin_granted:          { label: "Стал Admin",       color: "bg-blue-100 text-blue-700" },
+  admin_removed:          { label: "Снят Admin",       color: "bg-orange-100 text-orange-700" },
+  user_blocked:           { label: "Заблокирован",     color: "bg-red-100 text-red-700" },
+  user_unblocked:         { label: "Разблокирован",    color: "bg-emerald-100 text-emerald-700" },
+  plan_changed:           { label: "Тариф изменён",    color: "bg-violet-100 text-violet-700" },
+  note_changed:           { label: "Заметка",          color: "bg-slate-100 text-slate-600" },
 };
 
 function planMeta(plan: string) {
