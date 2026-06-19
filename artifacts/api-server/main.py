@@ -3361,6 +3361,8 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
     imported, failed, skipped_existing = 0, 0, 0
     stores_out: list = []
     duplicates: list = []
+    # Geocoder source stats — how coordinates were obtained for each imported store
+    geocode_stats = {"explicit": 0, "yandex_url": 0, "memory_cache": 0, "db_cache": 0, "yandex_api": 0, "nominatim": 0, "not_found": 0}
 
     # ── Pre-load existing store keys from DB (for import_mode check) ─────────
     # Maps normalized (name, address) → store_id for quick lookup.
@@ -3428,32 +3430,58 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
                 unload = 15
 
         lat, lon, status = None, None, "not_found"
+        coord_source = "not_found"
         try:
             pv_lat = float(raw_lat) if raw_lat not in (None, "", "None") else None
             pv_lon = float(raw_lon) if raw_lon not in (None, "", "None") else None
         except (ValueError, TypeError):
             pv_lat = pv_lon = None
 
+        def _geocode_with_tracking(addr: str) -> Optional[tuple]:
+            """geocode_address with source tracking into geocode_stats."""
+            nonlocal coord_source
+            ck = addr.strip().lower()
+            if ck in geocode_cache:
+                coord_source = "memory_cache"
+                return geocode_cache[ck]
+            db_hit = _geocache_db_lookup(ck)
+            if db_hit is not None:
+                coord_source = "db_cache"
+                geocode_cache[ck] = db_hit
+                return db_hit
+            result = geocode_address_yandex(addr)
+            if result is not None:
+                coord_source = "yandex_api"
+            else:
+                result = geocode_address_nominatim(addr)
+                coord_source = "nominatim" if result is not None else "not_found"
+            geocode_cache[ck] = result
+            if result is not None:
+                _geocache_db_store(ck, result[0], result[1], coord_source)
+            return result
+
         if pv_lat is not None and pv_lon is not None and (-90 <= pv_lat <= 90) and (-180 <= pv_lon <= 180):
-            lat, lon, status = pv_lat, pv_lon, "found"
+            lat, lon, status, coord_source = pv_lat, pv_lon, "found", "explicit"
         elif yandex_url:
             lat, lon = parse_yandex_link(yandex_url)
             if lat is not None:
-                status = "found"
+                status, coord_source = "found", "yandex_url"
                 if not address:
                     address = reverse_geocode_nominatim(lat, lon) or f"{lat:.5f}, {lon:.5f}"
             elif address:
-                coords = geocode_address(address)
+                coords = _geocode_with_tracking(address)
                 lat, lon = (coords[0], coords[1]) if coords else (None, None)
                 status = "found" if coords else "not_found"
-                if not YANDEX_GEOCODER_API_KEY:
+                if not YANDEX_GEOCODER_API_KEY and coord_source in ("nominatim", "not_found"):
                     time.sleep(1.1)
         elif address:
-            coords = geocode_address(address)
+            coords = _geocode_with_tracking(address)
             lat, lon = (coords[0], coords[1]) if coords else (None, None)
             status = "found" if coords else "not_found"
-            if not YANDEX_GEOCODER_API_KEY:
+            if not YANDEX_GEOCODER_API_KEY and coord_source in ("nominatim", "not_found"):
                 time.sleep(1.1)
+
+        geocode_stats[coord_source] = geocode_stats.get(coord_source, 0) + 1
 
         if not address:
             address = f"{lat:.5f}, {lon:.5f}" if lat is not None else "Адрес не указан"
@@ -3481,17 +3509,22 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
                     match_reason = "name_coords"
                     is_likely_duplicate = True
                 else:
-                    # Different names at the same location — just a proximity note, not a duplicate
+                    # Different names at the same location: different tenants in same building
+                    # or geocoding imprecision (Nominatim centroid). NOT a duplicate — skip.
                     match_reason = "coords_only"
                     is_likely_duplicate = False
-                dup_warning = {
-                    "row": i, "name": name, "address": address,
-                    "existing_id": near["id"], "existing_name": near["name"],
-                    "existing_address": near.get("address") or "",
-                    "dist_m": round(float(near["dist_m"]), 1),
-                    "match_reason": match_reason,
-                    "is_likely_duplicate": is_likely_duplicate,
-                }
+                # Only track as a duplicate when we actually believe it is one.
+                # coords_only (different names, different addresses, just nearby coords)
+                # is geocoding noise and must NOT be shown as a duplicate warning.
+                if is_likely_duplicate:
+                    dup_warning = {
+                        "row": i, "name": name, "address": address,
+                        "existing_id": near["id"], "existing_name": near["name"],
+                        "existing_address": near.get("address") or "",
+                        "dist_m": round(float(near["dist_m"]), 1),
+                        "match_reason": match_reason,
+                        "is_likely_duplicate": True,
+                    }
 
         try:
             conn2 = get_db()
@@ -3537,11 +3570,12 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
     job["stores"] = stores_out
     job["geocoded_found"] = geocoded_found
     job["geocoded_not_found"] = geocoded_not_found
+    job["geocode_stats"] = geocode_stats
     job["deduped"] = skipped_dedup
     job["skipped_existing"] = skipped_existing
     job["done"] = True
-    logger.info("Import job done: %d imported (%d geocoded, %d no-coords), %d failed, %d duplicates, %d deduped, %d skipped_existing",
-                imported, geocoded_found, geocoded_not_found, failed, len(duplicates), skipped_dedup, skipped_existing)
+    logger.info("Import job done: %d imported (%d geocoded, %d no-coords), %d failed, %d true-duplicates, %d deduped, %d skipped_existing. Geocode sources: %s",
+                imported, geocoded_found, geocoded_not_found, failed, len(duplicates), skipped_dedup, skipped_existing, geocode_stats)
 
 
 @app.post("/api/stores/import/start", status_code=202)
@@ -3620,6 +3654,7 @@ def get_import_result(job_id: str, request: Request):
         "skipped_existing": job.get("skipped_existing", 0),
         "geocoded_found": job.get("geocoded_found", 0),
         "geocoded_not_found": job.get("geocoded_not_found", 0),
+        "geocode_stats": job.get("geocode_stats", {}),
         "done": job["done"],
         "error": job.get("error"),
     }
