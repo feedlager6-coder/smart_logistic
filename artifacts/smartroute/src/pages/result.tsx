@@ -664,6 +664,16 @@ export function ResultPage() {
           })}
         </div>
       </div>
+
+      {/* Bottom CTA — rebuild route */}
+      <div className="flex justify-center pt-4 pb-2 print:hidden">
+        <Button size="lg" className="gap-2 h-12 px-8 shadow-md shadow-primary/20" asChild>
+          <Link href="/route">
+            <RefreshCw className="w-5 h-5" />
+            Построить заново
+          </Link>
+        </Button>
+      </div>
     </div>
   );
 }

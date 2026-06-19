@@ -151,6 +151,11 @@ export function RoutePage() {
     setVehicles(vehicles.map(v => v.id === id ? { ...v, [field]: value } : v));
   };
 
+  // Auto-save fleet to localStorage whenever vehicles change
+  useEffect(() => {
+    localStorage.setItem(FLEET_KEY, JSON.stringify(vehicles));
+  }, [vehicles]);
+
   const handleSaveFleet = () => {
     localStorage.setItem(FLEET_KEY, JSON.stringify(vehicles));
     toast({ title: "Автопарк сохранён", description: `${vehicles.length} авт. сохранено как шаблон` });

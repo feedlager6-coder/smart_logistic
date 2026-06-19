@@ -80,3 +80,4 @@ externalPort = 3000
 
 [userenv.shared]
 BASE_PATH = "/"
+PG_CONNECTION_URL = "postgresql://postgres:password@helium:5432/heliumdb"
