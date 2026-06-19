@@ -1353,6 +1353,20 @@ def init_db():
     # ── User plan & admin notes ────────────────────────────────────────────────
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS plan TEXT DEFAULT 'trial'")
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS admin_note TEXT DEFAULT ''")
+    # ── Admin audit log ────────────────────────────────────────────────────────
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS admin_audit_log (
+            id SERIAL PRIMARY KEY,
+            admin_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            target_user_id INTEGER,
+            target_username TEXT,
+            action TEXT NOT NULL,
+            details TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_admin ON admin_audit_log(admin_user_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created ON admin_audit_log(created_at DESC)")
     conn.commit()
     cur.close()
     conn.close()
@@ -4079,6 +4093,20 @@ def _count_active_admins() -> int:
     return count
 
 
+def _audit_log(conn, admin_user_id: int, target_user_id: int, target_username: str, action: str, details: str = ""):
+    """Write one entry to admin_audit_log using the given (open) connection."""
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO admin_audit_log (admin_user_id, target_user_id, target_username, action, details)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (admin_user_id, target_user_id, target_username, action, details)
+        )
+        cur.close()
+    except Exception as e:
+        logger.warning("audit_log write failed: %s", e)
+
+
 @app.get("/api/admin/users")
 def admin_list_users(request: Request):
     require_admin(request)
@@ -4137,6 +4165,9 @@ def admin_create_user(request: Request, body: AdminUserCreate):
             (body.username.strip(), hashed, body.is_admin, True, plan, body.admin_note or "")
         )
         row = cur.fetchone()
+        admin_uid = get_user_id(request)
+        _audit_log(conn, admin_uid, row["id"], row["username"], "user_created",
+                   f"plan={row['plan']}, is_admin={row['is_admin']}")
         conn.commit()
         return {
             "id": row["id"],
@@ -4224,6 +4255,20 @@ def admin_update_user(user_id: int, request: Request, body: AdminUserUpdate):
         params
     )
     row = cur.fetchone()
+    # Audit each changed field
+    if body.password is not None:
+        _audit_log(conn, current_uid, user_id, target["username"], "password_changed", "")
+    if body.is_admin is not None:
+        _audit_log(conn, current_uid, user_id, target["username"],
+                   "admin_granted" if body.is_admin else "admin_removed", "")
+    if body.is_active is not None:
+        _audit_log(conn, current_uid, user_id, target["username"],
+                   "user_unblocked" if body.is_active else "user_blocked", "")
+    if body.plan is not None:
+        _audit_log(conn, current_uid, user_id, target["username"], "plan_changed",
+                   f"{target['plan']} → {row['plan']}")
+    if body.admin_note is not None:
+        _audit_log(conn, current_uid, user_id, target["username"], "note_changed", "")
     conn.commit()
     cur.close()
     conn.close()
@@ -4266,11 +4311,45 @@ def admin_delete_user(user_id: int, request: Request):
     cur2.execute("DELETE FROM stores WHERE owner_id = %s", (user_id,))
     cur2.execute("DELETE FROM company_settings WHERE owner_id = %s", (user_id,))
     cur2.execute("DELETE FROM users WHERE id = %s", (user_id,))
+    _audit_log(conn, current_uid, user_id, target["username"], "user_deleted",
+               f"stores={target.get('stores_count',0)}, was_admin={target['is_admin']}")
     conn.commit()
     cur.close()
     cur2.close()
     conn.close()
     return {"ok": True, "username": target["username"]}
+
+
+@app.get("/api/admin/audit-log")
+def admin_audit_log(request: Request, limit: int = 100):
+    require_admin(request)
+    limit = max(1, min(limit, 500))
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        SELECT l.id, l.admin_user_id, u.username AS admin_username,
+               l.target_user_id, l.target_username, l.action, l.details, l.created_at
+        FROM admin_audit_log l
+        LEFT JOIN users u ON u.id = l.admin_user_id
+        ORDER BY l.created_at DESC
+        LIMIT %s
+    """, (limit,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [
+        {
+            "id": r["id"],
+            "admin_user_id": r["admin_user_id"],
+            "admin_username": r["admin_username"] or "—",
+            "target_user_id": r["target_user_id"],
+            "target_username": r["target_username"] or "—",
+            "action": r["action"],
+            "details": r["details"] or "",
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
 
 
 # ── Production static file serving ────────────────────────────────────────────
