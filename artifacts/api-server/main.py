@@ -1350,6 +1350,9 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_stores_owner ON stores(owner_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner ON route_sessions(owner_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_settings_owner ON company_settings(owner_id)")
+    # ── User plan & admin notes ────────────────────────────────────────────────
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS plan TEXT DEFAULT 'trial'")
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS admin_note TEXT DEFAULT ''")
     conn.commit()
     cur.close()
     conn.close()
@@ -4054,11 +4057,26 @@ class AdminUserCreate(BaseModel):
     username: str
     password: str
     is_admin: bool = False
+    plan: str = "trial"
+    admin_note: str = ""
 
 class AdminUserUpdate(BaseModel):
     password: Optional[str] = None
     is_admin: Optional[bool] = None
     is_active: Optional[bool] = None
+    plan: Optional[str] = None
+    admin_note: Optional[str] = None
+
+
+def _count_active_admins() -> int:
+    """Count total active admins in the system."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM users WHERE is_admin=TRUE AND is_active=TRUE")
+    count = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+    return count
 
 
 @app.get("/api/admin/users")
@@ -4068,12 +4086,14 @@ def admin_list_users(request: Request):
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
         SELECT u.id, u.username, u.is_admin, u.is_active, u.created_at, u.last_login_at,
+               u.plan, u.admin_note,
                COUNT(DISTINCT s.id) as stores_count,
                COUNT(DISTINCT rs.id) as sessions_count
         FROM users u
         LEFT JOIN stores s ON s.owner_id = u.id
         LEFT JOIN route_sessions rs ON rs.owner_id = u.id
-        GROUP BY u.id, u.username, u.is_admin, u.is_active, u.created_at, u.last_login_at
+        GROUP BY u.id, u.username, u.is_admin, u.is_active, u.created_at, u.last_login_at,
+                 u.plan, u.admin_note
         ORDER BY u.created_at DESC
     """)
     rows = cur.fetchall()
@@ -4089,10 +4109,14 @@ def admin_list_users(request: Request):
             "last_login_at": r["last_login_at"].isoformat() if r["last_login_at"] else None,
             "stores_count": int(r["stores_count"] or 0),
             "sessions_count": int(r["sessions_count"] or 0),
+            "plan": r["plan"] or "trial",
+            "admin_note": r["admin_note"] or "",
         }
         for r in rows
     ]
 
+
+_VALID_PLANS = {"trial", "basic", "pro", "enterprise"}
 
 @app.post("/api/admin/users", status_code=201)
 def admin_create_user(request: Request, body: AdminUserCreate):
@@ -4101,13 +4125,16 @@ def admin_create_user(request: Request, body: AdminUserCreate):
         raise HTTPException(status_code=422, detail="Логин не может быть пустым")
     if len(body.password) < 4:
         raise HTTPException(status_code=422, detail="Пароль должен быть не менее 4 символов")
+    plan = body.plan if body.plan in _VALID_PLANS else "trial"
     hashed = _bcrypt_lib.hashpw(body.password.encode(), _bcrypt_lib.gensalt()).decode()
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
         cur.execute(
-            "INSERT INTO users (username, password_hash, is_admin, is_active) VALUES (%s, %s, %s, %s) RETURNING id, username, is_admin, is_active, created_at",
-            (body.username.strip(), hashed, body.is_admin, True)
+            """INSERT INTO users (username, password_hash, is_admin, is_active, plan, admin_note)
+               VALUES (%s, %s, %s, %s, %s, %s)
+               RETURNING id, username, is_admin, is_active, created_at, plan, admin_note""",
+            (body.username.strip(), hashed, body.is_admin, True, plan, body.admin_note or "")
         )
         row = cur.fetchone()
         conn.commit()
@@ -4117,8 +4144,11 @@ def admin_create_user(request: Request, body: AdminUserCreate):
             "is_admin": bool(row["is_admin"]),
             "is_active": bool(row["is_active"]),
             "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "last_login_at": None,
             "stores_count": 0,
             "sessions_count": 0,
+            "plan": row["plan"] or "trial",
+            "admin_note": row["admin_note"] or "",
         }
     except Exception as e:
         conn.rollback()
@@ -4136,22 +4166,38 @@ def admin_update_user(user_id: int, request: Request, body: AdminUserUpdate):
     current_uid = get_user_id(request)
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT id, username, is_admin, is_active FROM users WHERE id = %s", (user_id,))
+    cur.execute("SELECT id, username, is_admin, is_active, plan, admin_note FROM users WHERE id = %s", (user_id,))
     target = cur.fetchone()
     if not target:
         cur.close()
         conn.close()
         raise HTTPException(status_code=404, detail="Пользователь не найден")
-    # Prevent admin from deactivating or removing admin rights from themselves
+
+    # Self-protection: cannot modify own admin/active status
     if user_id == current_uid:
         if body.is_active is False:
+            cur.close(); conn.close()
             raise HTTPException(status_code=400, detail="Нельзя деактивировать свой аккаунт")
         if body.is_admin is False:
+            cur.close(); conn.close()
             raise HTTPException(status_code=400, detail="Нельзя снять права администратора у себя")
+
+    # Last-admin protection: cannot deactivate or strip the last active admin
+    if target["is_admin"] and target["is_active"]:
+        if body.is_active is False or body.is_admin is False:
+            admin_count = _count_active_admins()
+            if admin_count <= 1:
+                cur.close(); conn.close()
+                raise HTTPException(
+                    status_code=400,
+                    detail="Нельзя деактивировать или лишить прав последнего администратора системы"
+                )
+
     sets = []
     params = []
     if body.password is not None:
         if len(body.password) < 4:
+            cur.close(); conn.close()
             raise HTTPException(status_code=422, detail="Пароль должен быть не менее 4 символов")
         hashed = _bcrypt_lib.hashpw(body.password.encode(), _bcrypt_lib.gensalt()).decode()
         sets.append("password_hash = %s")
@@ -4162,13 +4208,19 @@ def admin_update_user(user_id: int, request: Request, body: AdminUserUpdate):
     if body.is_active is not None:
         sets.append("is_active = %s")
         params.append(body.is_active)
+    if body.plan is not None:
+        plan = body.plan if body.plan in _VALID_PLANS else "trial"
+        sets.append("plan = %s")
+        params.append(plan)
+    if body.admin_note is not None:
+        sets.append("admin_note = %s")
+        params.append(body.admin_note)
     if not sets:
-        cur.close()
-        conn.close()
+        cur.close(); conn.close()
         raise HTTPException(status_code=422, detail="Нет полей для обновления")
     params.append(user_id)
     cur.execute(
-        f"UPDATE users SET {', '.join(sets)} WHERE id = %s RETURNING id, username, is_admin, is_active",
+        f"UPDATE users SET {', '.join(sets)} WHERE id = %s RETURNING id, username, is_admin, is_active, plan, admin_note",
         params
     )
     row = cur.fetchone()
@@ -4180,6 +4232,8 @@ def admin_update_user(user_id: int, request: Request, body: AdminUserUpdate):
         "username": row["username"],
         "is_admin": bool(row["is_admin"]),
         "is_active": bool(row["is_active"]),
+        "plan": row["plan"] or "trial",
+        "admin_note": row["admin_note"] or "",
     }
 
 
@@ -4190,16 +4244,33 @@ def admin_delete_user(user_id: int, request: Request):
     if user_id == current_uid:
         raise HTTPException(status_code=400, detail="Нельзя удалить свой аккаунт")
     conn = get_db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
-    if cur.rowcount == 0:
-        cur.close()
-        conn.close()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT id, username, is_admin, is_active FROM users WHERE id = %s", (user_id,))
+    target = cur.fetchone()
+    if not target:
+        cur.close(); conn.close()
         raise HTTPException(status_code=404, detail="Пользователь не найден")
+    # Last-admin protection
+    if target["is_admin"] and target["is_active"]:
+        admin_count = _count_active_admins()
+        if admin_count <= 1:
+            cur.close(); conn.close()
+            raise HTTPException(
+                status_code=400,
+                detail="Нельзя удалить последнего администратора системы"
+            )
+    # Cascade: delete user's data manually (FK is NO ACTION)
+    cur2 = conn.cursor()
+    cur2.execute("DELETE FROM route_session_stores WHERE session_id IN (SELECT id FROM route_sessions WHERE owner_id=%s)", (user_id,))
+    cur2.execute("DELETE FROM route_sessions WHERE owner_id = %s", (user_id,))
+    cur2.execute("DELETE FROM stores WHERE owner_id = %s", (user_id,))
+    cur2.execute("DELETE FROM company_settings WHERE owner_id = %s", (user_id,))
+    cur2.execute("DELETE FROM users WHERE id = %s", (user_id,))
     conn.commit()
     cur.close()
+    cur2.close()
     conn.close()
-    return {"ok": True}
+    return {"ok": True, "username": target["username"]}
 
 
 # ── Production static file serving ────────────────────────────────────────────
