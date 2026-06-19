@@ -7,11 +7,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store, ChevronDown, ChevronUp, ExternalLink, Link, Pencil } from "lucide-react";
+import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store, ChevronDown, ChevronUp, ExternalLink, Link, Pencil, AlertCircle, CheckCircle2, Route } from "lucide-react";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useToast } from "@/hooks/use-toast";
 import { ImportMappingDialog } from "@/components/ImportMappingDialog";
 import { ImportResultDialog, type ImportResult } from "@/components/ImportResultDialog";
+import { Link as WouterLink } from "wouter";
 
 export function StoresPage() {
   const { data: storesData, isLoading } = useListStores();
@@ -19,6 +20,7 @@ export function StoresPage() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [search, setSearch] = useState("");
+  const [showNoCoords, setShowNoCoords] = useState(false);
 
   // Add form state
   const [name, setName] = useState("");
@@ -291,11 +293,15 @@ export function StoresPage() {
     );
   };
 
-  const filteredStores = stores.filter(
-    (s) =>
+  const noCoordsCount = stores.filter((s) => s.lat == null || s.lon == null).length;
+
+  const filteredStores = stores.filter((s) => {
+    const matchesSearch =
       s.name.toLowerCase().includes(search.toLowerCase()) ||
-      (s.address ?? "").toLowerCase().includes(search.toLowerCase())
-  );
+      (s.address ?? "").toLowerCase().includes(search.toLowerCase());
+    const matchesCoords = !showNoCoords || s.lat == null || s.lon == null;
+    return matchesSearch && matchesCoords;
+  });
 
   return (
     <div className="space-y-6">
@@ -330,6 +336,62 @@ export function StoresPage() {
           </Label>
         </div>
       </div>
+
+      {/* ── Onboarding block — shown only when there are no stores at all ── */}
+      {!isLoading && stores.length === 0 && (
+        <div className="rounded-2xl border-2 border-dashed border-primary/30 bg-primary/5 px-6 py-10 text-center space-y-6">
+          <div className="flex justify-center">
+            <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center">
+              <Store className="w-8 h-8 text-primary" />
+            </div>
+          </div>
+          <div>
+            <h2 className="text-xl font-semibold tracking-tight">Добро пожаловать в SmartRoute</h2>
+            <p className="text-muted-foreground mt-1 text-sm max-w-md mx-auto">
+              Добавьте точки доставки — система автоматически построит оптимальные маршруты для ваших водителей.
+            </p>
+          </div>
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-4 max-w-xl mx-auto">
+            <div className="flex-1 rounded-xl border bg-background px-4 py-4 text-left space-y-1">
+              <div className="flex items-center gap-2 font-medium text-sm">
+                <span className="w-6 h-6 rounded-full bg-primary text-primary-foreground text-xs flex items-center justify-center font-bold">1</span>
+                Импортируйте магазины
+              </div>
+              <p className="text-xs text-muted-foreground pl-8">Загрузите Excel / 1С или добавьте вручную ниже</p>
+            </div>
+            <div className="flex-1 rounded-xl border bg-background px-4 py-4 text-left space-y-1">
+              <div className="flex items-center gap-2 font-medium text-sm">
+                <span className="w-6 h-6 rounded-full bg-primary text-primary-foreground text-xs flex items-center justify-center font-bold">2</span>
+                Проверьте адреса
+              </div>
+              <p className="text-xs text-muted-foreground pl-8">Убедитесь что координаты определены верно</p>
+            </div>
+            <div className="flex-1 rounded-xl border bg-background px-4 py-4 text-left space-y-1">
+              <div className="flex items-center gap-2 font-medium text-sm">
+                <span className="w-6 h-6 rounded-full bg-primary text-primary-foreground text-xs flex items-center justify-center font-bold">3</span>
+                Постройте маршрут
+              </div>
+              <p className="text-xs text-muted-foreground pl-8">Укажите машины и водителей, запустите оптимизацию</p>
+            </div>
+          </div>
+          <div className="flex items-center justify-center gap-3">
+            <Label htmlFor="import-file-onboarding" className="cursor-pointer">
+              <div className="flex items-center gap-2 h-10 px-5 rounded-lg font-medium text-sm bg-primary text-primary-foreground hover:bg-primary/90 transition-colors">
+                <Upload className="w-4 h-4" />
+                Импортировать магазины
+              </div>
+              <input
+                id="import-file-onboarding"
+                type="file"
+                accept=".xlsx,.xls"
+                className="hidden"
+                onChange={handleImport}
+              />
+            </Label>
+            <span className="text-sm text-muted-foreground">или добавьте вручную ниже ↓</span>
+          </div>
+        </div>
+      )}
 
       {/* Mapping dialog — shown after file selection, before import starts */}
       {pendingImportFile && (
@@ -479,14 +541,33 @@ export function StoresPage() {
               Список магазинов{" "}
               <span className="text-muted-foreground font-normal text-base ml-1">({stores.length})</span>
             </CardTitle>
-            <div className="relative w-full sm:w-64">
-              <Search className="w-4 h-4 absolute left-2.5 top-2.5 text-muted-foreground" />
-              <Input
-                placeholder="Поиск..."
-                className="pl-8"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
+            <div className="flex items-center gap-2 flex-wrap">
+              {noCoordsCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowNoCoords((v) => !v)}
+                  className={`flex items-center gap-1.5 h-9 px-3 rounded-md text-sm font-medium border transition-colors ${
+                    showNoCoords
+                      ? "bg-destructive/10 text-destructive border-destructive/30"
+                      : "bg-background text-muted-foreground border-border hover:bg-muted"
+                  }`}
+                >
+                  <AlertCircle className="w-4 h-4" />
+                  Без координат{" "}
+                  <span className={`ml-0.5 rounded-full px-1.5 py-0 text-xs font-bold ${showNoCoords ? "bg-destructive text-white" : "bg-muted-foreground/20"}`}>
+                    {noCoordsCount}
+                  </span>
+                </button>
+              )}
+              <div className="relative w-full sm:w-64">
+                <Search className="w-4 h-4 absolute left-2.5 top-2.5 text-muted-foreground" />
+                <Input
+                  placeholder="Поиск..."
+                  className="pl-8"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+              </div>
             </div>
           </div>
         </CardHeader>

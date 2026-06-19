@@ -324,7 +324,7 @@ export function ResultPage() {
           <Button className="gap-2" asChild>
             <Link href="/route">
               <RefreshCw className="w-4 h-4" />
-              <span className="hidden sm:inline">Новый маршрут</span>
+              Построить заново
             </Link>
           </Button>
         </div>

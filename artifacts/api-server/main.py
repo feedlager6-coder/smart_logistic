@@ -105,6 +105,57 @@ COOKIE_SECURE: bool = os.environ.get("COOKIE_SECURE", "true").lower() in ("1", "
 
 ADMIN_PASSWORD: str = os.environ.get("ADMIN_PASSWORD", "")
 
+# ── Login rate limiter ─────────────────────────────────────────────────────────
+# Tracks failed login attempts per IP: ip → list of timestamps (epoch seconds).
+# After LOGIN_MAX_ATTEMPTS failures in LOGIN_WINDOW_SECONDS → 429 for LOGIN_BLOCK_SECONDS.
+LOGIN_MAX_ATTEMPTS: int = 5
+LOGIN_WINDOW_SECONDS: int = 15 * 60   # 15 minutes
+LOGIN_BLOCK_SECONDS: int = 15 * 60    # block for 15 minutes after threshold
+_login_attempts: dict = {}            # {ip: [timestamp, ...]}
+_login_attempts_lock = threading.Lock()
+
+
+def _get_client_ip(request: Request) -> str:
+    """Return the best-effort client IP for rate limiting."""
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _check_login_rate_limit(ip: str) -> None:
+    """Raise 429 if IP has exceeded the login attempt threshold."""
+    now = time.time()
+    with _login_attempts_lock:
+        attempts = _login_attempts.get(ip, [])
+        # Keep only attempts within the window
+        attempts = [t for t in attempts if now - t < LOGIN_WINDOW_SECONDS]
+        _login_attempts[ip] = attempts
+        if len(attempts) >= LOGIN_MAX_ATTEMPTS:
+            retry_after = int(LOGIN_BLOCK_SECONDS - (now - attempts[0]))
+            raise HTTPException(
+                status_code=429,
+                detail=f"Слишком много попыток входа. Попробуйте через {max(1, retry_after // 60)} мин.",
+                headers={"Retry-After": str(max(1, retry_after))},
+            )
+
+
+def _record_failed_login(ip: str) -> None:
+    """Record a failed login attempt for the given IP."""
+    now = time.time()
+    with _login_attempts_lock:
+        attempts = _login_attempts.get(ip, [])
+        attempts = [t for t in attempts if now - t < LOGIN_WINDOW_SECONDS]
+        attempts.append(now)
+        _login_attempts[ip] = attempts
+
+
+def _clear_login_attempts(ip: str) -> None:
+    """Clear failed login attempts after a successful login."""
+    with _login_attempts_lock:
+        _login_attempts.pop(ip, None)
+
+
 # Paths that do NOT require authentication
 _AUTH_PUBLIC_PATHS = {"/api/healthz", "/api/auth/login"}
 
@@ -2395,6 +2446,9 @@ class LoginForm(BaseModel):
 @app.post("/api/auth/login")
 async def login(request: Request, response: Response):
     """Authenticate with username + password (form-encoded). Sets HttpOnly JWT cookie."""
+    client_ip = _get_client_ip(request)
+    _check_login_rate_limit(client_ip)
+
     content_type = request.headers.get("content-type", "")
     if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
         form = await request.form()
@@ -2421,11 +2475,16 @@ async def login(request: Request, response: Response):
         conn.close()
 
     if not row:
+        _record_failed_login(client_ip)
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
     if not row.get("is_active", True):
+        _record_failed_login(client_ip)
         raise HTTPException(status_code=401, detail="Аккаунт отключён. Обратитесь к администратору.")
     if not _verify_password(password, row["password_hash"]):
+        _record_failed_login(client_ip)
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
+
+    _clear_login_attempts(client_ip)
 
     # Update last_login_at
     try:
