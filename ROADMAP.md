@@ -1,59 +1,72 @@
 # SmartRoute — Roadmap
 
-## ✅ Выполнено (Stabilization Session, 27.05.2026)
+## ✅ Выполнено (19 Jun 2026 — Pre-Demo Audit)
 
-- [x] Серверная и клиентская валидация при создании магазина
-- [x] Поле `map_url` в базе данных и во всех API/формах
-- [x] Умное геокодирование: lat/lon → пропуск геокодинга
-- [x] Новый Excel-шаблон (9 колонок) с подсказками
-- [x] Импорт Excel с поддержкой старого и нового формата
-- [x] Collapsible "Точные координаты" в форме добавления
-- [x] Колонка "Координаты" в таблице магазинов
-- [x] Кнопка "Открыть на карте" для магазинов с map_url
+- [x] Экспорт магазинов в Excel (`GET /api/stores/export`) — совместимо с форматом импорта
+- [x] AlertDialog для удаления магазина (заменил `window.confirm`)
+- [x] Кнопка «Построить заново» внизу страницы результата
+- [x] Авто-сохранение автопарка в localStorage при каждом изменении
+- [x] Login rate limiting: 5 попыток / 15 мин → 429 на 15 мин
+- [x] Онбординг при 0 магазинов: трёхшаговый блок
 
-## ✅ Выполнено (Production-Ready Refactor, 27.05.2026)
+## ✅ Выполнено (Jun 2026 — Мультипользовательская изоляция + Админка)
 
-- [x] Шаг 1: Синхронизация API и кодогенерация
-  - [x] `/stores/import` и `/stores/template` в OpenAPI spec
-  - [x] Хук `useImportStores` заменил raw fetch
-- [x] Шаг 2: Серверное хранение результатов
-  - [x] `session_id` в URL (`/result/:id`)
-  - [x] `GET /api/route/sessions/{id}`
-- [x] Шаг 3: VRP-логика и параметры
-  - [x] `TRAFFIC_MULTIPLIER = 1.2`
-  - [x] `average_speed` на уровне каждого авто
-- [x] Шаг 4: UI/UX и мобильная адаптация
-  - [x] `StatusBadge` компонент
-  - [x] Режим водителя на мобильных
-  - [x] Кнопка "Копировать ссылку на маршрут"
+- [x] `owner_id` на таблицах stores, route_sessions, company_settings
+- [x] Полная изоляция данных: каждый пользователь видит только свои магазины и маршруты
+- [x] Поля `plan`, `admin_note`, `last_login_at` в таблице `users`
+- [x] `GET/POST/PATCH/DELETE /api/admin/users` — управление пользователями
+- [x] `GET /api/admin/audit-log` — журнал действий администратора
+- [x] Self-protection: нельзя деактивировать/снять admin/удалить свой аккаунт
+- [x] Last-admin protection: нельзя удалить/деактивировать последнего администратора
+- [x] UsersPanel.tsx в /settings — UI администратора
+- [x] Планы: trial / basic / pro / enterprise
 
-## ✅ Выполнено (VRP Efficiency-First Routing, 31.05.2026)
+## ✅ Выполнено (Jun 2026 — Авторизация)
 
-- [x] Удалён `SetGlobalSpanCostCoefficient(100)` из OR-Tools — убран балансировочный штраф
-- [x] `_cluster_by_sweep()`: round-robin → равно-угловые секторы (360° / N машин)
-- [x] `solve_vrp()`: полная Haversine NxN матрица + OR-Tools TSP per sector
-- [x] Шаг 4 (post-processing): разбивка крупнейшего сектора если машин > секторов
-- [x] Тест: 3 сценария, экономия 62–71% vs наивный baseline, все проверки PASS
-- [x] `scripts/test_vrp_scenarios.py` — тест VRP с тремя сценариями
+- [x] JWT в HttpOnly cookie (HS256, TTL 24ч)
+- [x] bcrypt-хеширование (прямой вызов, без passlib)
+- [x] Auth middleware на все `/api/*` кроме `/healthz` и `/auth/login`
+- [x] `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`
+- [x] `seed_admin_user()` при старте — создаёт admin из `ADMIN_PASSWORD` env
+- [x] Страница входа (`/login`) + AuthProvider + ProtectedRouter
+- [x] Global 401-handler: QueryCache + MutationCache → auto-logout
+- [x] SameSite=none + Secure=true (для iframe в Replit Canvas)
 
-## ✅ Выполнено (OSRM Integration, 31.05.2026)
+## ✅ Выполнено (Jun 2026 — ETA + Яндекс Навигатор)
 
-- [x] `get_cluster_matrix_osrm()`: публичный сервер OSRM, без API-ключа, до 100 точек
-- [x] Цепочка GH → OSRM → Haversine в `solve_vrp()` Step 3
-- [x] `ORTOOLS_TIME_LIMIT_SECONDS`: конфигурируемый лимит OR-Tools (default 2s)
-- [x] `OSRM_BASE_URL`, `OSRM_MAX_LOCATIONS` env-vars для кастомного сервера
-- [x] Startup log: полная цепочка маршрутизации
-- [x] `scripts/test_vrp_stress.py` — 16 сценариев (20/50/100/200 × 2/4/6/10 машин)
-- [x] `scripts/test_vrp_makhachkala.py` — 25 реальных координат Махачкалы
+- [x] OSRM ETA post-solve: параллельные leg-time запросы после solve_vrp
+- [x] `drive_minutes` / `service_minutes` в ETA breakdown
+- [x] Сегментация маршрутов Яндекс Навигатора (≤20 точек на сегмент)
+- [x] `yandex_urls: list[str]` в ответе + amber-предупреждение в UI
 
-## 🔜 Следующие шаги
+## ✅ Выполнено (Jun 2026 — Балансировка VRP + OR-Tools)
 
-- [ ] Аутентификация пользователей (Replit Auth или Clerk)
+- [x] `max_stops_per_vehicle` через `_rebalance_max_stops()`
+- [x] `auto_cap`: `effective_max_stops = ceil(avg × 1.5)` без ручного лимита
+- [x] Inter-route Or-opt relocate после TSP (−15–40% км)
+- [x] Параллельные OSRM-запросы на матрицы кластеров (ThreadPoolExecutor)
+- [x] Адаптивное число итераций Or-opt: ≤80 стор→5, ≤150→3, ≤300→2, >300→1
+
+## ✅ Выполнено (May–Jun 2026 — Stable 1.0)
+
+- [x] История маршрутов с удалением сессий
+- [x] Аналитика: пробег, экономия, загрузка машин, топ-10 магазинов
+- [x] Настройки компании: цена топлива, расход, live-расчёт стоимости km
+- [x] Печать маршрутного листа (каждый водитель на отдельной странице)
+- [x] Экспорт маршрута в Excel (base64 JSON)
+- [x] Импорт магазинов из Excel (7 колонок)
+- [x] Интерактивная карта 2ГИС/Leaflet с автозумом и цветной легендой
+- [x] Отправка маршрута в WhatsApp
+- [x] Деплой на Railway (один сервис: FastAPI + static frontend)
+- [x] Геокодинг: Yandex API (primary) → Nominatim (fallback)
+- [x] Матрица расстояний: OSRM (public) → GraphHopper → Haversine
+
+## 🔜 Следующие шаги (Post-Demo)
+
+- [ ] Кастомный домен + SSL (после первого клиента)
 - [ ] Push-уведомления водителям при изменении маршрута
 - [ ] Экспорт маршрута в PDF с логотипом компании
-- [ ] История маршрутов с фильтрацией по дате/водителю
-- [ ] Редактирование магазина прямо в таблице (inline edit)
-- [ ] Карта для выбора координат вместо ручного ввода (click-to-pin)
+- [ ] Водительский URL — одноразовая ссылка без логина
 - [ ] Тёмная тема
-- [ ] Batch-геокодирование для магазинов со статусом "not_found"
-- [x] GraphHopper per-cluster матрицы: `get_cluster_matrix_gh()` с in-memory кэшем, авто-калибровкой плана (400 → `_gh_plan_limit`), раздельными счётчиками и graceful Haversine fallback
+- [ ] Batch-геокодирование магазинов со статусом «not_found»
+- [ ] Биллинг планов (Stripe или российский эквайринг)

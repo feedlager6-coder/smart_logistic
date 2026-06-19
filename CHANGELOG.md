@@ -1,5 +1,39 @@
 # CHANGELOG
 
+## [Release] — 2026-06-19 (Pre-Demo Audit)
+
+### Добавлено
+
+- **`GET /api/stores/export`** — новый endpoint. Возвращает все магазины в Excel (base64 JSON), совместимый с форматом импорта. Имя файла: `smartroute_stores_YYYY-MM-DD.xlsx`. Кнопка «Экспорт магазинов» в шапке /stores (показывается только если есть магазины)
+- **Login rate limiting** — `_check_login_rate_limit()`: 5 неверных попыток за 15 мин → HTTP 429 на 15 мин. Сбрасывается при успешном входе
+- **Онбординг при 0 магазинов** — трёхшаговый блок в /stores: импорт / добавить вручную / установить склад
+- **Кнопка «Построить заново»** — добавлена внизу страницы `/result/:id` (дополняет кнопку в шапке)
+- **Авто-сохранение автопарка** — `useEffect` в `route.tsx` сохраняет vehicles в localStorage при каждом изменении
+
+### Изменено
+
+- **AlertDialog для удаления магазина** — `window.confirm` заменён на shadcn/ui AlertDialog, единый UX с историей маршрутов
+
+---
+
+## [Release] — 2026-06-14 (Мультипользовательская изоляция + Админка)
+
+### Добавлено
+
+- **`owner_id`** на таблицах stores, route_sessions, company_settings — полная изоляция данных между пользователями
+- **`GET /api/admin/users`** — список пользователей (только для admin)
+- **`POST /api/admin/users`** — создание пользователя с паролем и планом
+- **`PATCH /api/admin/users/{id}`** — смена пароля, is_admin, is_active, plan, admin_note
+- **`DELETE /api/admin/users/{id}`** — удаление пользователя с каскадным удалением данных
+- **`GET /api/admin/audit-log`** — журнал действий администратора (до 500 записей)
+- **Self-protection**: нельзя деактивировать/снять admin/удалить свой аккаунт (400)
+- **Last-admin protection**: нельзя удалить/деактивировать последнего активного admin (400)
+- **Поля `plan`, `admin_note`** в таблице users. Валидные планы: trial / basic / pro / enterprise
+- **`UsersPanel.tsx`** — UI администратора на странице /settings
+- **`last_login_at`** — обновляется при каждом успешном входе
+
+---
+
 ## [Unreleased] — 2026-06-06 (JWT авторизация)
 
 ### Добавлено

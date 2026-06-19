@@ -168,6 +168,22 @@
 
 ---
 
+### GET /api/stores/export
+Экспортирует все магазины пользователя в Excel-файл. Формат совместим с `/api/stores/import` — можно использовать как резервную копию.
+
+**Ответ:**
+```json
+{
+  "data": "<base64-encoded xlsx>",
+  "filename": "smartroute_stores_2026-06-19.xlsx",
+  "count": 42
+}
+```
+
+Frontend декодирует `data` через `atob()` → Blob → `<a download>`. Если магазинов нет — возвращает пустой файл с заголовком.
+
+---
+
 ## Маршруты
 
 ### POST /api/route/build
