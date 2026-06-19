@@ -9,6 +9,7 @@ export interface ImportResult {
   imported: number;
   failed: number;
   deduped: number;
+  skipped_existing?: number;
   geocoded_found: number;
   geocoded_not_found: number;
   duplicates: Array<{
@@ -56,7 +57,8 @@ export function ImportResultDialog({ result, onClose, onDeleteDuplicates }: Prop
           </DialogTitle>
           <DialogDescription>
             Обработано {result.total} строк, добавлено {result.imported} точек доставки
-            {result.deduped > 0 && ` (${result.deduped} дубликат${result.deduped === 1 ? "" : result.deduped < 5 ? "а" : "ов"} объединено до импорта)`}.
+            {result.deduped > 0 && ` (${result.deduped} дубликат${result.deduped === 1 ? "" : result.deduped < 5 ? "а" : "ов"} объединено до импорта)`}
+            {(result.skipped_existing ?? 0) > 0 && `, пропущено ${result.skipped_existing} уже существующих`}.
           </DialogDescription>
         </DialogHeader>
 

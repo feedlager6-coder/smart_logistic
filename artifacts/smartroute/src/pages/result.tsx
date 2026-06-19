@@ -72,7 +72,7 @@ export function ResultPage() {
   const [localResult, setLocalResult] = useState<RouteResult | null>(null);
   const [activeVehicleIndex, setActiveVehicleIndex] = useState(0);
 
-  const { data: serverResult, isLoading: sessionLoading } = useGetRouteSession(
+  const { data: serverResult, isLoading: sessionLoading, isError: sessionError } = useGetRouteSession(
     sessionId ?? 0,
     { query: { enabled: !!sessionId } as any }
   );
@@ -132,6 +132,23 @@ export function ResultPage() {
           <div className="w-10 h-10 border-4 border-primary border-t-transparent rounded-full animate-spin mx-auto" />
           <p className="text-muted-foreground">Загружаю маршрут...</p>
         </div>
+      </div>
+    );
+  }
+
+  if (sessionId && (sessionError || (!sessionLoading && !serverResult))) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
+        <AlertTriangle className="w-12 h-12 text-amber-500" />
+        <div className="text-center space-y-1">
+          <h2 className="text-lg font-semibold">Не удалось загрузить маршрут</h2>
+          <p className="text-muted-foreground text-sm">
+            Маршрут не найден или был удалён.
+          </p>
+        </div>
+        <Button variant="outline" asChild>
+          <Link href="/history">← Вернуться в историю</Link>
+        </Button>
       </div>
     );
   }

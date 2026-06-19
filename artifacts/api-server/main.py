@@ -3037,9 +3037,11 @@ def _detect_col(header_lower: list, candidates: list) -> Optional[int]:
 
 
 @app.post("/api/stores/import/preview")
-async def preview_import(file: UploadFile = File(...)):
+async def preview_import(request: Request, file: UploadFile = File(...)):
     """Read Excel file, return columns + first rows + auto-detected column mapping.
+    Also checks how many rows already exist in the DB (by normalized name+address).
     Used by the frontend to show a mapping dialog before the actual import."""
+    uid = get_user_id(request)
     if not OPENPYXL_AVAILABLE:
         raise HTTPException(status_code=500, detail="openpyxl not installed")
     content = await file.read()
@@ -3087,19 +3089,43 @@ async def preview_import(file: UploadFile = File(...)):
     # Count unique points after dedup (name + address) for info display
     seen: set = set()
     for row in all_data_rows:
-        def _gv(idx):
-            if idx is None or idx >= len(row): return ""
-            return str(row[idx] or "").strip()
+        def _gv(idx, _row=row):
+            if idx is None or idx >= len(_row): return ""
+            return str(_row[idx] or "").strip()
         n = _normalize_for_dedup(_gv(c_name))
         a = _normalize_for_dedup(_gv(c_address))
         if n:
             seen.add((n, a))
+
+    # ── Cross-check against existing DB stores for this user ─────────────────
+    # Count how many of the unique (name, address) pairs from the file already
+    # exist in the database. This lets the UI warn before importing duplicates.
+    existing_count = 0
+    try:
+        conn_p = get_db()
+        cur_p = conn_p.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur_p.execute("SELECT name, address FROM stores WHERE owner_id = %s", (uid,))
+        db_rows = cur_p.fetchall()
+        cur_p.close(); conn_p.close()
+        db_keys: set = set()
+        for dbr in db_rows:
+            dn = _normalize_for_dedup(dbr["name"] or "")
+            da = _normalize_for_dedup(dbr["address"] or "")
+            if dn:
+                db_keys.add((dn, da))
+        existing_count = sum(1 for key in seen if key in db_keys)
+    except Exception as e:
+        logger.warning("preview_import: DB check failed: %s", e)
+
+    new_count = len(seen) - existing_count
 
     return {
         "columns": columns,
         "rows": preview_rows,
         "total_rows": total_rows,
         "unique_count": len(seen),
+        "existing_count": existing_count,
+        "new_count": new_count,
         "mapping": {
             "name":    c_name,
             "address": c_address,
@@ -3112,10 +3138,11 @@ async def preview_import(file: UploadFile = File(...)):
     }
 
 
-def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optional[dict] = None, owner_id: int = None) -> None:
+def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optional[dict] = None, owner_id: int = None, import_mode: str = "new_only") -> None:
     """Run Excel import synchronously, updating job dict for progress tracking.
     Called from background thread by /api/stores/import/start endpoint.
-    mapping: optional dict with column indices {name, address, city, yandex, unload, tw_from, tw_to}."""
+    mapping: optional dict with column indices {name, address, city, yandex, unload, tw_from, tw_to}.
+    import_mode: 'new_only' (skip existing by name+address), 'update' (update existing), 'all' (always insert)."""
     if not OPENPYXL_AVAILABLE:
         job["error"] = "openpyxl not installed"
         job["done"] = True
@@ -3192,9 +3219,26 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
     total_rows = len(deduped_rows)
     job["total"] = total_rows
     job["deduped"] = skipped_dedup
-    imported, failed = 0, 0
+    imported, failed, skipped_existing = 0, 0, 0
     stores_out: list = []
     duplicates: list = []
+
+    # ── Pre-load existing store keys from DB (for import_mode check) ─────────
+    # Maps normalized (name, address) → store_id for quick lookup.
+    existing_db_keys: dict = {}
+    if import_mode in ("new_only", "update") and owner_id is not None:
+        try:
+            conn_ex = get_db()
+            cur_ex = conn_ex.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur_ex.execute("SELECT id, name, address FROM stores WHERE owner_id = %s", (owner_id,))
+            for dbr in cur_ex.fetchall():
+                dn = _normalize_for_dedup(dbr["name"] or "")
+                da = _normalize_for_dedup(dbr["address"] or "")
+                if dn:
+                    existing_db_keys[(dn, da)] = dbr["id"]
+            cur_ex.close(); conn_ex.close()
+        except Exception as e:
+            logger.warning("Import: failed to pre-load existing keys: %s", e)
 
     for i, row in enumerate(deduped_rows, start=1):
         name       = str(_get(row, c_name, "")).strip()
@@ -3208,6 +3252,18 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
         if not name or (not yandex_url and not address):
             failed += 1
             job["processed"] = i; job["failed"] = failed
+            continue
+
+        # ── Check if this row already exists in DB ────────────────────────────
+        row_name_key = _normalize_for_dedup(name)
+        row_addr_key = _normalize_for_dedup(raw_addr) if raw_addr else ""
+        existing_store_id = existing_db_keys.get((row_name_key, row_addr_key))
+
+        if existing_store_id and import_mode == "new_only":
+            # Skip — store already exists and user wants new-only mode
+            skipped_existing += 1
+            job["processed"] = i
+            job["skipped_existing"] = skipped_existing
             continue
 
         raw_lat = _get(row, c_lat)
@@ -3260,8 +3316,8 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
         final_map_url = map_url or yandex_url
 
         dup_warning = None
-        if lat is not None and lon is not None:
-            nearby = find_nearby_stores(lat, lon, radius_m=20)
+        if lat is not None and lon is not None and import_mode != "update":
+            nearby = find_nearby_stores(lat, lon, radius_m=20, owner_id=owner_id)
             if nearby:
                 near = nearby[0]
                 dup_warning = {
@@ -3274,16 +3330,29 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
         try:
             conn2 = get_db()
             cur2 = conn2.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            cur2.execute(
-                """INSERT INTO stores (name, address, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
-                (name, address, lat, lon, final_map_url, status, tw_from, tw_to, unload, owner_id),
-            )
+
+            if existing_store_id and import_mode == "update":
+                # Update existing store in-place
+                cur2.execute(
+                    """UPDATE stores SET name=%s, address=%s, lat=%s, lon=%s, map_url=%s,
+                       geocode_status=%s, time_window_from=%s, time_window_to=%s, unload_minutes=%s
+                       WHERE id=%s AND owner_id=%s RETURNING *""",
+                    (name, address, lat, lon, final_map_url, status, tw_from, tw_to, unload,
+                     existing_store_id, owner_id),
+                )
+            else:
+                cur2.execute(
+                    """INSERT INTO stores (name, address, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+                    (name, address, lat, lon, final_map_url, status, tw_from, tw_to, unload, owner_id),
+                )
+
             db_row = cur2.fetchone()
             conn2.commit(); cur2.close(); conn2.close()
-            stores_out.append(store_row_to_dict(db_row))
+            if db_row:
+                stores_out.append(store_row_to_dict(db_row))
             imported += 1
-            if dup_warning:
+            if dup_warning and db_row:
                 dup_warning["new_store_id"] = db_row["id"]
                 duplicates.append(dup_warning)
         except Exception as e:
@@ -3293,6 +3362,7 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
         job["processed"] = i
         job["imported"] = imported
         job["failed"] = failed
+        job["skipped_existing"] = skipped_existing
         job["duplicates"] = duplicates
 
     geocoded_found = sum(1 for s in stores_out if s.get("geocode_status") == "found")
@@ -3302,15 +3372,22 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
     job["geocoded_found"] = geocoded_found
     job["geocoded_not_found"] = geocoded_not_found
     job["deduped"] = skipped_dedup
+    job["skipped_existing"] = skipped_existing
     job["done"] = True
-    logger.info("Import job done: %d imported (%d geocoded, %d no-coords), %d failed, %d duplicates, %d deduped",
-                imported, geocoded_found, geocoded_not_found, failed, len(duplicates), skipped_dedup)
+    logger.info("Import job done: %d imported (%d geocoded, %d no-coords), %d failed, %d duplicates, %d deduped, %d skipped_existing",
+                imported, geocoded_found, geocoded_not_found, failed, len(duplicates), skipped_dedup, skipped_existing)
 
 
 @app.post("/api/stores/import/start", status_code=202)
-async def start_import_stores(request: Request, file: UploadFile = File(...), mapping: Optional[str] = Form(None)):
+async def start_import_stores(
+    request: Request,
+    file: UploadFile = File(...),
+    mapping: Optional[str] = Form(None),
+    import_mode: Optional[str] = Form("new_only"),
+):
     """Start async background import. Returns job_id for progress polling.
-    mapping: optional JSON string with column indices {name, address, city, yandex, unload, tw_from, tw_to}."""
+    mapping: optional JSON string with column indices {name, address, city, yandex, unload, tw_from, tw_to}.
+    import_mode: 'new_only' (default, skip existing), 'update' (update existing), 'all' (always insert)."""
     uid = get_user_id(request)
     if not OPENPYXL_AVAILABLE:
         raise HTTPException(status_code=500, detail="openpyxl not installed")
@@ -3323,14 +3400,16 @@ async def start_import_stores(request: Request, file: UploadFile = File(...), ma
         except Exception:
             raise HTTPException(status_code=422, detail="mapping must be valid JSON")
 
+    safe_mode = import_mode if import_mode in ("new_only", "update", "all") else "new_only"
+
     job_id = _uuid.uuid4().hex[:8]
     job: dict = {
         "total": 0, "processed": 0, "imported": 0, "failed": 0,
         "done": False, "stores": [], "duplicates": [], "error": None, "deduped": 0,
-        "owner_id": uid,
+        "skipped_existing": 0, "owner_id": uid,
     }
     import_jobs[job_id] = job
-    t = threading.Thread(target=_import_process_content_sync, args=(content, job, parsed_mapping, uid), daemon=True)
+    t = threading.Thread(target=_import_process_content_sync, args=(content, job, parsed_mapping, uid, safe_mode), daemon=True)
     t.start()
     return {"job_id": job_id}
 
@@ -3372,6 +3451,7 @@ def get_import_result(job_id: str, request: Request):
         "stores": job.get("stores", []),
         "duplicates": job.get("duplicates", []),
         "deduped": job.get("deduped", 0),
+        "skipped_existing": job.get("skipped_existing", 0),
         "geocoded_found": job.get("geocoded_found", 0),
         "geocoded_not_found": job.get("geocoded_not_found", 0),
         "done": job["done"],
