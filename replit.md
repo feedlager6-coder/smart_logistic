@@ -98,6 +98,7 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 | DELETE | `/api/stores/{id}` | Удалить магазин |
 | POST | `/api/stores/{id}/geocode` | Геокодировать магазин (forward; если address = coords → reverse) |
 | POST | `/api/stores/import` | Импорт из Excel |
+| GET | `/api/stores/export` | Экспорт всех магазинов в Excel (base64 JSON) |
 | GET | `/api/stores/template` | Скачать шаблон Excel (base64 JSON) |
 | GET | `/api/geocode` | Геокодировать адрес/ссылку Яндекс Карт |
 | POST | `/api/route/build` | Построить маршруты (VRP, OR-Tools + OSRM + Or-opt) |
@@ -138,6 +139,16 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 - **ETA через OSRM (Stable 1.0)**: после `solve_vrp` для каждого финального маршрута выполняется отдельный параллельный OSRM-запрос (`_fetch_route_leg_times_osrm`). Возвращает `list[int]` (секунды на плечо), читает `durations[i][i+1]` из Table API. Если плечо > 7200 сек (2 ч) — весь маршрут дисквалифицируется, fallback на Haversine×2.0. `solve_vrp` не трогается. Добавляет ~1–2 сек к построению (9 параллельных вызовов).
 - **auto_cap max_stops_per_vehicle**: если пользователь не выбрал ручной лимит, система автоматически применяет `effective_max_stops = ceil(avg × 1.5)`. Симметрично полу 0.70×avg из `_rebalance_min_stops`. Передаётся в `solve_vrp` как `effective_max_stops` (не перезаписывает `body.max_stops_per_vehicle`). Предотвращает сценарии 34/8/7 при плотных районах.
 - **optimize_by скрыт из UI**: переключатель "Минимум км / Минимум времени" убран из `route.tsx`. Код и API параметр сохранены — всегда шлётся `"distance"` как default. Полевые тесты не показали измеримой разницы между режимами.
+
+## Changelog — Pre-Demo Audit (19 Jun 2026)
+
+1. **`GET /api/stores/export`** — новый endpoint. Возвращает все магазины пользователя в Excel (base64 JSON), совместимом с форматом импорта. Имя файла: `smartroute_stores_YYYY-MM-DD.xlsx`. Frontend: кнопка "Экспорт магазинов" в шапке страницы /stores (показывается только если есть магазины).
+2. **AlertDialog для удаления магазина** — `window.confirm` заменён на AlertDialog, единый UX с историей маршрутов.
+3. **Кнопка "Построить заново"** — добавлена внизу страницы результата (`/result/:id`), дополняет кнопку в шапке.
+4. **Авто-сохранение автопарка** — `useEffect` в `route.tsx` сохраняет vehicles в localStorage при каждом изменении. Кнопка "Шаблон" по-прежнему работает, показывает toast.
+5. **Login rate limiting** — `_check_login_rate_limit()` в `POST /api/auth/login`: 5 попыток за 15 мин → 429 на 15 мин. Сбрасывается при успешном входе.
+6. **Онбординг** при 0 магазинов — трёхшаговый блок в /stores.
+7. **Коммерческие материалы** — `docs/` содержит: `audit-report.md`, `demo-script-15min.md`, `call-script.md`, `commercial-offer.md`, `objections.md`, `pre-meeting-checklist.md`.
 
 ## Production Audit — Stable 1.0 (14 Jun 2026)
 

@@ -2756,6 +2756,79 @@ def download_stores_template():
     }
 
 
+@app.get("/api/stores/export")
+def export_stores(request: Request):
+    """Export all user stores as Excel (base64 JSON). Same format as import template."""
+    if not OPENPYXL_AVAILABLE:
+        raise HTTPException(status_code=500, detail="openpyxl not installed")
+
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        "SELECT name, map_url, address, lat, lon, unload_minutes, time_window_from, time_window_to "
+        "FROM stores WHERE owner_id = %s ORDER BY id",
+        (uid,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    import base64
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Магазины"
+
+    headers = [
+        "Название",
+        "Ссылка Яндекс",
+        "Адрес",
+        "Город",
+        "Разгрузка мин",
+        "Время с",
+        "Время до",
+    ]
+    ws.append(headers)
+
+    header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
+    for col_num, _ in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_num)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    for row in rows:
+        ws.append([
+            row.get("name") or "",
+            row.get("map_url") or "",
+            row.get("address") or "",
+            "",  # city — not stored separately, skip
+            row.get("unload_minutes") or 15,
+            row.get("time_window_from") or "09:00",
+            row.get("time_window_to") or "18:00",
+        ])
+
+    col_widths = [28, 52, 36, 16, 16, 12, 12]
+    for i, width in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = width
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    content = buf.read()
+
+    from datetime import date
+    filename = f"smartroute_stores_{date.today().isoformat()}.xlsx"
+    return {
+        "data": base64.b64encode(content).decode("ascii"),
+        "filename": filename,
+        "count": len(rows),
+    }
+
+
 @app.post("/api/stores/import")
 async def import_stores(request: Request, file: UploadFile = File(...)):
     owner_id = get_user_id(request)

@@ -7,7 +7,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store, ChevronDown, ChevronUp, ExternalLink, Link, Pencil, AlertCircle, CheckCircle2, Route } from "lucide-react";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store, ChevronDown, ChevronUp, ExternalLink, Link, Pencil, AlertCircle, FileDown } from "lucide-react";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useToast } from "@/hooks/use-toast";
 import { ImportMappingDialog } from "@/components/ImportMappingDialog";
@@ -21,6 +25,10 @@ export function StoresPage() {
   const { toast } = useToast();
   const [search, setSearch] = useState("");
   const [showNoCoords, setShowNoCoords] = useState(false);
+  const [exportLoading, setExportLoading] = useState(false);
+
+  // Delete confirmation dialog state
+  const [deleteConfirm, setDeleteConfirm] = useState<{ id: number; name: string } | null>(null);
 
   // Add form state
   const [name, setName] = useState("");
@@ -142,16 +150,51 @@ export function StoresPage() {
   };
 
   const handleDelete = (id: number, name: string) => {
-    if (!window.confirm(`Удалить магазин «${name}»? Это действие нельзя отменить.`)) return;
+    setDeleteConfirm({ id, name });
+  };
+
+  const confirmDelete = () => {
+    if (!deleteConfirm) return;
     deleteStore.mutate(
-      { id },
+      { id: deleteConfirm.id },
       {
         onSuccess: () => {
-          toast({ title: "Магазин удален" });
+          toast({ title: "Магазин удалён" });
           queryClient.invalidateQueries({ queryKey: getListStoresQueryKey() });
+          setDeleteConfirm(null);
+        },
+        onError: () => {
+          toast({ title: "Ошибка удаления", variant: "destructive" });
+          setDeleteConfirm(null);
         },
       }
     );
+  };
+
+  const handleExportStores = async () => {
+    setExportLoading(true);
+    try {
+      const res = await fetch("/api/stores/export");
+      if (!res.ok) throw new Error("Ошибка экспорта");
+      const json = await res.json();
+      const binaryStr = atob(json.data);
+      const bytes = new Uint8Array(binaryStr.length);
+      for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+      const blob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = json.filename ?? "smartroute_stores.xlsx";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast({ title: "Экспорт готов", description: `Выгружено ${json.count} магазинов` });
+    } catch {
+      toast({ title: "Ошибка экспорта", description: "Попробуйте ещё раз", variant: "destructive" });
+    } finally {
+      setExportLoading(false);
+    }
   };
 
   const handleGeocode = (id: number) => {
@@ -314,8 +357,14 @@ export function StoresPage() {
         <div className="flex items-center gap-2 flex-wrap">
           <Button variant="outline" size="sm" onClick={handleDownloadTemplate}>
             <Download className="w-4 h-4 mr-2" />
-            Скачать шаблон SmartRoute
+            Шаблон Excel
           </Button>
+          {stores.length > 0 && (
+            <Button variant="outline" size="sm" onClick={handleExportStores} disabled={exportLoading}>
+              {exportLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <FileDown className="w-4 h-4 mr-2" />}
+              Экспорт магазинов
+            </Button>
+          )}
           <Label htmlFor="import-file" className="cursor-pointer">
             <div className={`flex items-center gap-2 h-9 px-3 rounded-md font-medium text-sm transition-colors border ${importLoading ? "opacity-60 pointer-events-none bg-muted text-muted-foreground" : "bg-secondary text-secondary-foreground hover:bg-secondary/80"}`}>
               {importLoading ? (
@@ -665,6 +714,27 @@ export function StoresPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Delete confirmation dialog */}
+      <AlertDialog open={!!deleteConfirm} onOpenChange={(open) => { if (!open) setDeleteConfirm(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Удалить магазин?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Магазин <strong>«{deleteConfirm?.name}»</strong> будет удалён безвозвратно.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Отмена</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={confirmDelete}
+            >
+              Удалить
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Duplicate warning dialog */}
       <Dialog open={!!dupWarning} onOpenChange={(open) => { if (!open) setDupWarning(null); }}>
