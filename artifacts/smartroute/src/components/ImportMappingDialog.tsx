@@ -237,134 +237,145 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Настройка импорта Excel / 1С</DialogTitle>
-          <DialogDescription>
-            Проверьте, какие колонки файла соответствуют полям SmartRoute.
-          </DialogDescription>
-        </DialogHeader>
+      <DialogContent className="max-w-5xl p-0 flex flex-col max-h-[92vh]">
 
-        {loading && (
-          <div className="flex items-center justify-center py-12">
-            <Loader2 className="w-8 h-8 animate-spin text-primary" />
-            <span className="ml-3 text-muted-foreground">Читаю файл...</span>
-          </div>
-        )}
+        {/* ── Sticky top zone: header + file stats + DB comparison ── */}
+        <div className="px-6 pt-6 pb-4 border-b shrink-0">
+          <DialogHeader className="mb-4">
+            <DialogTitle>Настройка импорта Excel / 1С</DialogTitle>
+            <DialogDescription>
+              Проверьте, какие колонки файла соответствуют полям SmartRoute.
+            </DialogDescription>
+          </DialogHeader>
 
-        {error && (
-          <Alert variant="destructive">
-            <AlertCircle className="w-4 h-4" />
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
-
-        {preview && !loading && (
-          <div className="space-y-5">
-            {/* Stats row */}
-            <div className="flex flex-wrap gap-4 text-sm items-center">
-              <span className="text-muted-foreground">
-                Строк в файле: <b className="text-foreground">{preview.total_rows}</b>
-              </span>
-              <span className="text-muted-foreground">
-                Уникальных точек: <b className="text-foreground">{preview.unique_count}</b>
-              </span>
-              {deduped > 0 && (
-                <span className="flex items-center gap-1 text-amber-600">
-                  <Info className="w-3.5 h-3.5" />
-                  {deduped} дубликат{deduped === 1 ? "" : deduped < 5 ? "а" : "ов"} объединено
-                </span>
-              )}
-              {eta && (
-                <span className="flex items-center gap-1 text-muted-foreground">
-                  <Clock className="w-3.5 h-3.5" />
-                  Ожидаемое время: <b className="text-foreground ml-1">{eta}</b>
-                </span>
-              )}
+          {loading && (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="w-8 h-8 animate-spin text-primary" />
+              <span className="ml-3 text-muted-foreground">Читаю файл...</span>
             </div>
+          )}
 
-            {/* Existing vs new breakdown — shown when there are matches in DB */}
-            {(hasExisting || addressOnlyMatches.length > 0) && (
-              <div className="rounded-lg border overflow-hidden">
-                <div className="bg-muted/40 px-4 py-2 border-b flex items-center justify-between">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                    Сравнение с базой данных
-                  </p>
-                  {(likelyDups.length > 0 || addressOnlyMatches.length > 0) && (
-                    <button
-                      type="button"
-                      onClick={() => setShowMatchDetails(v => !v)}
-                      className="text-xs text-primary hover:underline"
-                    >
-                      {showMatchDetails ? "Скрыть детали" : "Показать детали"}
-                    </button>
-                  )}
-                </div>
+          {error && (
+            <Alert variant="destructive">
+              <AlertCircle className="w-4 h-4" />
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          )}
 
-                {/* Counters */}
-                <div className={`grid divide-x ${addressOnlyMatches.length > 0 ? "grid-cols-3" : "grid-cols-2"}`}>
-                  <div className="px-4 py-3 flex items-center gap-3">
-                    <PlusCircle className="w-5 h-5 text-green-600 shrink-0" />
-                    <div>
-                      <div className="text-xl font-bold text-green-700">{preview!.new_count}</div>
-                      <div className="text-xs text-muted-foreground">новых магазинов</div>
-                    </div>
-                  </div>
-                  {likelyDups.length > 0 && (
-                    <div className="px-4 py-3 flex items-center gap-3">
-                      <CheckCircle2 className="w-5 h-5 text-red-500 shrink-0" />
-                      <div>
-                        <div className="text-xl font-bold text-red-700">{likelyDups.length}</div>
-                        <div className="text-xs text-muted-foreground">вероятных дублей</div>
-                      </div>
-                    </div>
-                  )}
-                  {addressOnlyMatches.length > 0 && (
-                    <div className="px-4 py-3 flex items-center gap-3">
-                      <MapPin className="w-5 h-5 text-blue-500 shrink-0" />
-                      <div>
-                        <div className="text-xl font-bold text-blue-700">{addressOnlyMatches.length}</div>
-                        <div className="text-xs text-muted-foreground">разные магазины по адресу</div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Per-row match details */}
-                {showMatchDetails && preview!.matches && preview!.matches.length > 0 && (
-                  <div className="border-t divide-y max-h-52 overflow-y-auto">
-                    {preview!.matches.map((m, idx) => {
-                      const meta = REASON_META[m.reason] ?? REASON_META.address_only;
-                      return (
-                        <div key={idx} className="px-4 py-2.5 flex flex-col gap-0.5">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded border ${meta.color}`}>
-                              {meta.icon}
-                              {meta.label}
-                            </span>
-                            {!m.is_likely_duplicate && (
-                              <span className="text-[10px] text-muted-foreground italic">
-                                (разные названия — не является дублём)
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-xs flex gap-2 mt-0.5">
-                            <span className="text-muted-foreground w-12 shrink-0">Файл:</span>
-                            <span className="font-medium">{m.file_name}</span>
-                            {m.file_address && <span className="text-muted-foreground truncate">{m.file_address}</span>}
-                          </div>
-                          <div className="text-xs flex gap-2">
-                            <span className="text-muted-foreground w-12 shrink-0">В базе:</span>
-                            <span className="font-medium">{m.existing_name}</span>
-                            {m.existing_address && <span className="text-muted-foreground truncate">{m.existing_address}</span>}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
+          {preview && !loading && (
+            <>
+              {/* Stats row */}
+              <div className="flex flex-wrap gap-4 text-sm items-center mb-4">
+                <span className="text-muted-foreground">
+                  Строк в файле: <b className="text-foreground">{preview.total_rows}</b>
+                </span>
+                <span className="text-muted-foreground">
+                  Уникальных точек: <b className="text-foreground">{preview.unique_count}</b>
+                </span>
+                {deduped > 0 && (
+                  <span className="flex items-center gap-1 text-amber-600">
+                    <Info className="w-3.5 h-3.5" />
+                    {deduped} дубликат{deduped === 1 ? "" : deduped < 5 ? "а" : "ов"} объединено
+                  </span>
+                )}
+                {eta && (
+                  <span className="flex items-center gap-1 text-muted-foreground">
+                    <Clock className="w-3.5 h-3.5" />
+                    Ожидаемое время: <b className="text-foreground ml-1">{eta}</b>
+                  </span>
                 )}
               </div>
-            )}
+
+              {/* Existing vs new breakdown — shown when there are matches in DB */}
+              {(hasExisting || addressOnlyMatches.length > 0) && (
+                <div className="rounded-lg border overflow-hidden">
+                  <div className="bg-muted/40 px-4 py-2 border-b flex items-center justify-between">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      Сравнение с базой данных
+                    </p>
+                    {(likelyDups.length > 0 || addressOnlyMatches.length > 0) && (
+                      <button
+                        type="button"
+                        onClick={() => setShowMatchDetails(v => !v)}
+                        className="text-xs text-primary hover:underline"
+                      >
+                        {showMatchDetails ? "Скрыть детали" : "Показать детали"}
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Counters */}
+                  <div className={`grid divide-x ${addressOnlyMatches.length > 0 ? "grid-cols-3" : "grid-cols-2"}`}>
+                    <div className="px-4 py-3 flex items-center gap-3">
+                      <PlusCircle className="w-5 h-5 text-green-600 shrink-0" />
+                      <div>
+                        <div className="text-xl font-bold text-green-700">{preview!.new_count}</div>
+                        <div className="text-xs text-muted-foreground">новых магазинов</div>
+                      </div>
+                    </div>
+                    {likelyDups.length > 0 && (
+                      <div className="px-4 py-3 flex items-center gap-3">
+                        <CheckCircle2 className="w-5 h-5 text-red-500 shrink-0" />
+                        <div>
+                          <div className="text-xl font-bold text-red-700">{likelyDups.length}</div>
+                          <div className="text-xs text-muted-foreground">вероятных дублей</div>
+                        </div>
+                      </div>
+                    )}
+                    {addressOnlyMatches.length > 0 && (
+                      <div className="px-4 py-3 flex items-center gap-3">
+                        <MapPin className="w-5 h-5 text-blue-500 shrink-0" />
+                        <div>
+                          <div className="text-xl font-bold text-blue-700">{addressOnlyMatches.length}</div>
+                          <div className="text-xs text-muted-foreground">разные магазины по адресу</div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Per-row match details */}
+                  {showMatchDetails && preview!.matches && preview!.matches.length > 0 && (
+                    <div className="border-t divide-y max-h-72 overflow-y-auto">
+                      {preview!.matches.map((m, idx) => {
+                        const meta = REASON_META[m.reason] ?? REASON_META.address_only;
+                        return (
+                          <div key={idx} className="px-4 py-2.5 flex flex-col gap-0.5">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded border ${meta.color}`}>
+                                {meta.icon}
+                                {meta.label}
+                              </span>
+                              {!m.is_likely_duplicate && (
+                                <span className="text-[10px] text-muted-foreground italic">
+                                  (разные названия — не является дублём)
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-xs flex gap-2 mt-0.5 min-w-0">
+                              <span className="text-muted-foreground w-12 shrink-0">Файл:</span>
+                              <span className="font-medium truncate">{m.file_name}</span>
+                              {m.file_address && <span className="text-muted-foreground truncate flex-1">{m.file_address}</span>}
+                            </div>
+                            <div className="text-xs flex gap-2 min-w-0">
+                              <span className="text-muted-foreground w-12 shrink-0">В базе:</span>
+                              <span className="font-medium truncate">{m.existing_name}</span>
+                              {m.existing_address && <span className="text-muted-foreground truncate flex-1">{m.existing_address}</span>}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* ── Scrollable body: mapping fields, mode, city, preview ── */}
+        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+          {preview && !loading && (
+            <>
 
             {/* Import mode selector — only shown when existing stores found */}
             {hasExisting && (
@@ -504,43 +515,47 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
                 </table>
               </div>
             </div>
-          </div>
-        )}
+            </>
+          )}
+        </div>
 
-        <DialogFooter className="gap-2 flex-wrap">
-          <Button variant="outline" onClick={onClose} disabled={importing}>
-            Отмена
-          </Button>
-          {showCityWarning && !hasCityInfo ? (
-            <Button
-              variant="outline"
-              onClick={startImport}
-              disabled={importing || mapping.name === null}
-              className="border-amber-400 text-amber-800 hover:bg-amber-50 dark:text-amber-300 dark:hover:bg-amber-950/40"
-            >
-              Продолжить без города
+        {/* ── Sticky footer ── */}
+        <div className="px-6 py-4 border-t bg-muted/10 shrink-0">
+          <div className="flex flex-wrap gap-2 justify-end">
+            <Button variant="outline" onClick={onClose} disabled={importing}>
+              Отмена
             </Button>
-          ) : null}
-          <Button
-            onClick={handleImport}
-            disabled={loading || !!error || importing || mapping.name === null}
-          >
-            {importing ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                Запускаю...
-              </>
-            ) : showCityWarning && !hasCityInfo ? (
-              "Указать город"
-            ) : (
-              `Начать импорт (${
-                importMode === "new_only" && preview?.existing_count
-                  ? `${preview.new_count} новых`
-                  : `${preview?.unique_count ?? "?"} точек`
-              })`
-            )}
-          </Button>
-        </DialogFooter>
+            {showCityWarning && !hasCityInfo ? (
+              <Button
+                variant="outline"
+                onClick={startImport}
+                disabled={importing || mapping.name === null}
+                className="border-amber-400 text-amber-800 hover:bg-amber-50 dark:text-amber-300 dark:hover:bg-amber-950/40"
+              >
+                Продолжить без города
+              </Button>
+            ) : null}
+            <Button
+              onClick={handleImport}
+              disabled={loading || !!error || importing || mapping.name === null}
+            >
+              {importing ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                  Запускаю...
+                </>
+              ) : showCityWarning && !hasCityInfo ? (
+                "Указать город"
+              ) : (
+                `Начать импорт (${
+                  importMode === "new_only" && preview?.existing_count
+                    ? `${preview.new_count} новых`
+                    : `${preview?.unique_count ?? "?"} точек`
+                })`
+              )}
+            </Button>
+          </div>
+        </div>
       </DialogContent>
     </Dialog>
   );

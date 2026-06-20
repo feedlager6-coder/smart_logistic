@@ -15,6 +15,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   UserPlus, Trash2, KeyRound, ShieldCheck, ShieldOff, UserCheck, UserX,
   RefreshCw, Pencil, Check, X, Search, ChevronUp, ChevronDown, ClipboardList,
+  Eye, EyeOff, Copy, Wand2,
 } from "lucide-react";
 
 interface AdminUser {
@@ -103,6 +104,8 @@ export function UsersPanel() {
   const [resetUser, setResetUser] = useState<AdminUser | null>(null);
   const [resetPassword, setResetPassword] = useState("");
   const [resetting, setResetting] = useState(false);
+  const [showResetPass, setShowResetPass] = useState(false);
+  const [copiedReset, setCopiedReset] = useState(false);
 
   const [deleteUser, setDeleteUser] = useState<AdminUser | null>(null);
   const [deleteConfirmInput, setDeleteConfirmInput] = useState("");
@@ -238,13 +241,33 @@ export function UsersPanel() {
     }
   }
 
+  function generatePassword(): string {
+    const chars = "abcdefghjkmnpqrstuvwxyz23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+    return Array.from({ length: 10 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  }
+
+  function handleGeneratePassword() {
+    const pwd = generatePassword();
+    setResetPassword(pwd);
+    setShowResetPass(true);
+    setCopiedReset(false);
+  }
+
+  function handleCopyResetPassword() {
+    if (!resetPassword) return;
+    navigator.clipboard.writeText(resetPassword).then(() => {
+      setCopiedReset(true);
+      setTimeout(() => setCopiedReset(false), 2500);
+    });
+  }
+
   async function handleResetPassword() {
     if (!resetUser) return;
     if (resetPassword.length < 4) { toast({ title: "Ошибка", description: "Пароль — минимум 4 символа", variant: "destructive" }); return; }
     setResetting(true);
     try {
       await patch(resetUser.id, { password: resetPassword });
-      setResetUser(null); setResetPassword("");
+      setResetUser(null); setResetPassword(""); setShowResetPass(false);
       toast({ title: "Пароль изменён", description: resetUser.username });
     } catch (e: any) {
       toast({ title: "Ошибка", description: e.message, variant: "destructive" });
@@ -630,7 +653,7 @@ export function UsersPanel() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={!!resetUser} onOpenChange={open => { if (!open) setResetUser(null); }}>
+      <Dialog open={!!resetUser} onOpenChange={open => { if (!open) { setResetUser(null); setResetPassword(""); setShowResetPass(false); setCopiedReset(false); } }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Смена пароля</DialogTitle>
@@ -638,13 +661,62 @@ export function UsersPanel() {
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div className="space-y-1.5">
-              <Label>Новый пароль</Label>
-              <Input type="password" value={resetPassword} onChange={e => setResetPassword(e.target.value)} placeholder="Минимум 4 символа" autoComplete="new-password" autoFocus />
+              <div className="flex items-center justify-between">
+                <Label>Новый пароль</Label>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs gap-1.5 text-primary hover:text-primary"
+                  onClick={handleGeneratePassword}
+                >
+                  <Wand2 className="w-3 h-3" />
+                  Сгенерировать
+                </Button>
+              </div>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <Input
+                    type={showResetPass ? "text" : "password"}
+                    value={resetPassword}
+                    onChange={e => { setResetPassword(e.target.value); setCopiedReset(false); }}
+                    placeholder="Минимум 4 символа"
+                    autoComplete="new-password"
+                    autoFocus
+                    className="pr-9 font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowResetPass(v => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                    tabIndex={-1}
+                  >
+                    {showResetPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className="shrink-0"
+                  title="Скопировать пароль"
+                  onClick={handleCopyResetPassword}
+                  disabled={!resetPassword}
+                >
+                  {copiedReset ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
+                </Button>
+              </div>
+              {resetPassword && (
+                <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+                  <Copy className="w-3 h-3 shrink-0" />
+                  Скопируйте пароль и передайте пользователю до сохранения.
+                </p>
+              )}
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setResetUser(null)}>Отмена</Button>
-            <Button onClick={handleResetPassword} disabled={resetting}>{resetting ? "Сохраняю…" : "Сохранить"}</Button>
+            <Button variant="outline" onClick={() => { setResetUser(null); setResetPassword(""); setShowResetPass(false); }}>Отмена</Button>
+            <Button onClick={handleResetPassword} disabled={resetting || !resetPassword}>{resetting ? "Сохраняю…" : "Сохранить"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

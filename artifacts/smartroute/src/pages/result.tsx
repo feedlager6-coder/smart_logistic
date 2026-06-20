@@ -557,15 +557,21 @@ export function ResultPage() {
                           {(route as any).service_minutes > 0 ? (
                             <span className="flex items-center gap-1 cursor-help">
                               <Clock className="w-4 h-4" />
-                              {Math.floor((route.estimated_minutes ?? 0) / 60)} ч {(route.estimated_minutes ?? 0) % 60} мин
+                              ≈{Math.floor((route.estimated_minutes ?? 0) / 60)} ч {(route.estimated_minutes ?? 0) % 60} мин
                               <span className="text-xs text-muted-foreground/70 ml-1">(езда {(route as any).drive_minutes ?? 0} мин)</span>
                             </span>
                           ) : (
-                            <span className="flex items-center gap-1 cursor-help"><Clock className="w-4 h-4" /> ~{Math.floor((route.estimated_minutes ?? 0) / 60)} ч {(route.estimated_minutes ?? 0) % 60} мин</span>
+                            <span className="flex items-center gap-1 cursor-help">
+                              <Clock className="w-4 h-4" />
+                              ≈{Math.floor((route.estimated_minutes ?? 0) / 60)} ч {(route.estimated_minutes ?? 0) % 60} мин
+                              <span className="text-[10px] text-muted-foreground/60 ml-0.5">без пробок</span>
+                            </span>
                           )}
                         </TooltipTrigger>
                         <TooltipContent className="max-w-xs text-xs">
-                          Ориентировочное время маршрута. Рассчитано автоматически, точное время определяется навигатором водителя.
+                          Расчётное время маршрута (без учёта пробок и светофоров). Рассчитано автоматически на основе данных дорог.
+                          <br /><br />
+                          Точное время водитель увидит после открытия маршрута в Яндекс Навигаторе.
                         </TooltipContent>
                       </Tooltip>
                     </TooltipProvider>
