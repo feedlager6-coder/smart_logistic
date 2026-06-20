@@ -33,8 +33,8 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
               </span>
             </div>
           </header>
-          <div className="flex-1 overflow-auto bg-background p-4 md:p-6 lg:p-8 print:p-4">
-            <div className="max-w-[1400px] mx-auto w-full">
+          <div className="flex-1 overflow-auto bg-background p-4 md:p-6 lg:p-8 print:p-4 flex flex-col">
+            <div className="max-w-[1400px] mx-auto w-full flex-1 min-h-0 flex flex-col">
               {children}
             </div>
           </div>

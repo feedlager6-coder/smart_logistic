@@ -259,14 +259,14 @@ export function RoutePage() {
   };
 
   return (
-    <div className="space-y-6">
-      <div>
+    <div className="flex flex-col flex-1 min-h-0 gap-6">
+      <div className="shrink-0">
         <h1 className="text-3xl font-bold tracking-tight">Новый маршрут</h1>
         <p className="text-muted-foreground">Настройка параметров и запуск оптимизации</p>
       </div>
 
       {/* Depot address */}
-      <Card>
+      <Card className="shrink-0">
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2 text-base">
             <Warehouse className="w-4 h-4 text-primary" />
@@ -322,10 +322,10 @@ export function RoutePage() {
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 flex-1 min-h-0 lg:grid-rows-1">
 
         {/* Left Panel: Stores */}
-        <Card className="lg:col-span-2 flex flex-col h-[60vh] lg:h-[calc(100vh-200px)]">
+        <Card className="lg:col-span-2 flex flex-col h-[60vh] lg:h-auto">
           <CardHeader className="pb-4 shrink-0">
             <CardTitle className="flex items-center justify-between">
               Магазины
@@ -411,7 +411,7 @@ export function RoutePage() {
         </Card>
 
         {/* Right Panel: Tabs — Транспорт / Параметры */}
-        <div className="lg:col-span-3 flex flex-col h-[70vh] lg:h-[calc(100vh-200px)]">
+        <div className="lg:col-span-3 flex flex-col h-[70vh] lg:h-auto">
           <Tabs defaultValue="vehicles" className="flex flex-col h-full">
 
             {/* Tab bar */}
