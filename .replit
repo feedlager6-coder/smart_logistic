@@ -1,4 +1,4 @@
-modules = ["nodejs-20", "python-3.11", "web", "postgresql-16"]
+modules = ["nodejs-20", "python-3.11", "web"]
 
 [deployment]
 router = "application"
@@ -84,4 +84,3 @@ externalPort = 3000
 
 [userenv.shared]
 BASE_PATH = "/"
-PG_CONNECTION_URL = "postgresql://postgres:password@helium:5432/heliumdb"
