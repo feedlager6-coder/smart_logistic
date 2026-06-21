@@ -325,7 +325,7 @@ export function RoutePage() {
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 flex-1 min-h-0 lg:grid-rows-1">
 
         {/* Left Panel: Stores */}
-        <Card className="lg:col-span-2 flex flex-col h-[60vh] lg:h-auto">
+        <Card className="lg:col-span-2 flex flex-col h-[60vh] lg:h-[calc(100vh-320px)]">
           <CardHeader className="pb-4 shrink-0">
             <CardTitle className="flex items-center justify-between">
               Магазины
@@ -411,7 +411,7 @@ export function RoutePage() {
         </Card>
 
         {/* Right Panel: Tabs — Транспорт / Параметры */}
-        <div className="lg:col-span-3 flex flex-col h-[70vh] lg:h-auto">
+        <div className="lg:col-span-3 flex flex-col h-[70vh] lg:h-[calc(100vh-320px)]">
           <Tabs defaultValue="vehicles" className="flex flex-col h-full">
 
             {/* Tab bar */}
