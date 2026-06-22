@@ -100,18 +100,22 @@ export function RoutePage() {
 
   // Auto-select stores from today's orders when navigating from /orders page.
   // Trigger: URL contains ?from=orders (set by "К маршруту" button in orders.tsx).
-  // Waits until both stores and orders data are available, then fires exactly once.
+  // Waits until both stores and orders data are available, then fires exactly once
+  // per browser session (survives SPA remounts via sessionStorage flag).
+  const TODAY_KEY = `smartroute_autoselect_${new Date().toISOString().slice(0, 10)}`;
   const autoSelectedRef = useRef(false);
   useEffect(() => {
-    if (!fromOrders) return;               // only when navigated from orders page
-    if (autoSelectedRef.current) return;   // fire exactly once per mount
-    if (!todayOrders) return;              // orders still loading
-    if (!stores || stores.length === 0) return; // stores still loading
+    if (!fromOrders) return;
+    // Persist across component remounts (SPA navigation back/forward)
+    if (autoSelectedRef.current || sessionStorage.getItem(TODAY_KEY)) return;
+    if (!todayOrders || !stores || stores.length === 0) return; // wait for both
 
-    // Mark as done regardless of result — prevents repeated toasts
+    // Mark done before any conditional returns — prevents repeated toasts even
+    // if data arrives in multiple render cycles.
     autoSelectedRef.current = true;
+    sessionStorage.setItem(TODAY_KEY, "1");
 
-    if (todayOrders.total_count === 0) return; // no orders for today
+    if (todayOrders.total_count === 0) return;
 
     const orderStoreIds = new Set(
       (todayOrders.orders ?? [])
@@ -120,8 +124,7 @@ export function RoutePage() {
     );
 
     if (orderStoreIds.size === 0) {
-      // Orders exist but none are matched to stores in the DB.
-      // This happens when store names in the order file don't match store names in SmartRoute.
+      // Orders exist but none are matched to stores — show actionable hint.
       const unmatchedNames = (todayOrders.orders ?? [])
         .filter(o => o.store_id === null && o.store_name_raw)
         .map(o => o.store_name_raw)
@@ -129,9 +132,8 @@ export function RoutePage() {
         .join(", ");
       toast({
         title: "Магазины не выбраны автоматически",
-        description: `Заявки не привязаны к магазинам базы${unmatchedNames ? ` (напр.: ${unmatchedNames}…)` : ""}. Выберите магазины вручную или обновите названия в заявках.`,
-        variant: "destructive",
-        duration: 8000,
+        description: `Названия в заявках не совпадают с магазинами базы${unmatchedNames ? ` (${unmatchedNames}…)` : ""}. Перейдите в «Заявки» и добавьте магазины по кнопке «Добавить магазин».`,
+        duration: 10000,
       });
       return;
     }
@@ -142,7 +144,7 @@ export function RoutePage() {
       description: "Автоматически выбраны магазины с заявками на сегодня.",
       duration: 4000,
     });
-  }, [fromOrders, todayOrders, stores, toast]);
+  }, [fromOrders, todayOrders, stores, toast, TODAY_KEY]);
 
   // Per-store weight map: store_id → weight_kg (Problem 3)
   const orderWeightMap = useMemo(() => {

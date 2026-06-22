@@ -4218,41 +4218,98 @@ def _detect_column_mapping(headers: list[str]) -> dict[str, Optional[str]]:
 
 
 def _normalize_name(s: str) -> str:
-    """Lowercase, collapse whitespace, strip punctuation for fuzzy matching."""
-    return re.sub(r"[^\w\s]", "", s.lower()).strip()
+    """Lowercase, replace punctuation with spaces, collapse whitespace.
+
+    Replaces (not removes) punctuation so that hyphenated names like
+    "Магазин-Приморский" become "магазин приморский" rather than the
+    concatenated "магазинприморский" which would never match anything.
+    """
+    s = s.lower()
+    s = re.sub(r"[^\w\s]", " ", s)   # punctuation → space (keeps word boundaries)
+    s = re.sub(r"\s+", " ", s)        # collapse multiple spaces
+    return s.strip()
+
+
+# Common words that are too generic to be useful as matching signals.
+# A store name consisting only of stop-words (e.g. "Продукты Центр") will NOT
+# be fuzzy-matched — only exact-name match will work for it.
+_MATCH_STOP_WORDS: frozenset = frozenset({
+    "магазин", "супермаркет", "маркет", "мини", "центр", "аптека",
+    "рынок", "базар", "торговый", "торговая", "дом", "склад", "точка",
+    "продукты", "универсам", "универмаг", "павильон", "киоск",
+    "салон", "бутик", "ларек", "ларёк", "лавка", "отдел", "гипермаркет",
+    "ип", "ооо", "зао", "ао",          # юр. форма — не уникальна
+})
+
+
+def _significant_words(name: str) -> frozenset:
+    """Return meaningful tokens: lowercase, no punctuation, no stop-words, len ≥ 3."""
+    tokens = _normalize_name(name).split()
+    return frozenset(
+        w for w in tokens
+        if w not in _MATCH_STOP_WORDS and len(w) >= 3
+    )
 
 
 def _match_store_to_db(raw_name: str, db_stores: list[dict]) -> Optional[dict]:
-    """Return the best matching store dict or None. Three-pass: exact → contains → word-overlap."""
+    """Return the best matching store dict or None.
+
+    Algorithm (two safe passes):
+
+    Pass 1 — Exact normalized name match.
+        Safe: identical after lowercase + strip punctuation → definite match.
+
+    Pass 2 — Jaccard similarity ≥ 0.85 on *significant* words only.
+        Significant = not a stop-word + length ≥ 3.
+        • Both sides must have ≥ 1 significant word.
+        • At least 1 word must be shared.
+        • If multiple stores score equally, return None (ambiguous → safer).
+
+    Deliberately REMOVED:
+        • Substring match (Pass 2 of old algo): "центр" matched
+          "Мебельный Центр" AND "Продукты Центр" — false positive.
+        • Word-overlap ≥ 50% (Pass 3 of old algo): "Супермаркет 24"
+          matched "Супермаркет Каспийск" — false positive.
+    """
     if not raw_name or not db_stores:
         return None
+
     norm = _normalize_name(raw_name)
 
-    # Pass 1: exact
+    # ── Pass 1: exact normalized name ────────────────────────────────────────
     for s in db_stores:
         if _normalize_name(s["name"]) == norm:
             return s
 
-    # Pass 2: substring
-    for s in db_stores:
-        sn = _normalize_name(s["name"])
-        if norm in sn or sn in norm:
-            return s
+    # ── Pass 2: Jaccard ≥ 0.85 on significant words ─────────────────────────
+    raw_sig = _significant_words(raw_name)
+    if not raw_sig:
+        # Only stop-words in the name → fuzzy matching too unreliable
+        return None
 
-    # Pass 3: word overlap ≥ 50 %
-    norm_words = set(norm.split())
-    best_score = 0.0
-    best_store = None
+    candidates: list[tuple[float, dict]] = []
     for s in db_stores:
-        sn_words = set(_normalize_name(s["name"]).split())
-        if not sn_words or not norm_words:
+        db_sig = _significant_words(s["name"])
+        if not db_sig:
             continue
-        overlap = len(norm_words & sn_words) / max(len(norm_words), len(sn_words))
-        if overlap >= 0.5 and overlap > best_score:
-            best_score = overlap
-            best_store = s
+        shared = len(raw_sig & db_sig)
+        if shared == 0:
+            continue
+        jaccard = shared / len(raw_sig | db_sig)
+        if jaccard >= 0.85:
+            candidates.append((jaccard, s))
 
-    return best_store
+    if not candidates:
+        return None
+
+    # Sort descending by score
+    candidates.sort(key=lambda x: -x[0])
+
+    # If top score is shared by multiple stores → ambiguous, refuse to guess
+    if len(candidates) >= 2 and candidates[0][0] == candidates[1][0]:
+        return None
+
+    return candidates[0][1]
 
 
 def _safe_float(val) -> float:
@@ -4980,14 +5037,14 @@ def build_route(request: Request, body: RouteRequest):
         if overloaded:
             details = "; ".join(
                 f"{r['vehicle_name']}: {r['total_weight_kg']:.0f} / {r['capacity_kg']} кг "
-                f"(+{r['total_weight_kg'] - r['capacity_kg']:.0f} кг)"
+                f"(+{r['total_weight_kg'] - r['capacity_kg']:.0f} кг перегруза)"
                 for r in overloaded
             )
             route_warnings.append(
-                f"Невозможно идеально распределить груз: {details}. "
-                f"Причина — бин-паккинг: несколько крупных заявок не умещаются в пределах "
-                f"грузоподъёмности ни одной машины в паре. "
-                f"Добавьте машину или уменьшите вес крупных заявок."
+                f"Перегруз: {details}. "
+                f"Суммарный вес заявок вписывается в автопарк, но несколько крупных заявок "
+                f"невозможно разделить между машинами так, чтобы ни одна не была перегружена. "
+                f"Решение: добавьте ещё одну машину или разбейте крупные заявки на части."
             )
             logger.warning(
                 "build_route: capacity overflow in %d route(s): %s",

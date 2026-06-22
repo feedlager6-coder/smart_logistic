@@ -444,7 +444,9 @@ export function OrdersPage() {
             </Button>
             <Button onClick={handleImport} disabled={!mapping.store_name} className="gap-2">
               <Package className="w-4 h-4" />
-              Загрузить {preview.matched_stores} заявок
+              {preview.unmatched_stores > 0
+                ? `Загрузить ${preview.total_rows} строк (${preview.matched_stores} сопоставлено, ${preview.unmatched_stores} без привязки)`
+                : `Загрузить ${preview.total_rows} заявок`}
             </Button>
           </div>
         </div>
