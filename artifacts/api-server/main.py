@@ -1,4 +1,5 @@
 import os
+import re
 import math
 import json
 import traceback
@@ -10,6 +11,7 @@ import logging
 import threading
 import concurrent.futures
 import uuid as _uuid
+import openpyxl
 from datetime import date, datetime, timedelta
 from typing import Optional
 import secrets
@@ -3947,7 +3949,7 @@ def geocode_store(id: int, request: Request):
 # Order matters: more specific patterns first.
 _ORDER_COLUMN_PATTERNS: dict = {
     "store_name": ["торговая точка", "наименование контрагента", "название точки", "название магазина",
-                   "магазин", "контрагент", "точка доставки", "точка", "клиент", "наименование", "name"],
+                   "магазин", "контрагент", "точка доставки", "название", "точка", "клиент", "наименование", "name"],
     "address":    ["адрес доставки", "адрес точки", "адрес", "address"],
     "weight_kg":  ["вес, кг", "вес (кг)", "вес,кг", "вес кг", "вес", "weight", "масса, кг",
                    "масса кг", "масса", "кг", "kg"],
@@ -3984,7 +3986,6 @@ def _detect_column_mapping(headers: list[str]) -> dict[str, Optional[str]]:
 
 def _normalize_name(s: str) -> str:
     """Lowercase, collapse whitespace, strip punctuation for fuzzy matching."""
-    import re
     return re.sub(r"[^\w\s]", "", s.lower()).strip()
 
 
@@ -4053,21 +4054,17 @@ async def orders_preview(request: Request, file: UploadFile = File(...)):
     Parse an Excel file and return:
     - detected column headers
     - auto-detected field mapping
-    - first 50 rows as raw data
+    - first 200 rows as raw data
     - per-row store match results against caller's store base
     """
-    uid = _require_auth(request)
-    try:
-        import openpyxl as _xl
-    except ImportError:
-        raise HTTPException(status_code=500, detail="openpyxl not installed")
+    uid = get_user_id(request)
 
     content = await file.read()
     if len(content) > 20 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="Файл слишком большой (макс. 20 МБ)")
 
     try:
-        wb = _xl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
         ws = wb.active
         rows_raw = list(ws.iter_rows(values_only=True))
         wb.close()
@@ -4128,10 +4125,10 @@ async def orders_preview(request: Request, file: UploadFile = File(...)):
             "matched_store_name": matched_store["name"] if matched_store else None,
         })
 
-    # Filter out rows where store name is completely empty
+    # Filter out rows where the store name cell is empty
     preview_rows = [r for r in preview_rows
-                    if name_col_idx is None
-                    or any(v.strip() for v in r["cells"].values())]
+                    if name_col is None
+                    or r["cells"].get(name_col, "").strip() not in ("", "None", "nan")]
 
     matched_count = sum(1 for r in preview_rows if r["matched_store_id"] is not None)
     total_count = len(preview_rows)
@@ -4150,15 +4147,17 @@ async def orders_preview(request: Request, file: UploadFile = File(...)):
 @app.post("/api/orders/import", status_code=201)
 def orders_import(request: Request, body: OrderImportRequest):
     """Save confirmed orders for a delivery date."""
-    uid = _require_auth(request)
+    uid = get_user_id(request)
 
     # Validate date format
-    import re as _re
-    if not _re.match(r"^\d{4}-\d{2}-\d{2}$", body.delivery_date):
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", body.delivery_date):
         raise HTTPException(status_code=422, detail="delivery_date должен быть в формате YYYY-MM-DD")
 
     if not body.rows:
         raise HTTPException(status_code=422, detail="Список заявок пуст")
+
+    if len(body.rows) > 2000:
+        raise HTTPException(status_code=422, detail="Слишком много заявок в одном импорте (максимум 2000 строк)")
 
     # Validate and cap
     for row in body.rows:
@@ -4232,9 +4231,8 @@ def orders_import(request: Request, body: OrderImportRequest):
 @app.get("/api/orders")
 def get_orders(request: Request, date: Optional[str] = None):
     """Return daily orders for a date (default: today). Joined with stores for display."""
-    uid = _require_auth(request)
-    from datetime import date as _date
-    target_date = date if date else str(_date.today())
+    uid = get_user_id(request)
+    target_date = date if date else str(datetime.now().date())
 
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -4278,9 +4276,8 @@ def get_orders(request: Request, date: Optional[str] = None):
 @app.delete("/api/orders")
 def delete_orders(request: Request, date: Optional[str] = None):
     """Delete all orders for a date (default: today)."""
-    uid = _require_auth(request)
-    from datetime import date as _date
-    target_date = date if date else str(_date.today())
+    uid = get_user_id(request)
+    target_date = date if date else str(datetime.now().date())
 
     conn = get_db()
     cur = conn.cursor()

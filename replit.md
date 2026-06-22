@@ -209,6 +209,30 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 
 ---
 
+## Заявки на день (daily_orders)
+
+**Сценарий**: диспетчер выгружает список заявок из 1С/Антор/Google Sheets в Excel, загружает в SmartRoute. Система автоматически определяет колонки, сопоставляет строки с магазинами из базы (fuzzy-matching) и сохраняет веса/объёмы. При следующем построении маршрута `build_route` читает данные за сегодня и использует реальные веса как VRP demands.
+
+**API эндпоинты**:
+- `POST /api/orders/preview` — multipart/form-data, возвращает auto-detected маппинг колонок + предпросмотр строк с результатом сопоставления
+- `POST /api/orders/import` — JSON `{delivery_date, rows[], clear_existing}`, сохраняет заявки в `daily_orders`
+- `GET /api/orders?date=YYYY-MM-DD` — список заявок + агрегаты (сумма весов, объёмов, рублей)
+- `DELETE /api/orders?date=YYYY-MM-DD` — удалить заявки за дату
+
+**Детектирование колонок** (`_detect_column_mapping`): словарь `_ORDER_COLUMN_PATTERNS` (8 полей). Ключевые слова — рус + eng, от специфичных к общим. Колонка `"Название"` → field `store_name` (включает export SmartRoute).
+
+**Fuzzy-matching магазинов** (`_match_store_to_db`): 3 прохода — точное совпадение → substring → word overlap ≥ 50%. Несопоставленные сохраняются с `store_id = NULL` (в маршрут не попадают, но видны в UI).
+
+**Интеграция с build_route**: запрос `daily_orders` за `date.today()` с `store_id IS NOT NULL` → `_store_weights: dict[int, float]`. Если ёмкость машин задана (`capacity_kg`) И веса загружены → используются как OR-Tools integer demands (с auto-scale если > 10000 кг). Результат: `weight_kg`/`volume_m3` в каждом `route_stores` элементе; `total_weight_kg`/`total_volume_m3` в каждом маршруте.
+
+**Ограничение**: sweep-кластеризация по углу не учитывает веса. Capacity constraint применяется только внутри уже назначенного кластера. При крайне неравных весах возможно превышение capacity у отдельных машин.
+
+**Важные паттерны в коде**:
+- Auth: `uid = get_user_id(request)` (не `_require_auth` — такой функции нет)
+- `import re` и `import openpyxl` — на уровне модуля (строки 1 и 13)
+- Лимит импорта: 2000 строк за раз (защита от зависания)
+- Фильтр пустых строк в preview: по наличию имени в `name_col`, не по `any(cells.values())`
+
 ## Gotchas
 
 - `Start API Server` и `artifacts/smartroute: web` workflows — всегда FAILED (конфликт портов с уже запущенными `artifacts/api-server: API Server` и `Start Frontend`) — ожидаемо, не чинить

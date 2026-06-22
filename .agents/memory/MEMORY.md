@@ -22,3 +22,4 @@
 - [Admin cascade delete wipes all user data](admin-cascade-delete.md) — admin_delete_user manually deletes route_session_stores→route_sessions→stores→company_settings→users (FK is NO ACTION). Never use real accounts in destructive API tests.
 - [Admin user plan and note fields](admin-user-plan-note.md) — users table has plan TEXT DEFAULT 'trial' and admin_note TEXT DEFAULT ''. Valid plans: trial/basic/pro/enterprise. Validated in _VALID_PLANS set; invalid value silently falls back to 'trial'. Both fields returned in all admin endpoints.
 - [Import dedup logic](import-dedup-logic.md) — name-aware proximity dedup; "address_only" is NOT a duplicate; geocode_cache now persistent DB table; city+address key fix; preview returns per-row matches array.
+- [Daily orders auth bug](daily-orders-auth.md) — orders endpoints must use get_user_id(request), NOT _require_auth (doesn't exist). re and openpyxl must be at module level, not inside functions.
