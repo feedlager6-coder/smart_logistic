@@ -551,6 +551,11 @@ export function ResultPage() {
                   </div>
                   <div className="flex items-center gap-4 text-sm text-muted-foreground mt-2">
                     <span className="flex items-center gap-1"><MapPin className="w-4 h-4" /> {Math.round(route.total_km)} км</span>
+                    {(route as any).total_weight_kg > 0 && (
+                      <span className="flex items-center gap-1 text-blue-600 font-medium">
+                        <span className="text-xs">⚖</span> {(route as any).total_weight_kg} кг
+                      </span>
+                    )}
                     <TooltipProvider>
                       <Tooltip>
                         <TooltipTrigger asChild>

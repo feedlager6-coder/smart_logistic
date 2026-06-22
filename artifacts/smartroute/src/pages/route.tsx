@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useListStores, useBuildRoute } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -9,7 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Search, Loader2, MapPin, Truck, Route as RouteIcon, Plus, X, Copy, Save, AlertCircle, Warehouse, ExternalLink, Link, Filter } from "lucide-react";
+import { Search, Loader2, MapPin, Truck, Route as RouteIcon, Plus, X, Copy, Save, AlertCircle, Warehouse, ExternalLink, Link, Filter, Package } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -78,6 +79,17 @@ export function RoutePage() {
   const [maxStopsPerVehicle, setMaxStopsPerVehicle] = useState<string>(""); // "" = no cap
   const [optimizeBy, setOptimizeBy] = useState<"distance" | "time">("distance");
   const [bulkVehicleCount, setBulkVehicleCount] = useState<string>("5");
+
+  // Today's orders (заявки) — for banner showing weight data
+  const todayDate = new Date().toISOString().slice(0, 10);
+  const { data: todayOrders } = useQuery<{ total_count: number; total_weight_kg: number; total_volume_m3: number }>({
+    queryKey: ["daily_orders", todayDate],
+    queryFn: async () => {
+      const res = await fetch(`/api/orders?date=${todayDate}`);
+      if (!res.ok) return { total_count: 0, total_weight_kg: 0, total_volume_m3: 0 };
+      return res.json();
+    },
+  });
 
   // Persist depot to localStorage on change
   useEffect(() => {
@@ -264,6 +276,21 @@ export function RoutePage() {
         <h1 className="text-3xl font-bold tracking-tight">Новый маршрут</h1>
         <p className="text-muted-foreground">Настройка параметров и запуск оптимизации</p>
       </div>
+
+      {/* Orders banner — shown when today's orders are loaded */}
+      {todayOrders && todayOrders.total_count > 0 && (
+        <div className="shrink-0 flex items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
+          <Package className="w-4 h-4 text-blue-600 shrink-0" />
+          <p className="text-sm text-blue-800 flex-1">
+            <span className="font-semibold">Заявки на сегодня загружены:</span>{" "}
+            {todayOrders.total_count} точек
+            {todayOrders.total_weight_kg > 0 && ` · ${todayOrders.total_weight_kg} кг`}
+            {todayOrders.total_volume_m3 > 0 && ` · ${todayOrders.total_volume_m3} м³`}
+            {" — "}весовые данные будут учтены при распределении нагрузки
+          </p>
+          <a href="/orders" className="text-xs text-blue-600 underline shrink-0">изменить</a>
+        </div>
+      )}
 
       {/* Depot address */}
       <Card className="shrink-0">

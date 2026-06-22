@@ -1550,6 +1550,27 @@ def init_db():
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_geocode_cache_addr ON geocode_cache(normalized_address)")
+    # ── Daily orders (заявки на день) ─────────────────────────────────────────
+    # Stores per-store delivery quantities imported from Excel (1С / any source).
+    # Rows are scoped by owner and delivery_date. weight_kg / volume_m3 drive VRP
+    # capacity balancing when vehicle capacity_kg is set.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS daily_orders (
+            id SERIAL PRIMARY KEY,
+            owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            store_id INTEGER REFERENCES stores(id) ON DELETE SET NULL,
+            store_name_raw TEXT NOT NULL,
+            order_number TEXT DEFAULT '',
+            weight_kg DOUBLE PRECISION DEFAULT 0,
+            volume_m3 DOUBLE PRECISION DEFAULT 0,
+            amount_rub DOUBLE PRECISION DEFAULT 0,
+            notes TEXT DEFAULT '',
+            delivery_date DATE NOT NULL DEFAULT CURRENT_DATE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_daily_orders_owner_date ON daily_orders(owner_id, delivery_date)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_daily_orders_store ON daily_orders(store_id)")
     conn.commit()
     cur.close()
     conn.close()
@@ -3918,6 +3939,362 @@ def geocode_store(id: int, request: Request):
     return store_row_to_dict(row)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Daily orders (заявки на день)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Keyword patterns for auto-detecting which Excel column maps to which field.
+# Order matters: more specific patterns first.
+_ORDER_COLUMN_PATTERNS: dict = {
+    "store_name": ["торговая точка", "наименование контрагента", "название точки", "название магазина",
+                   "магазин", "контрагент", "точка доставки", "точка", "клиент", "наименование", "name"],
+    "address":    ["адрес доставки", "адрес точки", "адрес", "address"],
+    "weight_kg":  ["вес, кг", "вес (кг)", "вес,кг", "вес кг", "вес", "weight", "масса, кг",
+                   "масса кг", "масса", "кг", "kg"],
+    "volume_m3":  ["объём, м3", "объём (м3)", "объем, м3", "объем (м3)", "объём м3",
+                   "объем м3", "объём", "объем", "volume", "м3", "m3", "куб"],
+    "amount_rub": ["сумма, руб", "сумма (руб)", "сумма руб", "сумма заказа", "стоимость", "сумма", "amount", "руб"],
+    "order_number":["номер заявки", "№ заявки", "заявка №", "номер накладной",
+                    "накладная", "заявка", "номер", "заказ", "order", "number", "№"],
+    "zone":       ["зона доставки", "маршрут водителя", "водитель", "зона", "маршрут", "zone", "driver"],
+    "notes":      ["примечание", "комментарий", "notes", "comment", "note"],
+}
+
+
+def _detect_column_mapping(headers: list[str]) -> dict[str, Optional[str]]:
+    """Return best-guess mapping: field_name → header_name (or None if not detected)."""
+    headers_lower = [h.lower().strip() for h in headers]
+    mapping: dict[str, Optional[str]] = {k: None for k in _ORDER_COLUMN_PATTERNS}
+    used: set[str] = set()
+
+    for field, patterns in _ORDER_COLUMN_PATTERNS.items():
+        for pattern in patterns:
+            for orig, norm in zip(headers, headers_lower):
+                if orig in used:
+                    continue
+                if pattern in norm or norm in pattern:
+                    mapping[field] = orig
+                    used.add(orig)
+                    break
+            if mapping[field] is not None:
+                break
+
+    return mapping
+
+
+def _normalize_name(s: str) -> str:
+    """Lowercase, collapse whitespace, strip punctuation for fuzzy matching."""
+    import re
+    return re.sub(r"[^\w\s]", "", s.lower()).strip()
+
+
+def _match_store_to_db(raw_name: str, db_stores: list[dict]) -> Optional[dict]:
+    """Return the best matching store dict or None. Three-pass: exact → contains → word-overlap."""
+    if not raw_name or not db_stores:
+        return None
+    norm = _normalize_name(raw_name)
+
+    # Pass 1: exact
+    for s in db_stores:
+        if _normalize_name(s["name"]) == norm:
+            return s
+
+    # Pass 2: substring
+    for s in db_stores:
+        sn = _normalize_name(s["name"])
+        if norm in sn or sn in norm:
+            return s
+
+    # Pass 3: word overlap ≥ 50 %
+    norm_words = set(norm.split())
+    best_score = 0.0
+    best_store = None
+    for s in db_stores:
+        sn_words = set(_normalize_name(s["name"]).split())
+        if not sn_words or not norm_words:
+            continue
+        overlap = len(norm_words & sn_words) / max(len(norm_words), len(sn_words))
+        if overlap >= 0.5 and overlap > best_score:
+            best_score = overlap
+            best_store = s
+
+    return best_store
+
+
+def _safe_float(val) -> float:
+    """Convert any cell value to float, returning 0 on failure."""
+    if val is None:
+        return 0.0
+    try:
+        return float(str(val).replace(",", ".").replace(" ", "").replace("\u00a0", "").strip())
+    except (ValueError, TypeError):
+        return 0.0
+
+
+class OrderImportRow(BaseModel):
+    store_id: Optional[int] = None
+    store_name_raw: str
+    order_number: str = ""
+    weight_kg: float = 0.0
+    volume_m3: float = 0.0
+    amount_rub: float = 0.0
+    notes: str = ""
+
+
+class OrderImportRequest(BaseModel):
+    delivery_date: str   # "YYYY-MM-DD"
+    rows: list[OrderImportRow]
+    clear_existing: bool = True  # replace today's orders on re-import
+
+
+@app.post("/api/orders/preview")
+async def orders_preview(request: Request, file: UploadFile = File(...)):
+    """
+    Parse an Excel file and return:
+    - detected column headers
+    - auto-detected field mapping
+    - first 50 rows as raw data
+    - per-row store match results against caller's store base
+    """
+    uid = _require_auth(request)
+    try:
+        import openpyxl as _xl
+    except ImportError:
+        raise HTTPException(status_code=500, detail="openpyxl not installed")
+
+    content = await file.read()
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Файл слишком большой (макс. 20 МБ)")
+
+    try:
+        wb = _xl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        ws = wb.active
+        rows_raw = list(ws.iter_rows(values_only=True))
+        wb.close()
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Не удалось открыть Excel файл: {e}")
+
+    if not rows_raw:
+        raise HTTPException(status_code=422, detail="Файл пустой")
+
+    # Find header row: first row with ≥ 2 non-empty string cells
+    header_row_idx = 0
+    headers: list[str] = []
+    for i, row in enumerate(rows_raw[:10]):
+        str_cells = [str(c).strip() for c in row if c is not None and str(c).strip()]
+        if len(str_cells) >= 2:
+            header_row_idx = i
+            headers = [str(c).strip() if c is not None else f"Колонка {j+1}"
+                       for j, c in enumerate(row)]
+            break
+
+    if not headers:
+        raise HTTPException(status_code=422, detail="Не удалось найти строку заголовков в файле")
+
+    # Remove entirely empty trailing columns
+    while headers and headers[-1].startswith("Колонка "):
+        headers.pop()
+
+    detected_mapping = _detect_column_mapping(headers)
+
+    # Fetch owner's stores for matching
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT id, name, address FROM stores WHERE owner_id = %s", (uid,))
+    db_stores = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+
+    # Parse data rows (up to 500 for preview; import can handle more)
+    data_rows = rows_raw[header_row_idx + 1:]
+    preview_rows = []
+    name_col = detected_mapping.get("store_name")
+    name_col_idx = headers.index(name_col) if name_col and name_col in headers else None
+
+    for row in data_rows[:500]:
+        cells = list(row) + [None] * max(0, len(headers) - len(row))
+        row_dict = {headers[i]: cells[i] for i in range(len(headers))}
+
+        # Try to match store
+        matched_store = None
+        if name_col_idx is not None and name_col_idx < len(cells):
+            raw = str(cells[name_col_idx]).strip() if cells[name_col_idx] is not None else ""
+            if raw and raw.lower() not in ("none", "nan", ""):
+                matched_store = _match_store_to_db(raw, db_stores)
+
+        preview_rows.append({
+            "cells": {k: (str(v) if v is not None else "") for k, v in row_dict.items()},
+            "matched_store_id": matched_store["id"] if matched_store else None,
+            "matched_store_name": matched_store["name"] if matched_store else None,
+        })
+
+    # Filter out rows where store name is completely empty
+    preview_rows = [r for r in preview_rows
+                    if name_col_idx is None
+                    or any(v.strip() for v in r["cells"].values())]
+
+    matched_count = sum(1 for r in preview_rows if r["matched_store_id"] is not None)
+    total_count = len(preview_rows)
+
+    return {
+        "headers": headers,
+        "detected_mapping": detected_mapping,
+        "rows": preview_rows[:200],  # cap response size
+        "total_rows": total_count,
+        "matched_stores": matched_count,
+        "unmatched_stores": total_count - matched_count,
+        "db_stores_count": len(db_stores),
+    }
+
+
+@app.post("/api/orders/import", status_code=201)
+def orders_import(request: Request, body: OrderImportRequest):
+    """Save confirmed orders for a delivery date."""
+    uid = _require_auth(request)
+
+    # Validate date format
+    import re as _re
+    if not _re.match(r"^\d{4}-\d{2}-\d{2}$", body.delivery_date):
+        raise HTTPException(status_code=422, detail="delivery_date должен быть в формате YYYY-MM-DD")
+
+    if not body.rows:
+        raise HTTPException(status_code=422, detail="Список заявок пуст")
+
+    # Validate and cap
+    for row in body.rows:
+        row.weight_kg = max(0.0, row.weight_kg)
+        row.volume_m3 = max(0.0, row.volume_m3)
+        row.amount_rub = max(0.0, row.amount_rub)
+        row.store_name_raw = (row.store_name_raw or "").strip()[:200]
+        row.order_number = (row.order_number or "").strip()[:100]
+        row.notes = (row.notes or "").strip()[:500]
+
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        if body.clear_existing:
+            cur.execute(
+                "DELETE FROM daily_orders WHERE owner_id = %s AND delivery_date = %s",
+                (uid, body.delivery_date)
+            )
+
+        for row in body.rows:
+            # Verify store belongs to this owner (if store_id provided)
+            store_id = None
+            if row.store_id is not None:
+                cur.execute(
+                    "SELECT id FROM stores WHERE id = %s AND owner_id = %s",
+                    (row.store_id, uid)
+                )
+                if cur.fetchone():
+                    store_id = row.store_id
+
+            cur.execute(
+                """INSERT INTO daily_orders
+                   (owner_id, store_id, store_name_raw, order_number,
+                    weight_kg, volume_m3, amount_rub, notes, delivery_date)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (uid, store_id, row.store_name_raw, row.order_number,
+                 row.weight_kg, row.volume_m3, row.amount_rub, row.notes,
+                 body.delivery_date)
+            )
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=500, detail="Ошибка при сохранении заявок")
+
+    # Return summary
+    cur.execute(
+        """SELECT COUNT(*) as cnt,
+                  COALESCE(SUM(weight_kg),0) as total_weight,
+                  COALESCE(SUM(volume_m3),0) as total_volume,
+                  COALESCE(SUM(amount_rub),0) as total_amount
+             FROM daily_orders
+            WHERE owner_id = %s AND delivery_date = %s""",
+        (uid, body.delivery_date)
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    return {
+        "delivery_date": body.delivery_date,
+        "saved_count": row[0],
+        "total_weight_kg": round(row[1], 2),
+        "total_volume_m3": round(row[2], 3),
+        "total_amount_rub": round(row[3], 2),
+    }
+
+
+@app.get("/api/orders")
+def get_orders(request: Request, date: Optional[str] = None):
+    """Return daily orders for a date (default: today). Joined with stores for display."""
+    uid = _require_auth(request)
+    from datetime import date as _date
+    target_date = date if date else str(_date.today())
+
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """SELECT o.id, o.store_id, o.store_name_raw, o.order_number,
+                  o.weight_kg, o.volume_m3, o.amount_rub, o.notes,
+                  o.delivery_date::text as delivery_date,
+                  s.name as store_name_db, s.address as store_address
+             FROM daily_orders o
+             LEFT JOIN stores s ON s.id = o.store_id
+            WHERE o.owner_id = %s AND o.delivery_date = %s
+            ORDER BY o.id""",
+        (uid, target_date)
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+
+    # Aggregate summary
+    cur.execute(
+        """SELECT COUNT(*) as cnt,
+                  COALESCE(SUM(weight_kg),0) as total_weight,
+                  COALESCE(SUM(volume_m3),0) as total_volume,
+                  COALESCE(SUM(amount_rub),0) as total_amount
+             FROM daily_orders
+            WHERE owner_id = %s AND delivery_date = %s""",
+        (uid, target_date)
+    )
+    summary = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    return {
+        "delivery_date": target_date,
+        "orders": rows,
+        "total_count": summary["cnt"],
+        "total_weight_kg": round(float(summary["total_weight"]), 2),
+        "total_volume_m3": round(float(summary["total_volume"]), 3),
+        "total_amount_rub": round(float(summary["total_amount"]), 2),
+    }
+
+
+@app.delete("/api/orders")
+def delete_orders(request: Request, date: Optional[str] = None):
+    """Delete all orders for a date (default: today)."""
+    uid = _require_auth(request)
+    from datetime import date as _date
+    target_date = date if date else str(_date.today())
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM daily_orders WHERE owner_id = %s AND delivery_date = %s",
+        (uid, target_date)
+    )
+    deleted = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"deleted": deleted, "delivery_date": target_date}
+
+
 @app.post("/api/route/build")
 def build_route(request: Request, body: RouteRequest):
     uid = get_user_id(request)
@@ -3968,11 +4345,54 @@ def build_route(request: Request, body: RouteRequest):
 
     all_coords = [(depot_lat, depot_lon)] + [(s["lat"], s["lon"]) for s in store_list]
 
+    # ── Daily orders: look up weight / volume per store ───────────────────────
+    # Loaded for today's date; used both for VRP capacity demands (when vehicle
+    # capacity_kg is set) and for annotating result stores with actual load data.
+    _store_weights: dict = {}
+    _store_volumes: dict = {}
+    try:
+        _conn_w = get_db()
+        _cur_w = _conn_w.cursor()
+        _cur_w.execute(
+            """SELECT store_id, COALESCE(SUM(weight_kg),0), COALESCE(SUM(volume_m3),0)
+                 FROM daily_orders
+                WHERE owner_id = %s AND delivery_date = %s AND store_id IS NOT NULL
+                GROUP BY store_id""",
+            (uid, str(date.today()))
+        )
+        for _r in _cur_w.fetchall():
+            _store_weights[int(_r[0])] = float(_r[1])
+            _store_volumes[int(_r[0])] = float(_r[2])
+        _cur_w.close()
+        _conn_w.close()
+        if _store_weights:
+            logger.info(
+                "build_route: loaded daily_orders weights for %d stores (max=%.1f kg)",
+                len(_store_weights), max(_store_weights.values())
+            )
+    except Exception as _we:
+        logger.warning("build_route: daily_orders weight lookup failed: %s", _we)
+
     capacities = None
     demands = None
     if any(v.capacity_kg for v in body.vehicles):
         capacities = [int(v.capacity_kg) if v.capacity_kg else 99999 for v in body.vehicles]
-        demands = [0] + [1] * len(store_list)  # 1 unit per store
+        if _store_weights:
+            # Use actual weights as OR-Tools integer demands.
+            # Scale down if values are very large (OR-Tools prefers smaller integers).
+            _max_w = max(_store_weights.values(), default=1.0) or 1.0
+            _fallback_w = _max_w / max(len(store_list), 1)
+            _scale = 10 if _max_w > 10000 else 1
+            demands = [0] + [
+                max(1, int(_store_weights.get(s["id"], _fallback_w) / _scale))
+                for s in store_list
+            ]
+            if _scale > 1:
+                capacities = [max(1, int(c / _scale)) for c in capacities]
+            logger.info("build_route: weight-based demands (scale=%d, max_demand=%d)",
+                        _scale, max(demands[1:], default=1))
+        else:
+            demands = [0] + [1] * len(store_list)  # unit demands — no weight data today
 
     # ── Time windows (TSPTW) ─────────────────────────────────────────────────
     # When use_time_windows is True, pass (tw_from_min, tw_to_min, service_min)
@@ -4221,6 +4641,8 @@ def build_route(request: Request, body: RouteRequest):
                 "lat": store["lat"],
                 "lon": store["lon"],
                 "arrive_by": arrive_by,
+                "weight_kg": _store_weights.get(store["id"], 0),
+                "volume_m3": _store_volumes.get(store["id"], 0),
             })
 
             # Add unload time before driving to the next stop
@@ -4262,6 +4684,9 @@ def build_route(request: Request, body: RouteRequest):
             "yandex_url": yurl,
             "yandex_urls": yurls,
             "whatsapp_url": wurl,
+            # Cargo summary from daily_orders (0 when no orders loaded for today)
+            "total_weight_kg": round(sum(_store_weights.get(rs["store_id"], 0) for rs in route_stores), 1),
+            "total_volume_m3": round(sum(_store_volumes.get(rs["store_id"], 0) for rs in route_stores), 3),
         })
 
     _cost_settings = get_company_settings(user_id=uid)
