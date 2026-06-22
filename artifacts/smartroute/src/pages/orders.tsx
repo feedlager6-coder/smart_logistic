@@ -230,7 +230,7 @@ export function OrdersPage() {
         </div>
         {hasOrders && phase === "idle" && (
           <Button asChild className="gap-2 shrink-0">
-            <Link href="/route">
+            <Link href="/route?from=orders">
               <ArrowRight className="w-4 h-4" />
               К маршруту
             </Link>

@@ -22,7 +22,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
-import { useLocation } from "wouter";
+import { useLocation, useSearch } from "wouter";
 
 interface Vehicle {
   id: string;
@@ -58,6 +58,8 @@ export function RoutePage() {
   const buildRoute = useBuildRoute();
   const { toast } = useToast();
   const [, setLocation] = useLocation();
+  const urlSearch = useSearch();
+  const fromOrders = new URLSearchParams(urlSearch).get("from") === "orders";
 
   const [search, setSearch] = useState("");
   const [cityFilter, setCityFilter] = useState("all");
@@ -86,7 +88,7 @@ export function RoutePage() {
     total_count: number;
     total_weight_kg: number;
     total_volume_m3: number;
-    orders: Array<{ store_id: number | null; weight_kg: number; volume_m3: number }>;
+    orders: Array<{ store_id: number | null; store_name_raw: string; weight_kg: number; volume_m3: number }>;
   }>({
     queryKey: ["daily_orders", todayDate],
     queryFn: async () => {
@@ -96,24 +98,51 @@ export function RoutePage() {
     },
   });
 
-  // Auto-select stores from today's orders (Problem 2)
-  // Runs once when both stores and orders are loaded and nothing is selected yet
+  // Auto-select stores from today's orders when navigating from /orders page.
+  // Trigger: URL contains ?from=orders (set by "К маршруту" button in orders.tsx).
+  // Waits until both stores and orders data are available, then fires exactly once.
   const autoSelectedRef = useRef(false);
   useEffect(() => {
-    if (autoSelectedRef.current) return;
-    if (!todayOrders || todayOrders.total_count === 0) return;
-    if (!stores || stores.length === 0) return;
+    if (!fromOrders) return;               // only when navigated from orders page
+    if (autoSelectedRef.current) return;   // fire exactly once per mount
+    if (!todayOrders) return;              // orders still loading
+    if (!stores || stores.length === 0) return; // stores still loading
+
+    // Mark as done regardless of result — prevents repeated toasts
+    autoSelectedRef.current = true;
+
+    if (todayOrders.total_count === 0) return; // no orders for today
 
     const orderStoreIds = new Set(
       (todayOrders.orders ?? [])
         .map(o => o.store_id)
         .filter((id): id is number => id !== null)
     );
-    if (orderStoreIds.size === 0) return;
 
-    autoSelectedRef.current = true;
+    if (orderStoreIds.size === 0) {
+      // Orders exist but none are matched to stores in the DB.
+      // This happens when store names in the order file don't match store names in SmartRoute.
+      const unmatchedNames = (todayOrders.orders ?? [])
+        .filter(o => o.store_id === null && o.store_name_raw)
+        .map(o => o.store_name_raw)
+        .slice(0, 3)
+        .join(", ");
+      toast({
+        title: "Магазины не выбраны автоматически",
+        description: `Заявки не привязаны к магазинам базы${unmatchedNames ? ` (напр.: ${unmatchedNames}…)` : ""}. Выберите магазины вручную или обновите названия в заявках.`,
+        variant: "destructive",
+        duration: 8000,
+      });
+      return;
+    }
+
     setSelectedStores(orderStoreIds);
-  }, [todayOrders, stores]);
+    toast({
+      title: `Выбрано ${orderStoreIds.size} магазин${orderStoreIds.size === 1 ? "" : orderStoreIds.size < 5 ? "а" : "ов"} из заявок`,
+      description: "Автоматически выбраны магазины с заявками на сегодня.",
+      duration: 4000,
+    });
+  }, [fromOrders, todayOrders, stores, toast]);
 
   // Per-store weight map: store_id → weight_kg (Problem 3)
   const orderWeightMap = useMemo(() => {
