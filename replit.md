@@ -233,6 +233,15 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 - Лимит импорта: 2000 строк за раз (защита от зависания)
 - Фильтр пустых строк в preview: по наличию имени в `name_col`, не по `any(cells.values())`
 
+## Changelog — Release Candidate 1 (22 Jun 2026)
+
+1. **Capacity overflow warning** — backend добавляет `capacity_kg` (0 = не задана) в каждый route-объект ответа. После построения: если `total_weight_kg > capacity_kg` → добавляет человекочитаемое сообщение в `route_warnings`. Frontend result.tsx: per-vehicle progress bar (зелёный/amber/красный по % загрузки), текст "⚖ 1200 кг / 1000 кг" красным при перегрузе.
+2. **Unmatched stores UX (Variant C)** — orders.tsx показывает amber-карточку "Несопоставленные точки (N)" для store_id=NULL строк. Кнопка "Добавить магазин" → `/stores?prefill=НАЗВАНИЕ`. stores.tsx детектирует `?prefill=` → предзаполняет имя + scrollIntoView к форме.
+3. **NaN guard для capacity_kg** — route.tsx: `parseInt(v.capacity_kg) || null` (защита от `parseInt("abc") = NaN` → 422).
+4. **Backend audit** — все endpoints проверены: SQL-инъекции отсутствуют (параметризованные запросы), auth_middleware покрывает все `/api/` кроме `/healthz` и `/api/auth/login`, rate limiting работает.
+5. **Frontend audit** — NaN в capacity_kg исправлен. Inconsistent fetch (stores.tsx force-create обходит TQ) задокументирован как низкий риск (не влияет на функциональность, 401 обрабатывается на уровне cookie middleware).
+6. **DEVELOPER_ONBOARDING.md обновлён** — добавлены разделы: Capacity Overflow Warning, Unmatched Stores UX, Volume limitation (plan), Auto-select API test results, Regression test results, Итоговая оценка готовности.
+
 ## Gotchas
 
 - `Start API Server` и `artifacts/smartroute: web` workflows — всегда FAILED (конфликт портов с уже запущенными `artifacts/api-server: API Server` и `Start Frontend`) — ожидаемо, не чинить

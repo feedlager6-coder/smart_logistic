@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useListStores, useCreateStore, useDeleteStore, useGeocodeStore, useUpdateStore, getListStoresQueryKey } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -16,7 +16,7 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { useToast } from "@/hooks/use-toast";
 import { ImportMappingDialog } from "@/components/ImportMappingDialog";
 import { ImportResultDialog, type ImportResult } from "@/components/ImportResultDialog";
-import { Link as WouterLink } from "wouter";
+import { Link as WouterLink, useSearch } from "wouter";
 
 export function StoresPage() {
   const { data: storesData, isLoading } = useListStores();
@@ -25,6 +25,23 @@ export function StoresPage() {
   const { toast } = useToast();
   const [search, setSearch] = useState("");
   const [showNoCoords, setShowNoCoords] = useState(false);
+
+  // ── Prefill from URL (?prefill=NAME) — called from orders page "Добавить магазин" ──
+  const search_str = useSearch();
+  const addFormRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const params = new URLSearchParams(search_str);
+    const prefill = params.get("prefill");
+    if (prefill) {
+      setName(decodeURIComponent(prefill));
+      // Scroll to the add form after a short delay (DOM needs to render)
+      setTimeout(() => {
+        addFormRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 200);
+    }
+  // Run once on mount only
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [exportLoading, setExportLoading] = useState(false);
 
   // Delete confirmation dialog state
@@ -479,7 +496,7 @@ export function StoresPage() {
       )}
 
       {/* Add store form */}
-      <Card>
+      <Card ref={addFormRef as any}>
         <CardHeader>
           <CardTitle>Добавить магазин</CardTitle>
         </CardHeader>

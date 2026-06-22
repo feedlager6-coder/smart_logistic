@@ -281,8 +281,9 @@ export function RoutePage() {
         store_ids: Array.from(selectedStores),
         vehicles: vehicles.map(v => ({
           name: v.name,
-          capacity_kg: v.capacity_kg ? parseInt(v.capacity_kg) : null,
-          average_speed: v.average_speed ? parseFloat(v.average_speed) : null,
+          // parseInt("abc") = NaN — guard with || null so backend gets null not NaN
+          capacity_kg: v.capacity_kg ? (parseInt(v.capacity_kg) || null) : null,
+          average_speed: v.average_speed ? (parseFloat(v.average_speed) || null) : null,
         })),
         depot_lat: depotLatNum ?? null,
         depot_lon: depotLonNum ?? null,

@@ -552,8 +552,15 @@ export function ResultPage() {
                   <div className="flex items-center gap-4 text-sm text-muted-foreground mt-2">
                     <span className="flex items-center gap-1"><MapPin className="w-4 h-4" /> {Math.round(route.total_km)} км</span>
                     {(route as any).total_weight_kg > 0 && (
-                      <span className="flex items-center gap-1 text-blue-600 font-medium">
+                      <span className={`flex items-center gap-1 font-medium ${
+                        (route as any).capacity_kg > 0 && (route as any).total_weight_kg > (route as any).capacity_kg
+                          ? "text-red-600"
+                          : "text-blue-600"
+                      }`}>
                         <span className="text-xs">⚖</span> {(route as any).total_weight_kg} кг
+                        {(route as any).capacity_kg > 0 && (
+                          <span className="text-muted-foreground font-normal">/ {(route as any).capacity_kg} кг</span>
+                        )}
                       </span>
                     )}
                     <TooltipProvider>
@@ -581,6 +588,27 @@ export function ResultPage() {
                       </Tooltip>
                     </TooltipProvider>
                   </div>
+                  {/* Capacity progress bar — shown only when weight data exists */}
+                  {(route as any).capacity_kg > 0 && (route as any).total_weight_kg > 0 && (() => {
+                    const pct = Math.min(100, Math.round((route as any).total_weight_kg / (route as any).capacity_kg * 100));
+                    const over = (route as any).total_weight_kg > (route as any).capacity_kg;
+                    return (
+                      <div className="mt-2 space-y-1">
+                        <div className="flex justify-between text-xs">
+                          <span className={over ? "text-red-600 font-medium" : "text-muted-foreground"}>
+                            {over ? `⚠ Перегруз +${((route as any).total_weight_kg - (route as any).capacity_kg).toFixed(0)} кг` : "Загрузка кузова"}
+                          </span>
+                          <span className={over ? "text-red-600 font-bold" : "text-muted-foreground"}>{pct}%</span>
+                        </div>
+                        <div className="w-full h-1.5 rounded-full bg-muted overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all ${over ? "bg-red-500" : pct > 80 ? "bg-amber-500" : "bg-emerald-500"}`}
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </CardHeader>
                 <CardContent className="p-0 flex-1">
                   <ScrollArea className="h-[300px]">

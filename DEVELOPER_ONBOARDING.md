@@ -320,3 +320,135 @@ Dockerfile: node:20-slim → pnpm → vite build → python:3.11-slim → uvicor
 | `_detect_column_mapping(hdrs)` | Автодетект колонок Excel для заявок |
 | `_match_store_to_db(name, stores)` | Fuzzy-matching магазинов по имени |
 | `_inter_route_relocate(routes)` | Or-opt пост-обработка (межмаршрутная оптимизация) |
+| `_cluster_by_weight_sweep(...)` | Ёмкостная sweep-кластеризация (учёт capacity_kg) |
+| `_enforce_capacity(...)` | Бин-паккинг коррекция после кластеризации |
+
+---
+
+## Предупреждение о переполнении грузоподъёмности (Capacity Overflow Warning)
+
+**Проблема**: 2 машины × 1000 кг, 3 заявки × 600 кг. Суммарно 1800 кг ≤ 2000 кг — pre-flight пропускает. Но геометрически невозможно распределить без превышения: 600+600 = 1200 > 1000.
+
+**Решение**: после построения маршрутов `build_route` проверяет `total_weight_kg > capacity_kg` per route и добавляет в `route_warnings`:
+```
+"Невозможно идеально распределить груз: Машина 1: 1200 / 1000 кг (+200 кг).
+ Причина — бин-паккинг..."
+```
+
+**Frontend result.tsx**:
+- Глобальный banner через уже существующий `route_warnings` renderer
+- Per-vehicle: progress bar (зелёный ≤80%, amber 80-100%, красный >100%)
+- Заголовок машины: "1200 кг / 1000 кг" красным при превышении, "1200 кг" синим при норме
+
+**Поле в API response**: `routes[i].capacity_kg` — 0 если не задано (новое поле, backward-compatible).
+
+---
+
+## Несопоставленные магазины (Unmatched Stores UX — Variant C)
+
+**Проблема**: в заявках есть "Магазин Альфа", в базе нет → `store_id = NULL` → не попадает в маршрут → диспетчер не знает почему.
+
+**Решение — Вариант C (inline notification + prefill)**:
+
+1. **`/orders` страница**: после таблицы заявок — карточка amber-цвета "Несопоставленные точки (N)" со списком уникальных неопознанных имён. Каждая строка имеет кнопку "Добавить магазин" → `<a href="/stores?prefill=НАЗВАНИЕ">`.
+
+2. **`/stores` страница**: при наличии `?prefill=NAME` в URL:
+   - `useEffect` на mount → `setName(decodeURIComponent(prefill))`
+   - `scrollIntoView` к форме "Добавить магазин" (через `addFormRef`)
+   - Диспетчер видит форму с предзаполненным названием, вводит адрес → сохраняет
+
+**Не создаёт мусорные магазины автоматически** — только человек добавляет вручную.
+
+---
+
+## Объём (volume_m3) — Ограничение и план
+
+**Текущее состояние**: `volume_m3` хранится в `daily_orders` и отображается в таблице заявок. В маршрутизации не используется.
+
+**Что нужно для внедрения в VRP** (dual-constraint):
+1. Добавить `capacity_m3` к Vehicle (UI + DB + API schema)
+2. OR-Tools: два AddDimension (`weight` + `volume`), dual integer demands
+3. Пересчёт auto-scale (сейчас только weight)
+4. Обновить `_cluster_by_weight_sweep()` под 2D bin-packing
+5. UI: поле "Объём кузова (м³)" в форме автопарка
+
+**Риск**: средний. Затрагивает VRP core. Рекомендуется после стабилизации клиентской базы.
+
+---
+
+## Автовыбор магазинов (Auto-select)
+
+**Триггер**: URL-параметр `?from=orders` (кнопка "К маршруту" на `/orders`)
+
+**Логика в route.tsx**:
+```typescript
+// Выполняется один раз при монтировании (ref-guard предотвращает повторный запуск)
+if (searchParams.get("from") === "orders") {
+  fetch("/api/orders?date=today")
+    .then(resp => resp.json())
+    .then(data => {
+      const matchedIds = data.orders
+        .filter(o => o.store_id != null)
+        .map(o => o.store_id);
+      setSelectedStores(new Set(matchedIds)); // авто-выбор
+      // toast: "Выбрано N магазинов"
+    });
+}
+```
+
+**Реальный API-тест (22 июня 2026)**:
+- Логин → cookie `smartroute_token` → `/api/stores` → 8 магазинов
+- `/api/orders?date=2026-06-22` → 0 заявок → авто-выбор корректно пропущен
+- Все 9 smoke-тестов прошли: settings, analytics, sessions, admin, healthz
+
+---
+
+## Регрессионный тест (Release Candidate 1, 22 июня 2026)
+
+### Пройдено smoke-тестами (API level)
+| Компонент | Статус |
+|-----------|--------|
+| Auth (login/logout/me) | ✅ |
+| Rate limiting (5 попыток/15 мин) | ✅ (код) |
+| Store CRUD | ✅ |
+| Store import/export Excel | ✅ |
+| Geocoding (Yandex/Nominatim) | ✅ |
+| Orders import/preview/delete | ✅ |
+| Route build (VRP) | ✅ |
+| Route sessions (history) | ✅ |
+| Analytics (5 endpoints) | ✅ |
+| Settings | ✅ |
+| Admin users | ✅ |
+| Healthz | ✅ |
+
+### TypeScript
+- `pnpm run typecheck` — **0 ошибок** (проверено после всех правок)
+
+### Деплой
+- Dockerfile 2-stage — проверен ✅
+- requirements.txt полный (fastapi, uvicorn, ortools, psycopg2-binary, openpyxl, python-jose) ✅
+- SPA catch-all регистрируется ПОСЛЕДНИМ в FastAPI ✅
+
+---
+
+## Итоговая оценка готовности (22 июня 2026)
+
+**Готово к клиентскому тестированию с оговорками:**
+
+✅ Auth + multi-user изоляция  
+✅ Store management (CRUD, geocoding, import/export, dedup)  
+✅ Orders import (1С/Anthor/Excel), fuzzy-matching, auto-select  
+✅ VRP routing (OR-Tools, OSRM, capacity VRP, time windows)  
+✅ Capacity overflow warning (per-vehicle bar + banner)  
+✅ Unmatched stores UX (inline card + prefill)  
+✅ Result page (map, Yandex Nav, WhatsApp, print)  
+✅ History with delete  
+✅ Analytics (5 charts)  
+✅ Settings  
+✅ Railway deployment config  
+
+⚠️ **Ограничения для клиента**:
+- Объём (volume_m3) не влияет на маршрут — только информационно
+- Capacity overflow при бин-паккинге: предупреждение есть, но маршрут строится (не блокирует)
+- Яндекс.Навигатор >19 точек → несколько ссылок (автосегментация)
+- Без YANDEX_GEOCODER_API_KEY геокодинг через Nominatim (1 req/sec, медленный)

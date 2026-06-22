@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import {
   Upload, Package, CheckCircle, XCircle, Loader2, Trash2, ArrowRight,
-  AlertTriangle, FileSpreadsheet, RotateCcw, Weight, Box,
+  AlertTriangle, FileSpreadsheet, RotateCcw, Weight, Box, Plus,
 } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -529,6 +529,46 @@ export function OrdersPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* ── Unmatched stores card ── */}
+      {hasOrders && phase === "idle" && savedOrders && (() => {
+        const unmatched = savedOrders.orders.filter(o => !o.store_id);
+        if (unmatched.length === 0) return null;
+        const unique = Array.from(new Map(unmatched.map(o => [o.store_name_raw, o])).values());
+        return (
+          <Card className="border-amber-200 bg-amber-50/60">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base flex items-center gap-2 text-amber-800">
+                <AlertTriangle className="w-4 h-4" />
+                Несопоставленные точки ({unique.length})
+              </CardTitle>
+              <CardDescription className="text-amber-700">
+                Эти названия из заявок не найдены в базе магазинов. Добавьте их вручную, чтобы включить в маршрут.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2">
+                {unique.map(o => (
+                  <div key={o.store_name_raw} className="flex items-center justify-between gap-3 bg-white/70 rounded-md px-3 py-2 border border-amber-100">
+                    <div>
+                      <p className="font-medium text-sm">{o.store_name_raw}</p>
+                      {o.weight_kg > 0 && (
+                        <p className="text-xs text-muted-foreground">{fmt(o.weight_kg)} кг · заявок: {unmatched.filter(u => u.store_name_raw === o.store_name_raw).length}</p>
+                      )}
+                    </div>
+                    <Button asChild variant="outline" size="sm" className="shrink-0 border-amber-300 hover:bg-amber-100 text-amber-900">
+                      <a href={`/stores?prefill=${encodeURIComponent(o.store_name_raw)}`}>
+                        <Plus className="w-3.5 h-3.5 mr-1.5" />
+                        Добавить магазин
+                      </a>
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        );
+      })()}
 
       {/* Loading saved orders */}
       {ordersLoading && (

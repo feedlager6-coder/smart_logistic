@@ -4948,6 +4948,8 @@ def build_route(request: Request, body: RouteRequest):
         yurl = yurls[0] if yurls else ""
         wurl = whatsapp_url(vehicle.name, route_stores, km, yurls)
 
+        _route_weight = round(sum(_store_weights.get(rs["store_id"], 0) for rs in route_stores), 1)
+        _vehicle_cap = int(vehicle.capacity_kg) if vehicle.capacity_kg else 0
         routes.append({
             "vehicle_name": vehicle.name,
             "stores": route_stores,
@@ -4960,9 +4962,37 @@ def build_route(request: Request, body: RouteRequest):
             "yandex_urls": yurls,
             "whatsapp_url": wurl,
             # Cargo summary from daily_orders (0 when no orders loaded for today)
-            "total_weight_kg": round(sum(_store_weights.get(rs["store_id"], 0) for rs in route_stores), 1),
+            "total_weight_kg": _route_weight,
             "total_volume_m3": round(sum(_store_volumes.get(rs["store_id"], 0) for rs in route_stores), 3),
+            # Vehicle capacity for frontend overload indicator (0 = not configured)
+            "capacity_kg": _vehicle_cap,
         })
+
+    # ── Capacity overflow warning ─────────────────────────────────────────────
+    # Generated AFTER routes are built so we can report actual per-vehicle loads.
+    # Pre-flight 422 checks total feasibility; this catches bin-packing overflow
+    # (e.g. 3 items × 600 kg can't fit in 2 bins × 1000 kg even though sum fits).
+    if _store_weights:
+        overloaded = [
+            r for r in routes
+            if r["capacity_kg"] > 0 and r["total_weight_kg"] > r["capacity_kg"]
+        ]
+        if overloaded:
+            details = "; ".join(
+                f"{r['vehicle_name']}: {r['total_weight_kg']:.0f} / {r['capacity_kg']} кг "
+                f"(+{r['total_weight_kg'] - r['capacity_kg']:.0f} кг)"
+                for r in overloaded
+            )
+            route_warnings.append(
+                f"Невозможно идеально распределить груз: {details}. "
+                f"Причина — бин-паккинг: несколько крупных заявок не умещаются в пределах "
+                f"грузоподъёмности ни одной машины в паре. "
+                f"Добавьте машину или уменьшите вес крупных заявок."
+            )
+            logger.warning(
+                "build_route: capacity overflow in %d route(s): %s",
+                len(overloaded), details,
+            )
 
     _cost_settings = get_company_settings(user_id=uid)
     savings = calculate_savings(
