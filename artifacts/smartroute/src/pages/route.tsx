@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useListStores, useBuildRoute } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Search, Loader2, MapPin, Truck, Route as RouteIcon, Plus, X, Copy, Save, AlertCircle, Warehouse, ExternalLink, Link, Filter, Package } from "lucide-react";
+import { Search, Loader2, MapPin, Truck, Route as RouteIcon, Plus, X, Copy, Save, AlertCircle, Warehouse, ExternalLink, Link, Filter, Package, Weight, AlertTriangle } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -80,16 +80,52 @@ export function RoutePage() {
   const [optimizeBy, setOptimizeBy] = useState<"distance" | "time">("distance");
   const [bulkVehicleCount, setBulkVehicleCount] = useState<string>("5");
 
-  // Today's orders (заявки) — for banner showing weight data
+  // Today's orders (заявки) — for banner showing weight data, auto-select, per-store weights
   const todayDate = new Date().toISOString().slice(0, 10);
-  const { data: todayOrders } = useQuery<{ total_count: number; total_weight_kg: number; total_volume_m3: number }>({
+  const { data: todayOrders } = useQuery<{
+    total_count: number;
+    total_weight_kg: number;
+    total_volume_m3: number;
+    orders: Array<{ store_id: number | null; weight_kg: number; volume_m3: number }>;
+  }>({
     queryKey: ["daily_orders", todayDate],
     queryFn: async () => {
       const res = await fetch(`/api/orders?date=${todayDate}`);
-      if (!res.ok) return { total_count: 0, total_weight_kg: 0, total_volume_m3: 0 };
+      if (!res.ok) return { total_count: 0, total_weight_kg: 0, total_volume_m3: 0, orders: [] };
       return res.json();
     },
   });
+
+  // Auto-select stores from today's orders (Problem 2)
+  // Runs once when both stores and orders are loaded and nothing is selected yet
+  const autoSelectedRef = useRef(false);
+  useEffect(() => {
+    if (autoSelectedRef.current) return;
+    if (!todayOrders || todayOrders.total_count === 0) return;
+    if (!stores || stores.length === 0) return;
+
+    const orderStoreIds = new Set(
+      (todayOrders.orders ?? [])
+        .map(o => o.store_id)
+        .filter((id): id is number => id !== null)
+    );
+    if (orderStoreIds.size === 0) return;
+
+    autoSelectedRef.current = true;
+    setSelectedStores(orderStoreIds);
+  }, [todayOrders, stores]);
+
+  // Per-store weight map: store_id → weight_kg (Problem 3)
+  const orderWeightMap = useMemo(() => {
+    const map = new Map<number, number>();
+    if (!todayOrders?.orders) return map;
+    for (const o of todayOrders.orders) {
+      if (o.store_id !== null && o.weight_kg > 0) {
+        map.set(o.store_id, (map.get(o.store_id) ?? 0) + o.weight_kg);
+      }
+    }
+    return map;
+  }, [todayOrders]);
 
   // Persist depot to localStorage on change
   useEffect(() => {
@@ -278,19 +314,40 @@ export function RoutePage() {
       </div>
 
       {/* Orders banner — shown when today's orders are loaded */}
-      {todayOrders && todayOrders.total_count > 0 && (
-        <div className="shrink-0 flex items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
-          <Package className="w-4 h-4 text-blue-600 shrink-0" />
-          <p className="text-sm text-blue-800 flex-1">
-            <span className="font-semibold">Заявки на сегодня загружены:</span>{" "}
-            {todayOrders.total_count} точек
-            {todayOrders.total_weight_kg > 0 && ` · ${todayOrders.total_weight_kg} кг`}
-            {todayOrders.total_volume_m3 > 0 && ` · ${todayOrders.total_volume_m3} м³`}
-            {" — "}весовые данные будут учтены при распределении нагрузки
-          </p>
-          <a href="/orders" className="text-xs text-blue-600 underline shrink-0">изменить</a>
-        </div>
-      )}
+      {todayOrders && todayOrders.total_count > 0 && (() => {
+        const totalCapacityKg = vehicles.reduce((sum, v) => sum + (parseInt(v.capacity_kg) || 0), 0);
+        const totalOrderKg = todayOrders.total_weight_kg;
+        const isOverCapacity = totalCapacityKg > 0 && totalOrderKg > totalCapacityKg;
+        return (
+          <>
+            <div className={`shrink-0 flex items-center gap-3 rounded-lg border px-4 py-3 ${isOverCapacity ? "border-amber-300 bg-amber-50" : "border-blue-200 bg-blue-50"}`}>
+              <Package className={`w-4 h-4 shrink-0 ${isOverCapacity ? "text-amber-600" : "text-blue-600"}`} />
+              <p className={`text-sm flex-1 ${isOverCapacity ? "text-amber-800" : "text-blue-800"}`}>
+                <span className="font-semibold">Заявки на сегодня загружены:</span>{" "}
+                {todayOrders.total_count} точек
+                {totalOrderKg > 0 && (
+                  <> · <Weight className="inline w-3.5 h-3.5 mx-0.5" />{totalOrderKg.toLocaleString("ru-RU", {maximumFractionDigits: 0})} кг</>
+                )}
+                {todayOrders.total_volume_m3 > 0 && ` · ${todayOrders.total_volume_m3} м³`}
+                {" — "}весовые данные будут учтены при распределении нагрузки
+              </p>
+              <a href="/orders" className={`text-xs underline shrink-0 ${isOverCapacity ? "text-amber-600" : "text-blue-600"}`}>изменить</a>
+            </div>
+            {/* Problem 4: capacity pre-check warning */}
+            {isOverCapacity && (
+              <div className="shrink-0 flex items-start gap-3 rounded-lg border border-red-300 bg-red-50 px-4 py-3">
+                <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                <p className="text-sm text-red-800">
+                  <span className="font-semibold">Недостаточно грузоподъёмности:</span>{" "}
+                  вес заявок <strong>{totalOrderKg.toLocaleString("ru-RU", {maximumFractionDigits: 0})} кг</strong>,
+                  {" "}суммарная вместимость транспорта <strong>{totalCapacityKg.toLocaleString("ru-RU")} кг</strong>.
+                  {" "}Добавьте машины или увеличьте грузоподъёмность перед построением маршрута.
+                </p>
+              </div>
+            )}
+          </>
+        );
+      })()}
 
       {/* Depot address */}
       <Card className="shrink-0">
@@ -422,9 +479,17 @@ export function RoutePage() {
                           <MapPin className="w-3 h-3 shrink-0" />
                           <span className="truncate">{store.address}</span>
                         </p>
-                        <p className="text-xs text-muted-foreground">
-                          Окно: {store.time_window_from}-{store.time_window_to} | {store.unload_minutes} мин
-                        </p>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="text-xs text-muted-foreground">
+                            Окно: {store.time_window_from}-{store.time_window_to} | {store.unload_minutes} мин
+                          </p>
+                          {orderWeightMap.has(store.id) && (
+                            <span className="inline-flex items-center gap-0.5 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5">
+                              <Weight className="w-3 h-3" />
+                              {orderWeightMap.get(store.id)!.toLocaleString("ru-RU", { maximumFractionDigits: 0 })} кг
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </label>
                   ))}

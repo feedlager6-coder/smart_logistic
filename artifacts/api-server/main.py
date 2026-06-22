@@ -795,6 +795,212 @@ def _cluster_by_capacitated_sweep(store_indices: list, all_coords: list,
     return [c for c in chunks if c]
 
 
+def _cluster_by_weight_sweep(store_indices: list, all_coords: list, num_vehicles: int,
+                              capacities: list, demands: list) -> list:
+    """
+    Capacity-aware sweep clustering for CVRP (Sweep Algorithm, Gillett & Miller 1974).
+
+    Sorts stores by polar angle around the depot and assigns them to vehicles
+    sequentially, respecting each vehicle's weight capacity.  When a vehicle
+    would be overloaded by the next store, the algorithm opens the next vehicle.
+
+    This is the primary fix for: weight data present + capacity_kg set but
+    vehicle loads still unbalanced — because the previous pure-angle sweep
+    never consulted demands or capacities at all.
+
+    Args:
+        store_indices:  node indices of stores (0 = depot in all_coords)
+        all_coords:     full coordinate list (depot at index 0)
+        num_vehicles:   number of vehicles
+        capacities:     list of vehicle weight capacities (one per vehicle, scaled)
+        demands:        list of demands indexed by node (demands[0] = depot = 0)
+
+    Returns: list of clusters (one per vehicle), non-empty clusters only.
+    """
+    if not store_indices:
+        return []
+
+    depot = all_coords[0]
+
+    def angle_from_depot(node_idx):
+        lat, lon = all_coords[node_idx]
+        return math.atan2(lon - depot[1], lat - depot[0])
+
+    sorted_nodes = sorted(store_indices, key=angle_from_depot)
+
+    def get_cap(v_idx: int) -> float:
+        if v_idx < len(capacities):
+            return capacities[v_idx]
+        return capacities[-1] if capacities else 99999
+
+    clusters = [[] for _ in range(num_vehicles)]
+    vehicle_loads = [0.0] * num_vehicles
+    current_vehicle = 0
+    overflow = []
+
+    for node in sorted_nodes:
+        demand = demands[node] if node < len(demands) else 1
+
+        placed = False
+
+        # If all vehicles already full, skip straight to overflow
+        if current_vehicle < num_vehicles:
+            cap = get_cap(current_vehicle)
+            if vehicle_loads[current_vehicle] + demand <= cap:
+                # Fits in current vehicle
+                clusters[current_vehicle].append(node)
+                vehicle_loads[current_vehicle] += demand
+                placed = True
+            else:
+                # Current vehicle full — advance through remaining vehicles
+                current_vehicle += 1
+                while current_vehicle < num_vehicles:
+                    cap = get_cap(current_vehicle)
+                    if vehicle_loads[current_vehicle] + demand <= cap:
+                        clusters[current_vehicle].append(node)
+                        vehicle_loads[current_vehicle] += demand
+                        placed = True
+                        break
+                    current_vehicle += 1
+
+        if not placed:
+            overflow.append(node)
+
+    # Distribute overflow to least-loaded vehicle by capacity utilisation ratio
+    for node in overflow:
+        demand = demands[node] if node < len(demands) else 1
+        best_v = min(
+            range(num_vehicles),
+            key=lambda i: vehicle_loads[i] / max(get_cap(i), 1)
+        )
+        clusters[best_v].append(node)
+        vehicle_loads[best_v] += demand
+
+    if overflow:
+        logger.warning(
+            "_cluster_by_weight_sweep: %d stores overflowed total capacity "
+            "— placed in least-loaded vehicles (graceful degradation)",
+            len(overflow)
+        )
+
+    logger.info(
+        "_cluster_by_weight_sweep: %d stores → %d clusters, loads=%s, caps=%s",
+        len(store_indices),
+        len([c for c in clusters if c]),
+        [round(vehicle_loads[i]) for i in range(num_vehicles)],
+        [get_cap(i) for i in range(num_vehicles)],
+    )
+
+    return [c for c in clusters if c]
+
+
+def _enforce_capacity(routes: list, demands: list, capacities: list,
+                      full_matrix: list) -> list:
+    """
+    Post-processing: move stores from over-capacity routes to routes that
+    still have remaining capacity.
+
+    Greedy: picks the cheapest (minimum distance penalty) store to evict
+    from each overloaded route and inserts it at the best position in any
+    receiving route that has room.
+
+    Args:
+        routes:      list of routes (each route = list of global node indices)
+        demands:     demands[node] = weight of that node
+        capacities:  capacities[v] = weight limit for vehicle v
+        full_matrix: Haversine distance matrix (used for insertion cost)
+
+    Returns: adjusted routes (same structure, some stops may be moved).
+    """
+    def get_cap(v_idx: int) -> float:
+        if v_idx < len(capacities):
+            return capacities[v_idx]
+        return capacities[-1] if capacities else 99999
+
+    def route_load(route):
+        return sum(demands[n] if n < len(demands) else 1 for n in route)
+
+    max_iterations = sum(len(r) for r in routes) + 1
+    changed = True
+    iterations = 0
+
+    while changed and iterations < max_iterations:
+        changed = False
+        iterations += 1
+
+        for vi in range(len(routes)):
+            cap = get_cap(vi)
+            load = route_load(routes[vi])
+            if load <= cap:
+                continue
+
+            # Find cheapest node to remove from this overloaded route
+            best_node = None
+            best_removal_gain = float('-inf')
+            best_pos = -1
+
+            for pos, node in enumerate(routes[vi]):
+                if node == 0:
+                    continue
+                prev_n = routes[vi][pos - 1] if pos > 0 else 0
+                next_n = routes[vi][pos + 1] if pos < len(routes[vi]) - 1 else 0
+                # Gain = how much distance we save by removing this node
+                gain = (full_matrix[prev_n][node] + full_matrix[node][next_n]
+                        - full_matrix[prev_n][next_n])
+                if gain > best_removal_gain:
+                    best_removal_gain = gain
+                    best_node = node
+                    best_pos = pos
+
+            if best_node is None:
+                continue
+
+            demand_to_move = demands[best_node] if best_node < len(demands) else 1
+
+            # Find receiving vehicle with capacity and best insertion cost
+            best_receiver = -1
+            best_insert_cost = float('inf')
+            best_insert_pos = -1
+
+            for vj in range(len(routes)):
+                if vj == vi:
+                    continue
+                recv_cap = get_cap(vj)
+                recv_load = route_load(routes[vj])
+                if recv_load + demand_to_move > recv_cap:
+                    continue  # Would also overflow
+
+                recv = routes[vj]
+                for ins_pos in range(len(recv) + 1):
+                    prev_n = recv[ins_pos - 1] if ins_pos > 0 else 0
+                    next_n = recv[ins_pos] if ins_pos < len(recv) else 0
+                    cost = (full_matrix[prev_n][best_node]
+                            + full_matrix[best_node][next_n]
+                            - full_matrix[prev_n][next_n])
+                    if cost < best_insert_cost:
+                        best_insert_cost = cost
+                        best_receiver = vj
+                        best_insert_pos = ins_pos
+
+            if best_receiver == -1:
+                logger.warning(
+                    "_enforce_capacity: node=%d (demand=%d) cannot be relocated "
+                    "— no vehicle has remaining capacity; route %d stays overloaded",
+                    best_node, demand_to_move, vi
+                )
+                continue
+
+            routes[vi].pop(best_pos)
+            routes[best_receiver].insert(best_insert_pos, best_node)
+            changed = True
+            logger.info(
+                "_enforce_capacity: moved node=%d (demand=%d) from vehicle %d to %d",
+                best_node, demand_to_move, vi, best_receiver
+            )
+
+    return routes
+
+
 def _parse_time_to_minutes(time_str: str) -> int:
     """Parse 'HH:MM' string to integer minutes from midnight.  Defaults to 09:00."""
     try:
@@ -1667,7 +1873,12 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
     if not ORTOOLS_AVAILABLE:
         if store_count >= 1:
             all_store_nodes = list(range(1, n))
-            clusters = _cluster_by_sweep(all_store_nodes, all_coords, num_vehicles)
+            if (capacities is not None and demands is not None
+                    and any(c < 99999 for c in capacities)):
+                clusters = _cluster_by_weight_sweep(
+                    all_store_nodes, all_coords, num_vehicles, capacities, demands)
+            else:
+                clusters = _cluster_by_sweep(all_store_nodes, all_coords, num_vehicles)
             return [c for c in clusters if c], "haversine"
         return _fallback_distribution(list(range(1, n)), num_vehicles), "haversine"
 
@@ -1681,10 +1892,24 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
     )
 
     # ── Step 2: geographic sector partition (contiguous sweep) ────────────────
-    # Each vehicle receives a contiguous angular sector around the depot.
-    # Denser sectors have more stores → vehicle gets more stops naturally.
+    # When weight demands and vehicle capacities are provided, use the
+    # capacity-aware sweep that fills vehicles respecting their weight limits.
+    # Otherwise fall back to the classic equal-angle geographic sweep.
     all_store_nodes = list(range(1, n))
-    clusters = _cluster_by_sweep(all_store_nodes, all_coords, num_vehicles)
+    _use_weight_sweep = (
+        capacities is not None
+        and demands is not None
+        and any(c < 99999 for c in capacities)
+    )
+    if _use_weight_sweep:
+        logger.info(
+            "solve_vrp: using weight-aware sweep clustering (capacities=%s)",
+            capacities,
+        )
+        clusters = _cluster_by_weight_sweep(
+            all_store_nodes, all_coords, num_vehicles, capacities, demands)
+    else:
+        clusters = _cluster_by_sweep(all_store_nodes, all_coords, num_vehicles)
 
     # ── Step 3: per-cluster road matrix → OR-Tools TSP ────────────────────────
     # Routing priority per cluster:
@@ -1927,6 +2152,14 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
                 "rebalance_count_balance: distribution %s → %s",
                 lens_before, lens_after,
             )
+
+    # ── Step 5d: capacity constraint enforcement ──────────────────────────────
+    # After Or-opt + count-balance, stop-count rebalancers may have moved stores
+    # across weight boundaries.  Run _enforce_capacity to move excess load from
+    # over-capacity vehicles to those with remaining headroom.
+    # Only active when real capacities were provided (not 99999 placeholders).
+    if _use_weight_sweep and len(routes) > 1:
+        routes = _enforce_capacity(routes, demands, capacities, full_matrix)
 
     # ── Step 6: rebalance to minimum stops per vehicle ────────────────────────
     # After sector sweep + Or-opt some vehicles may still be underfull (< effective_min
@@ -4429,6 +4662,51 @@ def build_route(request: Request, body: RouteRequest):
         len(store_list), num_vehicles, capacities,
         "yes" if store_time_windows else "no",
     )
+
+    # ── Pre-flight capacity check ─────────────────────────────────────────────
+    # If the total order weight exceeds total vehicle capacity, routing is
+    # physically impossible — tell the user BEFORE running the heavy solver.
+    # Uses raw kg values (before OR-Tools integer scaling) for a clear message.
+    if capacities is not None and demands is not None and _store_weights:
+        _total_demand_kg = sum(_store_weights.get(s["id"], 0) for s in store_list)
+        _total_capacity_kg = sum(
+            int(v.capacity_kg) for v in body.vehicles if v.capacity_kg
+        )
+        _max_vehicle_cap = max(
+            (int(v.capacity_kg) for v in body.vehicles if v.capacity_kg), default=99999
+        )
+        # Check if any single store's weight exceeds the largest vehicle capacity
+        _oversized = [
+            (s["name"], round(_store_weights[s["id"]]))
+            for s in store_list
+            if s["id"] in _store_weights and _store_weights[s["id"]] > _max_vehicle_cap
+        ]
+        if _oversized:
+            names = ", ".join(f"{n} ({w} кг)" for n, w in _oversized[:3])
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Вес {len(_oversized)} магазин(ов) превышает вместимость "
+                    f"самой большой машины ({_max_vehicle_cap} кг): {names}"
+                    + (" и др." if len(_oversized) > 3 else "") +
+                    ". Увеличьте грузоподъёмность или разбейте заявки."
+                )
+            )
+        if _total_demand_kg > _total_capacity_kg:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Суммарный вес заявок ({round(_total_demand_kg)} кг) превышает "
+                    f"суммарную грузоподъёмность транспорта ({_total_capacity_kg} кг). "
+                    f"Добавьте машины или увеличьте грузоподъёмность."
+                )
+            )
+        logger.info(
+            "build_route: capacity pre-check OK — total_demand=%.0f kg, "
+            "total_capacity=%d kg, utilisation=%.0f%%",
+            _total_demand_kg, _total_capacity_kg,
+            100 * _total_demand_kg / max(_total_capacity_kg, 1),
+        )
 
     # ── Degradation chain ────────────────────────────────────────────────────
     # Level 1: TW enabled (if requested)
