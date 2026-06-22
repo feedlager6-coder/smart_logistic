@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import {
   Upload, Package, CheckCircle, XCircle, Loader2, Trash2, ArrowRight,
-  AlertTriangle, FileSpreadsheet, RotateCcw, Weight, Box, Plus,
+  AlertTriangle, FileSpreadsheet, RotateCcw, Weight, Box, Plus, Wand2,
 } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -58,22 +58,52 @@ interface OrdersResponse {
   total_amount_rub: number;
 }
 
+// Unmatched store data extracted from preview (for bulk create + enhanced prefill)
+interface UnmatchedStoreData {
+  name: string;
+  address: string;
+  yandex_url: string;
+  time_from: string;
+  time_to: string;
+  unload_minutes: string;
+  city: string;
+}
+
 // Fields the user can map columns to
 const FIELD_LABELS: Record<string, string> = {
-  store_name: "Название точки *",
-  order_number: "Номер заявки",
-  weight_kg: "Вес (кг)",
-  volume_m3: "Объём (м³)",
-  amount_rub: "Сумма (₽)",
-  zone: "Зона / Водитель",
-  address: "Адрес",
-  notes: "Примечание",
+  store_name:     "Название точки *",
+  order_number:   "Номер заявки",
+  weight_kg:      "Вес (кг)",
+  volume_m3:      "Объём (м³)",
+  amount_rub:     "Сумма (₽)",
+  zone:           "Зона / Водитель",
+  address:        "Адрес",
+  yandex_url:     "Ссылка Яндекс",
+  time_from:      "Время с",
+  time_to:        "Время до",
+  unload_minutes: "Разгрузка (мин)",
+  city:           "Город",
+  notes:          "Примечание",
 };
 
 const TODAY = new Date().toISOString().slice(0, 10);
+const TODAY_AUTOSELECT_KEY = `smartroute_autoselect_${TODAY}`;
 
 function fmt(n: number, digits = 1) {
   return n.toLocaleString("ru-RU", { minimumFractionDigits: 0, maximumFractionDigits: digits });
+}
+
+// Build an extended prefill URL for stores page (passes as much data as possible)
+function buildPrefillUrl(store: UnmatchedStoreData): string {
+  const p = new URLSearchParams();
+  p.set("prefill", store.name);
+  if (store.address)        p.set("address", store.address);
+  if (store.yandex_url)     p.set("yandex_url", store.yandex_url);
+  if (store.time_from)      p.set("time_from", store.time_from);
+  if (store.time_to)        p.set("time_to", store.time_to);
+  if (store.unload_minutes) p.set("unload_minutes", store.unload_minutes);
+  if (store.city)           p.set("city", store.city);
+  return `/stores?${p.toString()}`;
 }
 
 // ── Main component ─────────────────────────────────────────────────────────────
@@ -88,6 +118,10 @@ export function OrdersPage() {
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [mapping, setMapping] = useState<Record<string, string | null>>({});
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+
+  // Unmatched store data extracted at import time (name → extra data from Excel)
+  const [pendingUnmatched, setPendingUnmatched] = useState<UnmatchedStoreData[]>([]);
+  const [bulkCreating, setBulkCreating] = useState(false);
 
   // Query: today's saved orders
   const { data: savedOrders, isLoading: ordersLoading } = useQuery<OrdersResponse>({
@@ -150,6 +184,31 @@ export function OrdersPage() {
 
     setPhase("saving");
 
+    // Extract unmatched store data BEFORE we clear preview
+    // This lets us offer bulk-create and enhanced prefill after import
+    const addrCol     = mapping.address;
+    const yandexCol   = mapping.yandex_url;
+    const timeFromCol = mapping.time_from;
+    const timeToCol   = mapping.time_to;
+    const unloadCol   = mapping.unload_minutes;
+    const cityCol     = mapping.city;
+
+    const unmatchedMap = new Map<string, UnmatchedStoreData>();
+    for (const row of preview.rows) {
+      if (row.matched_store_id !== null) continue;
+      const name = nameCol ? (row.cells[nameCol] ?? "").trim() : "";
+      if (!name || unmatchedMap.has(name)) continue;
+      unmatchedMap.set(name, {
+        name,
+        address:        addrCol     ? (row.cells[addrCol] ?? "").trim()     : "",
+        yandex_url:     yandexCol   ? (row.cells[yandexCol] ?? "").trim()   : "",
+        time_from:      timeFromCol ? (row.cells[timeFromCol] ?? "").trim()  : "",
+        time_to:        timeToCol   ? (row.cells[timeToCol] ?? "").trim()    : "",
+        unload_minutes: unloadCol   ? (row.cells[unloadCol] ?? "").trim()    : "",
+        city:           cityCol     ? (row.cells[cityCol] ?? "").trim()      : "",
+      });
+    }
+
     const rows = preview.rows
       .map((row) => {
         const storeName = nameCol ? (row.cells[nameCol] ?? "").trim() : "";
@@ -190,6 +249,14 @@ export function OrdersPage() {
         throw new Error(err.detail ?? "Ошибка сохранения");
       }
       const result = await res.json();
+
+      // FIX #4: Clear autoselect sessionStorage key so next visit to /route?from=orders
+      // triggers a fresh autoselect with newly imported orders.
+      sessionStorage.removeItem(TODAY_AUTOSELECT_KEY);
+
+      // Save unmatched data for bulk-create / enhanced prefill in idle view
+      setPendingUnmatched(Array.from(unmatchedMap.values()));
+
       await qc.invalidateQueries({ queryKey: ["daily_orders", TODAY] });
       toast({
         title: "Заявки загружены",
@@ -211,9 +278,77 @@ export function OrdersPage() {
       const res = await fetch(`/api/orders?date=${TODAY}`, { method: "DELETE" });
       if (!res.ok) throw new Error();
       await qc.invalidateQueries({ queryKey: ["daily_orders", TODAY] });
+      setPendingUnmatched([]);
       toast({ title: "Заявки удалены" });
     } catch {
       toast({ title: "Ошибка при удалении", variant: "destructive" });
+    }
+  };
+
+  // ── Bulk create unmatched stores ───────────────────────────────────────────
+
+  const handleBulkCreateStores = async () => {
+    if (pendingUnmatched.length === 0) return;
+    setBulkCreating(true);
+
+    let created = 0;
+    let failed = 0;
+
+    for (const store of pendingUnmatched) {
+      try {
+        const body: Record<string, unknown> = { name: store.name };
+        if (store.yandex_url) body.yandex_url = store.yandex_url;
+        if (store.address)    body.address    = store.address;
+        if (store.city)       body.city       = store.city;
+        if (store.time_from)  body.time_window_from = store.time_from;
+        if (store.time_to)    body.time_window_to   = store.time_to;
+        const unloadInt = parseInt(store.unload_minutes);
+        if (!isNaN(unloadInt) && unloadInt > 0) body.unload_minutes = unloadInt;
+
+        const res = await fetch("/api/stores", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (res.ok) {
+          created++;
+        } else {
+          failed++;
+        }
+      } catch {
+        failed++;
+      }
+    }
+
+    // Re-match orders with newly created stores
+    try {
+      await fetch("/api/orders/rematch", { method: "POST" });
+    } catch {
+      // Non-fatal — orders will show updated on next refresh
+    }
+
+    // Invalidate queries so stores list and orders list both refresh
+    await qc.invalidateQueries({ queryKey: ["daily_orders", TODAY] });
+    await qc.invalidateQueries({ queryKey: ["stores"] });
+
+    // Clear pending unmatched — new stores are now in DB
+    setPendingUnmatched([]);
+    setBulkCreating(false);
+
+    // Also clear sessionStorage so autoselect fires fresh when user goes to /route
+    sessionStorage.removeItem(TODAY_AUTOSELECT_KEY);
+
+    if (failed === 0) {
+      toast({
+        title: `Создано ${created} магазин${created === 1 ? "" : created < 5 ? "а" : "ов"}`,
+        description: "Заявки автоматически сопоставлены с новыми магазинами.",
+      });
+    } else {
+      toast({
+        title: `Создано ${created}, ошибок: ${failed}`,
+        description: "Часть магазинов не удалось создать. Добавьте их вручную.",
+        variant: "destructive",
+      });
     }
   };
 
@@ -351,7 +486,7 @@ export function OrdersPage() {
             <Alert className="border-amber-200 bg-amber-50">
               <AlertTriangle className="w-4 h-4 text-amber-600" />
               <AlertDescription className="text-amber-800">
-                {preview.unmatched_stores} точек не найдены в базе магазинов — они будут сохранены без привязки к магазину и не войдут в маршрут. Проверьте, что названия в файле совпадают с названиями в базе.
+                {preview.unmatched_stores} точек не найдены в базе магазинов — они будут сохранены без привязки к магазину и не войдут в маршрут. После импорта можно добавить их массово одной кнопкой.
               </AlertDescription>
             </Alert>
           )}
@@ -363,7 +498,7 @@ export function OrdersPage() {
               <CardDescription>Укажите какой столбец вашего файла соответствует каждому полю. Звёздочкой отмечено обязательное поле.</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                 {Object.entries(FIELD_LABELS).map(([field, label]) => (
                   <div key={field} className="space-y-1.5">
                     <label className="text-xs font-medium text-muted-foreground">{label}</label>
@@ -387,22 +522,22 @@ export function OrdersPage() {
             </CardContent>
           </Card>
 
-          {/* Preview table */}
+          {/* Preview table — ALL columns with horizontal scroll (FIX #3) */}
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-base">Предпросмотр данных</CardTitle>
-              <CardDescription>Первые строки файла · Зелёные строки — точки сопоставлены с базой</CardDescription>
+              <CardDescription>Первые строки файла · Зелёные строки — точки сопоставлены с базой · Прокрутите вправо для всех колонок</CardDescription>
             </CardHeader>
             <CardContent className="p-0">
               <ScrollArea className="h-72">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
+                <div className="overflow-x-auto min-w-full">
+                  <table className="text-xs whitespace-nowrap">
                     <thead className="sticky top-0 bg-muted/80 border-b">
                       <tr>
                         <th className="text-left px-3 py-2 font-medium text-muted-foreground w-8">#</th>
-                        <th className="text-left px-3 py-2 font-medium text-muted-foreground">Сопоставление</th>
-                        {preview.headers.slice(0, 6).map(h => (
-                          <th key={h} className="text-left px-3 py-2 font-medium text-muted-foreground max-w-[140px]">{h}</th>
+                        <th className="text-left px-3 py-2 font-medium text-muted-foreground min-w-[130px]">Сопоставление</th>
+                        {preview.headers.map(h => (
+                          <th key={h} className="text-left px-3 py-2 font-medium text-muted-foreground min-w-[110px] max-w-[200px]">{h}</th>
                         ))}
                       </tr>
                     </thead>
@@ -423,8 +558,8 @@ export function OrdersPage() {
                               </span>
                             )}
                           </td>
-                          {preview.headers.slice(0, 6).map(h => (
-                            <td key={h} className="px-3 py-1.5 max-w-[140px] truncate text-muted-foreground">
+                          {preview.headers.map(h => (
+                            <td key={h} className="px-3 py-1.5 max-w-[200px] truncate text-muted-foreground">
                               {row.cells[h] ?? ""}
                             </td>
                           ))}
@@ -532,41 +667,102 @@ export function OrdersPage() {
         </Card>
       )}
 
-      {/* ── Unmatched stores card ── */}
+      {/* ── Unmatched stores card — with bulk-create + enhanced prefill (FIX #1, #2) ── */}
       {hasOrders && phase === "idle" && savedOrders && (() => {
-        const unmatched = savedOrders.orders.filter(o => !o.store_id);
-        if (unmatched.length === 0) return null;
-        const unique = Array.from(new Map(unmatched.map(o => [o.store_name_raw, o])).values());
+        // Merge pending data with actual unmatched orders from DB
+        const unmatchedOrders = savedOrders.orders.filter(o => !o.store_id);
+        if (unmatchedOrders.length === 0) return null;
+
+        // Unique names from DB orders
+        const uniqueByName = Array.from(
+          new Map(unmatchedOrders.map(o => [o.store_name_raw, o])).values()
+        );
+
+        // Build a lookup: name → pending extra data (from Excel, available after fresh import)
+        const pendingLookup = new Map(pendingUnmatched.map(p => [p.name, p]));
+
         return (
           <Card className="border-amber-200 bg-amber-50/60">
             <CardHeader className="pb-2">
-              <CardTitle className="text-base flex items-center gap-2 text-amber-800">
-                <AlertTriangle className="w-4 h-4" />
-                Несопоставленные точки ({unique.length})
-              </CardTitle>
-              <CardDescription className="text-amber-700">
-                Эти названия из заявок не найдены в базе магазинов. Добавьте их вручную, чтобы включить в маршрут.
-              </CardDescription>
+              <div className="flex flex-col sm:flex-row sm:items-start gap-3 justify-between">
+                <div>
+                  <CardTitle className="text-base flex items-center gap-2 text-amber-800">
+                    <AlertTriangle className="w-4 h-4" />
+                    Несопоставленные точки ({uniqueByName.length})
+                  </CardTitle>
+                  <CardDescription className="text-amber-700">
+                    Эти названия из заявок не найдены в базе магазинов. Добавьте их, чтобы включить в маршрут.
+                  </CardDescription>
+                </div>
+
+                {/* Bulk create button (FIX #1) — only shown when we have Excel data from this session */}
+                {pendingUnmatched.length > 0 && (
+                  <Button
+                    size="sm"
+                    className="gap-2 shrink-0 bg-amber-600 hover:bg-amber-700 text-white"
+                    onClick={handleBulkCreateStores}
+                    disabled={bulkCreating}
+                  >
+                    {bulkCreating ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Wand2 className="w-3.5 h-3.5" />
+                    )}
+                    {bulkCreating
+                      ? "Создаём магазины..."
+                      : `Добавить все ${pendingUnmatched.length} магазин${pendingUnmatched.length === 1 ? "" : pendingUnmatched.length < 5 ? "а" : "ов"}`}
+                  </Button>
+                )}
+              </div>
             </CardHeader>
             <CardContent>
               <div className="space-y-2">
-                {unique.map(o => (
-                  <div key={o.store_name_raw} className="flex items-center justify-between gap-3 bg-white/70 rounded-md px-3 py-2 border border-amber-100">
-                    <div>
-                      <p className="font-medium text-sm">{o.store_name_raw}</p>
-                      {o.weight_kg > 0 && (
-                        <p className="text-xs text-muted-foreground">{fmt(o.weight_kg)} кг · заявок: {unmatched.filter(u => u.store_name_raw === o.store_name_raw).length}</p>
-                      )}
+                {uniqueByName.map(o => {
+                  const extra = pendingLookup.get(o.store_name_raw);
+                  // Build enriched store object for prefill (use pending data if available)
+                  const storeForPrefill: UnmatchedStoreData = extra ?? {
+                    name: o.store_name_raw,
+                    address: o.store_address ?? "",
+                    yandex_url: "",
+                    time_from: "",
+                    time_to: "",
+                    unload_minutes: "",
+                    city: "",
+                  };
+                  const prefillUrl = buildPrefillUrl(storeForPrefill);
+
+                  return (
+                    <div key={o.store_name_raw} className="flex items-center justify-between gap-3 bg-white/70 rounded-md px-3 py-2 border border-amber-100">
+                      <div className="min-w-0">
+                        <p className="font-medium text-sm truncate">{o.store_name_raw}</p>
+                        <div className="flex flex-wrap gap-2 mt-0.5">
+                          {o.weight_kg > 0 && (
+                            <span className="text-xs text-muted-foreground">{fmt(o.weight_kg)} кг · {unmatchedOrders.filter(u => u.store_name_raw === o.store_name_raw).length} заявок</span>
+                          )}
+                          {extra?.address && (
+                            <span className="text-xs text-muted-foreground truncate max-w-[200px]">{extra.address}</span>
+                          )}
+                          {extra?.yandex_url && (
+                            <span className="text-xs text-blue-600">со ссылкой Яндекс</span>
+                          )}
+                        </div>
+                      </div>
+                      <Button asChild variant="outline" size="sm" className="shrink-0 border-amber-300 hover:bg-amber-100 text-amber-900">
+                        <a href={prefillUrl}>
+                          <Plus className="w-3.5 h-3.5 mr-1.5" />
+                          Добавить
+                        </a>
+                      </Button>
                     </div>
-                    <Button asChild variant="outline" size="sm" className="shrink-0 border-amber-300 hover:bg-amber-100 text-amber-900">
-                      <a href={`/stores?prefill=${encodeURIComponent(o.store_name_raw)}`}>
-                        <Plus className="w-3.5 h-3.5 mr-1.5" />
-                        Добавить магазин
-                      </a>
-                    </Button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
+
+              {pendingUnmatched.length === 0 && (
+                <p className="text-xs text-amber-700 mt-3">
+                  Для автозаполнения формы — загрузите файл заново. Для ручного добавления нажмите «Добавить».
+                </p>
+              )}
             </CardContent>
           </Card>
         );

@@ -26,19 +26,38 @@ export function StoresPage() {
   const [search, setSearch] = useState("");
   const [showNoCoords, setShowNoCoords] = useState(false);
 
-  // ── Prefill from URL (?prefill=NAME) — called from orders page "Добавить магазин" ──
+  // ── Prefill from URL — called from orders page "Добавить магазин" or bulk-create ──
+  // Supported params: prefill (name), address, yandex_url, time_from, time_to, unload_minutes, city
   const search_str = useSearch();
   const addFormRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const params = new URLSearchParams(search_str);
     const prefill = params.get("prefill");
-    if (prefill) {
-      setName(decodeURIComponent(prefill));
-      // Scroll to the add form after a short delay (DOM needs to render)
-      setTimeout(() => {
-        addFormRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-      }, 200);
-    }
+    if (!prefill) return;
+
+    setName(decodeURIComponent(prefill));
+
+    const address   = params.get("address");
+    const yandexUrl = params.get("yandex_url");
+    const timeFrom  = params.get("time_from");
+    const timeTo    = params.get("time_to");
+    const unload    = params.get("unload_minutes");
+    const cityParam = params.get("city");
+
+    if (address)   setAddress(decodeURIComponent(address));
+    if (yandexUrl) setYandexUrl(decodeURIComponent(yandexUrl));
+    if (timeFrom)  setTimeFrom(decodeURIComponent(timeFrom));
+    if (timeTo)    setTimeTo(decodeURIComponent(timeTo));
+    if (unload)    setUnloadMinutes(decodeURIComponent(unload));
+    if (cityParam) setCity(decodeURIComponent(cityParam));
+
+    // Show extra settings panel if any optional fields are prefilled
+    if (timeFrom || timeTo || unload) setShowSettings(true);
+
+    // Scroll to the add form after a short delay (DOM needs to render)
+    setTimeout(() => {
+      addFormRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 200);
   // Run once on mount only
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

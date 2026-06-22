@@ -242,6 +242,15 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 5. **Frontend audit** — NaN в capacity_kg исправлен. Inconsistent fetch (stores.tsx force-create обходит TQ) задокументирован как низкий риск (не влияет на функциональность, 401 обрабатывается на уровне cookie middleware).
 6. **DEVELOPER_ONBOARDING.md обновлён** — добавлены разделы: Capacity Overflow Warning, Unmatched Stores UX, Volume limitation (plan), Auto-select API test results, Regression test results, Итоговая оценка готовности.
 
+## Architecture decisions — Orders Import Improvements (Jun 2026)
+
+- **pendingUnmatched state**: `orders.tsx` сохраняет данные несопоставленных строк (name, address, yandex_url, time_from, time_to, unload_minutes, city) в React-состоянии `pendingUnmatched` во время `handleImport`. Данные живут только в памяти SPA-сессии — при перезагрузке страницы "Добавить все" недоступно без повторного импорта.
+- **POST /api/orders/rematch**: новый endpoint — берёт daily_orders с store_id=NULL, перезапускает `_match_store_to_db` против актуального списка магазинов пользователя, обновляет store_id. Вызывается автоматически после массового создания магазинов. Не требует тела запроса; дата — опциональный query-параметр (default = today).
+- **_detect_column_mapping расширен**: добавлены поля yandex_url, time_from, time_to, unload_minutes, city (было 8, стало 13). Позволяет системе брать данные из Excel для автозаполнения формы магазина.
+- **Расширенный prefill stores.tsx**: URL-параметры `?prefill=NAME&address=ADDR&yandex_url=URL&time_from=HH:MM&time_to=HH:MM&unload_minutes=N&city=CITY` — все читаются в `useEffect` on mount и подставляются в форму. Если есть time/unload параметры — панель "Настройки доставки" открывается автоматически.
+- **FIX autoselect sessionStorage**: при успешном импорте (`handleImport` success) вызывается `sessionStorage.removeItem(TODAY_AUTOSELECT_KEY)`. Это исправляет баг, когда sessionStorage-ключ устанавливался при первом визите /route (с пустыми заявками), блокируя автовыбор при повторном переходе после импорта.
+- **Preview таблица — все колонки**: убрана обрезка `.slice(0, 6)`. Таблица показывает ВСЕ колонки файла с горизонтальным скроллом (`overflow-x-auto` + `whitespace-nowrap`).
+
 ## Gotchas
 
 - `Start API Server` и `artifacts/smartroute: web` workflows — всегда FAILED (конфликт портов с уже запущенными `artifacts/api-server: API Server` и `Start Frontend`) — ожидаемо, не чинить

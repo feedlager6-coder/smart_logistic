@@ -4184,6 +4184,7 @@ _ORDER_COLUMN_PATTERNS: dict = {
     "store_name": ["торговая точка", "наименование контрагента", "название точки", "название магазина",
                    "магазин", "контрагент", "точка доставки", "название", "точка", "клиент", "наименование", "name"],
     "address":    ["адрес доставки", "адрес точки", "адрес", "address"],
+    "yandex_url": ["ссылка яндекс", "яндекс карты", "яндекс", "yandex", "ссылка на карту", "ссылка"],
     "weight_kg":  ["вес, кг", "вес (кг)", "вес,кг", "вес кг", "вес", "weight", "масса, кг",
                    "масса кг", "масса", "кг", "kg"],
     "volume_m3":  ["объём, м3", "объём (м3)", "объем, м3", "объем (м3)", "объём м3",
@@ -4193,6 +4194,10 @@ _ORDER_COLUMN_PATTERNS: dict = {
                     "накладная", "заявка", "номер", "заказ", "order", "number", "№"],
     "zone":       ["зона доставки", "маршрут водителя", "водитель", "зона", "маршрут", "zone", "driver"],
     "notes":      ["примечание", "комментарий", "notes", "comment", "note"],
+    "time_from":  ["время с", "время от", "открытие", "open_time", "time_from", "с ("],
+    "time_to":    ["время до", "время по", "закрытие", "close_time", "time_to", "до ("],
+    "unload_minutes": ["разгрузка, мин", "разгрузка (мин)", "разгрузка мин", "разгрузка", "unload", "выгрузка мин"],
+    "city":       ["город", "city"],
 }
 
 
@@ -4580,6 +4585,57 @@ def delete_orders(request: Request, date: Optional[str] = None):
     cur.close()
     conn.close()
     return {"deleted": deleted, "delivery_date": target_date}
+
+
+@app.post("/api/orders/rematch")
+def rematch_orders(request: Request, date: Optional[str] = None):
+    """
+    Re-run store matching for daily_orders with store_id=NULL.
+    Called after new stores are created (e.g. bulk create from unmatched list).
+    Returns count of newly matched orders.
+    """
+    uid = get_user_id(request)
+    target_date = date if date else str(datetime.now().date())
+
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    # Get unmatched orders for this date
+    cur.execute(
+        "SELECT id, store_name_raw FROM daily_orders WHERE owner_id = %s AND delivery_date = %s AND store_id IS NULL",
+        (uid, target_date)
+    )
+    unmatched = [dict(r) for r in cur.fetchall()]
+
+    if not unmatched:
+        cur.close()
+        conn.close()
+        return {"matched_count": 0, "still_unmatched": 0}
+
+    # Get current stores (fresh, after new stores were created)
+    cur.execute("SELECT id, name, address FROM stores WHERE owner_id = %s", (uid,))
+    db_stores = [dict(r) for r in cur.fetchall()]
+
+    matched_count = 0
+    cur2 = conn.cursor()
+    for order in unmatched:
+        match = _match_store_to_db(order["store_name_raw"], db_stores)
+        if match:
+            cur2.execute(
+                "UPDATE daily_orders SET store_id = %s WHERE id = %s AND owner_id = %s",
+                (match["id"], order["id"], uid)
+            )
+            matched_count += 1
+
+    conn.commit()
+    cur.close()
+    cur2.close()
+    conn.close()
+
+    return {
+        "matched_count": matched_count,
+        "still_unmatched": len(unmatched) - matched_count,
+    }
 
 
 @app.post("/api/route/build")
