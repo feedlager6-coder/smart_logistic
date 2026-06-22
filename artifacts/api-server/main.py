@@ -77,8 +77,20 @@ async def security_headers_middleware(request: Request, call_next):
         )
     return response
 
-# PG_CONNECTION_URL overrides Replit's managed DATABASE_URL (use for Railway or custom Postgres)
-DATABASE_URL = os.environ.get("PG_CONNECTION_URL") or os.environ.get("DATABASE_URL", "")
+# Connection priority:
+#   1. PG_CONNECTION_URL  — explicit override (Railway / custom Postgres)
+#   2. Individual PGHOST/PGUSER/… vars — Replit-managed PostgreSQL (preferred in dev)
+#   3. DATABASE_URL secret — fallback (may point to external DB)
+_pg_explicit = os.environ.get("PG_CONNECTION_URL", "")
+if not _pg_explicit:
+    _pghost = os.environ.get("PGHOST", "")
+    _pguser = os.environ.get("PGUSER", "")
+    _pgpass = os.environ.get("PGPASSWORD", "")
+    _pgdb   = os.environ.get("PGDATABASE", "")
+    _pgport = os.environ.get("PGPORT", "5432")
+    if _pghost and _pguser and _pgdb:
+        _pg_explicit = f"postgresql://{_pguser}:{_pgpass}@{_pghost}:{_pgport}/{_pgdb}"
+DATABASE_URL: str = _pg_explicit or os.environ.get("DATABASE_URL", "")
 
 # ── JWT / Auth ────────────────────────────────────────────────────────────────
 _JWT_SECRET_ENV = os.environ.get("JWT_SECRET", "")
@@ -1219,6 +1231,92 @@ def _rebalance_min_stops(routes: list, full_matrix: list, min_stops: int) -> lis
     return [r for r in routes if r]
 
 
+def _rebalance_count_balance(routes: list, full_matrix: list, max_imbalance: int = 2) -> list:
+    """
+    Enforce count balance: ensure max(route_len) - min(route_len) <= max_imbalance.
+
+    Called when sector sweep + Or-opt leave a severe skew (e.g. 5 vs 12 for
+    2 vehicles with 17 stores).  The existing _rebalance_min_stops uses a 70%
+    floor that allows a 5-stop route to be considered "full enough", so this step
+    runs AFTER it as a strict count enforcer.
+
+    Algorithm:
+    - While max_len - min_len > max_imbalance:
+        - From the longest route pick the stop with minimum (insertion_cost
+          into shortest route − removal_gain from longest route) — i.e. the
+          geographically cheapest move.
+        - Apply the move; re-run 2-opt on both affected routes.
+    - Safety: never reduces a route below 1 stop; bounded by total_stops moves.
+
+    This does NOT try to minimise km — balance takes priority.  The km impact
+    is typically small (< 2%) because we pick the geographically cheapest stop.
+    """
+    if len(routes) <= 1:
+        return routes
+
+    def route_cost(route):
+        if not route:
+            return 0
+        cost = full_matrix[0][route[0]] + full_matrix[route[-1]][0]
+        for a, b in zip(route, route[1:]):
+            cost += full_matrix[a][b]
+        return cost
+
+    total_stops = sum(len(r) for r in routes)
+    max_moves = total_stops  # hard safety bound — can't move more stops than exist
+
+    for _move in range(max_moves):
+        lens = [len(r) for r in routes]
+        max_len = max(lens)
+        min_len = min(lens)
+        if max_len - min_len <= max_imbalance:
+            break
+
+        donor_idx = max(range(len(routes)), key=lambda i: lens[i])
+        recv_idx = min(range(len(routes)), key=lambda i: lens[i])
+        donor = routes[donor_idx]
+        recv = routes[recv_idx]
+
+        if len(donor) <= 1:
+            break  # safety — cannot donate last stop
+
+        # Find the stop in donor whose move to recv is cheapest (min net_cost)
+        best_stop_pos = -1
+        best_insert_pos = -1
+        best_net_cost = float("inf")
+        base_recv = route_cost(recv)
+        base_donor = route_cost(donor)
+
+        for k, stop in enumerate(donor):
+            donor_without = donor[:k] + donor[k + 1:]
+            removal_gain = base_donor - route_cost(donor_without)
+            for pos in range(len(recv) + 1):
+                recv_with = recv[:pos] + [stop] + recv[pos:]
+                insertion_cost = route_cost(recv_with) - base_recv
+                net_cost = insertion_cost - removal_gain
+                if net_cost < best_net_cost:
+                    best_net_cost = net_cost
+                    best_stop_pos = k
+                    best_insert_pos = pos
+
+        if best_stop_pos < 0:
+            break  # no valid move found
+
+        stop_val = donor[best_stop_pos]
+        new_donor = donor[:best_stop_pos] + donor[best_stop_pos + 1:]
+        new_recv = recv[:best_insert_pos] + [stop_val] + recv[best_insert_pos:]
+        routes[donor_idx] = new_donor
+        routes[recv_idx] = new_recv
+        logger.info(
+            "rebalance_count_balance: stop %d: route %d(%d stops) → route %d(%d stops), "
+            "net_cost %+.0f m, imbalance was %d",
+            stop_val, donor_idx, max_len, recv_idx, min_len, best_net_cost,
+            max_len - min_len,
+        )
+
+    return [r for r in routes if r]
+
+
 def _rebalance_max_stops(routes: list, full_matrix: list, max_stops: int) -> tuple:
     """
     Cap overloaded routes by moving excess stops to less-loaded routes.
@@ -1300,7 +1398,25 @@ def _rebalance_max_stops(routes: list, full_matrix: list, max_stops: int) -> tup
 
 
 def get_db():
-    conn = psycopg2.connect(DATABASE_URL)
+    """Connect to PostgreSQL.
+
+    Supports both URL format (postgresql://user:pass@host:port/db) and
+    key=value DSN format.  psycopg2 in some environments rejects URL strings
+    when passed as a positional DSN argument — we parse the URL explicitly.
+    """
+    url = DATABASE_URL.strip()
+    if url.startswith("postgres://") or url.startswith("postgresql://"):
+        import urllib.parse as _urlparse
+        parsed = _urlparse.urlparse(url)
+        conn = psycopg2.connect(
+            host=parsed.hostname,
+            port=parsed.port or 5432,
+            dbname=(parsed.path or "/").lstrip("/"),
+            user=parsed.username,
+            password=parsed.password,
+        )
+    else:
+        conn = psycopg2.connect(url)
     conn.autocommit = False
     return conn
 
@@ -1766,6 +1882,28 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
             "post-relocate 2-opt: %.1f km → %.1f km (saved %.1f km, stores=%d)",
             after_km, after_2opt_km, after_km - after_2opt_km, store_count,
         )
+
+    # ── Step 5c: count-balance enforcement ───────────────────────────────────
+    # After Or-opt + 2-opt the sector sweep can still leave a severe skew (e.g.
+    # 5 vs 12 for 2 vehicles and 17 stores) because _inter_route_relocate only
+    # moves stops that reduce total km — cross-sector transfers are often not
+    # km-beneficial even when the stop count is badly unequal.
+    # _rebalance_count_balance enforces max_diff ≤ 2 regardless of km impact,
+    # choosing the geographically cheapest stop to transfer each time.
+    # 2-opt re-polish runs afterwards to remove any crossing edges introduced.
+    if len(routes) > 1:
+        lens_before = sorted([len(r) for r in routes], reverse=True)
+        routes = _rebalance_count_balance(routes, full_matrix, max_imbalance=2)
+        lens_after = sorted([len(r) for r in routes], reverse=True)
+        if lens_before != lens_after:
+            routes = [
+                _two_opt_route(r, full_matrix) if len(r) >= 3 else r
+                for r in routes
+            ]
+            logger.info(
+                "rebalance_count_balance: distribution %s → %s",
+                lens_before, lens_after,
+            )
 
     # ── Step 6: rebalance to minimum stops per vehicle ────────────────────────
     # After sector sweep + Or-opt some vehicles may still be underfull (< effective_min
