@@ -2817,6 +2817,8 @@ def seed_admin_user() -> Optional[int]:
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
+        # Use a PostgreSQL advisory lock to prevent race conditions on concurrent startup
+        cur.execute("SELECT pg_advisory_xact_lock(123456789)")
         cur.execute("SELECT id, is_admin FROM users WHERE username = %s", ("admin",))
         row = cur.fetchone()
         if row is None:
