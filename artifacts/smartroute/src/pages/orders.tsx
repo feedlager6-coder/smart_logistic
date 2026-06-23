@@ -35,6 +35,17 @@ interface PreviewResult {
   db_stores_count: number;
 }
 
+interface ImportHistoryRecord {
+  id: number;
+  delivery_date: string;
+  filename: string;
+  total_rows: number;
+  matched_rows: number;
+  unmatched_rows: number;
+  imported_at: string;
+  has_weight: boolean;
+}
+
 interface OrderRecord {
   id: number;
   store_id: number | null;
@@ -172,9 +183,10 @@ export function OrdersPage() {
             const createdNames = new Set((result.results ?? []).filter((r: any) => r.status === "created").map((r: any) => r.name));
             setPendingUnmatched(prev => prev.filter(p => !createdNames.has(p.name)));
           }
-          // Re-run rematch after job completes
-          fetch("/api/orders/rematch", { method: "POST" }).catch(() => {});
-          qc.invalidateQueries({ queryKey: ["daily_orders", TODAY] });
+          // Re-run rematch after job completes — MUST await before invalidating cache
+          // so daily_orders refetch sees the updated store_id values in DB.
+          try { await fetch("/api/orders/rematch", { method: "POST" }); } catch {}
+          await qc.invalidateQueries({ queryKey: ["daily_orders", TODAY] });
           qc.invalidateQueries({ queryKey: ["stores"] });
           setBulkJobId(null);
         }
@@ -194,8 +206,11 @@ export function OrdersPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Weight warning — null = unknown, true = has weight, false = no weight
+  const [hasWeightData, setHasWeightData] = useState<boolean | null>(null);
+
   // Import history
-  const { data: importHistory, refetch: refetchHistory } = useQuery<{ imports: { id: number; delivery_date: string; filename: string; total_rows: number; matched_rows: number; unmatched_rows: number; imported_at: string }[] }>({
+  const { data: importHistory, refetch: refetchHistory } = useQuery<{ imports: ImportHistoryRecord[] }>({
     queryKey: ["import_history"],
     queryFn: async () => {
       const res = await fetch("/api/orders/import-history");
@@ -341,6 +356,9 @@ export function OrdersPage() {
       // triggers a fresh autoselect with newly imported orders.
       sessionStorage.removeItem(TODAY_AUTOSELECT_KEY);
 
+      // Track whether weight data was present in this import
+      setHasWeightData(result.has_weight ?? true);
+
       // Save unmatched data for bulk-create / enhanced prefill in idle view
       setPendingUnmatched(Array.from(unmatchedMap.values()));
 
@@ -476,6 +494,17 @@ export function OrdersPage() {
           </Button>
         )}
       </div>
+
+      {/* ── No weight data warning ── */}
+      {hasWeightData === false && hasOrders && phase === "idle" && (
+        <Alert className="border-amber-300 bg-amber-50">
+          <AlertTriangle className="h-4 w-4 text-amber-600" />
+          <AlertDescription className="text-amber-800">
+            <span className="font-semibold">В файле отсутствуют данные о весе.</span>{" "}
+            Контроль грузоподъёмности отключён — ограничения по тоннажу не будут учитываться при построении маршрутов.
+          </AlertDescription>
+        </Alert>
+      )}
 
       {/* ── Summary banner (when orders loaded) ── */}
       {hasOrders && phase === "idle" && savedOrders && (
@@ -966,7 +995,16 @@ export function OrdersPage() {
                       <td className="px-4 py-2 text-right">{h.total_rows}</td>
                       <td className="px-4 py-2 text-right text-green-700">{h.matched_rows}</td>
                       <td className="px-4 py-2 text-right text-amber-600">{h.unmatched_rows}</td>
-                      <td className="px-4 py-2 text-right text-muted-foreground">{new Date(h.imported_at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
+                      <td className="px-4 py-2 text-right text-muted-foreground">
+                        <span className="flex items-center justify-end gap-1.5">
+                          {h.has_weight === false && (
+                            <span title="Данные о весе отсутствуют" className="text-amber-500">
+                              <AlertTriangle className="w-3 h-3 inline" />
+                            </span>
+                          )}
+                          {new Date(h.imported_at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                      </td>
                       <td className="px-2 py-1">
                         <button
                           className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"

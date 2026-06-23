@@ -1736,6 +1736,7 @@ def init_db():
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_import_history_owner ON order_import_history(owner_id, delivery_date DESC)")
+    cur.execute("ALTER TABLE order_import_history ADD COLUMN IF NOT EXISTS has_weight BOOLEAN DEFAULT TRUE")
     cur.execute("ALTER TABLE route_sessions ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id)")
     cur.execute("ALTER TABLE company_settings ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_stores_owner ON stores(owner_id)")
@@ -4740,13 +4741,16 @@ def orders_import(request: Request, body: OrderImportRequest):
     )
     row = cur.fetchone()
 
+    # Determine whether any weight data was provided
+    _has_weight = any(r.weight_kg > 0 for r in body.rows)
+
     # Save import history record
     try:
         cur.execute(
-            """INSERT INTO order_import_history (owner_id, delivery_date, filename, total_rows, matched_rows, unmatched_rows)
-               VALUES (%s, %s, %s, %s, %s, %s)""",
+            """INSERT INTO order_import_history (owner_id, delivery_date, filename, total_rows, matched_rows, unmatched_rows, has_weight)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
             (uid, body.delivery_date, body.filename[:200] if body.filename else "",
-             row[0], row[4], row[5])
+             row[0], row[4], row[5], _has_weight)
         )
         conn.commit()
     except Exception as _he:
@@ -4763,6 +4767,7 @@ def orders_import(request: Request, body: OrderImportRequest):
         "total_amount_rub": round(row[3], 2),
         "matched_count": row[4],
         "unmatched_count": row[5],
+        "has_weight": _has_weight,
     }
 
 
@@ -4819,7 +4824,8 @@ def get_import_history(request: Request, limit: int = Query(50, ge=1, le=200)):
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
         """SELECT id, delivery_date::text, filename, total_rows, matched_rows, unmatched_rows,
-                  imported_at::text as imported_at
+                  imported_at::text as imported_at,
+                  COALESCE(has_weight, TRUE) as has_weight
              FROM order_import_history
             WHERE owner_id = %s
             ORDER BY imported_at DESC

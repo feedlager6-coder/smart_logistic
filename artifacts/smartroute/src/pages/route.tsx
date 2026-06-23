@@ -364,7 +364,7 @@ export function RoutePage() {
               </p>
               <a href="/orders" className={`text-xs underline shrink-0 ${isOverCapacity ? "text-amber-600" : "text-blue-600"}`}>изменить</a>
             </div>
-            {/* Problem 4: capacity pre-check warning */}
+            {/* Capacity pre-check warning */}
             {isOverCapacity && (
               <div className="shrink-0 flex items-start gap-3 rounded-lg border border-red-300 bg-red-50 px-4 py-3">
                 <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
@@ -373,6 +373,17 @@ export function RoutePage() {
                   вес заявок <strong>{totalOrderKg.toLocaleString("ru-RU", {maximumFractionDigits: 0})} кг</strong>,
                   {" "}суммарная вместимость транспорта <strong>{totalCapacityKg.toLocaleString("ru-RU")} кг</strong>.
                   {" "}Добавьте машины или увеличьте грузоподъёмность перед построением маршрута.
+                </p>
+              </div>
+            )}
+            {/* No weight data warning */}
+            {totalOrderKg === 0 && (
+              <div className="shrink-0 flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <p className="text-sm text-amber-800">
+                  <span className="font-semibold">Данные о весе отсутствуют.</span>{" "}
+                  Контроль грузоподъёмности отключён — ограничения по тоннажу не учитываются.{" "}
+                  <a href="/orders" className="underline">Загрузите файл с весами</a>, чтобы включить контроль.
                 </p>
               </div>
             )}
