@@ -2390,6 +2390,14 @@ def parse_yandex_link(url: str) -> tuple:
     """
     Extract (lat, lon) from various Yandex Maps URL formats.
     Returns (None, None) if extraction fails.
+
+    Supported formats:
+    - whatshere[point]=lon,lat  (pin dropped by user — most accurate)
+    - pt=lon,lat[,icontype]     (point marker — very common share format)
+    - ll=lon,lat                (map centre — fallback, less precise)
+    - rtext=lat,lon~...         (route first point)
+    - /-/ short links (yandex.ru/maps/-/...) and ya.cc/... — follow redirect
+    - maps.yandex.ru links — follow redirect
     """
     from urllib.parse import urlparse, parse_qs, unquote
     try:
@@ -2397,26 +2405,41 @@ def parse_yandex_link(url: str) -> tuple:
         parsed = urlparse(decoded)
         params = parse_qs(parsed.query)
 
-        # Format: whatshere[point]=lon,lat
+        # Format: whatshere[point]=lon,lat  (highest priority — exact pin)
         if "whatshere[point]" in params:
-            lon_s, lat_s = params["whatshere[point]"][0].split(",")
-            return float(lat_s), float(lon_s)
+            parts = params["whatshere[point]"][0].split(",")
+            if len(parts) >= 2:
+                return float(parts[1]), float(parts[0])  # lat, lon
 
-        # Format: ll=lon,lat (map centre)
-        if "ll" in params:
-            lon_s, lat_s = params["ll"][0].split(",")
-            return float(lat_s), float(lon_s)
+        # Format: pt=lon,lat[,icontype]  (point marker, comma-sep, first point)
+        if "pt" in params:
+            first_point = params["pt"][0].split("~")[0]  # handle multiple points
+            parts = first_point.split(",")
+            if len(parts) >= 2:
+                return float(parts[1]), float(parts[0])  # lat, lon
 
-        # Format: rtext=lat,lon~lat,lon (route first point)
+        # Format: rtext=lat,lon~lat,lon (route first point — lat,lon order)
         if "rtext" in params:
             parts = params["rtext"][0].split("~")[0].split(",")
             if len(parts) >= 2:
-                return float(parts[0]), float(parts[1])
+                return float(parts[0]), float(parts[1])  # lat, lon
 
-        # Short links (/-/) — follow redirect
-        if "/-/" in url or "maps.yandex" in url:
+        # Format: ll=lon,lat (map centre — less precise, last resort for query params)
+        if "ll" in params:
+            parts = params["ll"][0].split(",")
+            if len(parts) >= 2:
+                return float(parts[1]), float(parts[0])  # lat, lon
+
+        # Short links: yandex.ru/maps/-/..., ya.cc/..., maps.yandex.ru — follow redirect
+        needs_redirect = (
+            "/-/" in url
+            or "ya.cc" in url
+            or "maps.yandex" in url
+            or (parsed.netloc in ("yandex.ru", "www.yandex.ru") and "/maps/" in parsed.path and not parsed.query)
+        )
+        if needs_redirect:
             req = urllib.request.Request(
-                url, headers={"User-Agent": "Mozilla/5.0"}, method="GET"
+                url, headers={"User-Agent": "Mozilla/5.0 SmartRoute/1.0"}
             )
             opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler())
             response = opener.open(req, timeout=10)
@@ -4457,17 +4480,18 @@ def geocode_pending_stores(request: Request, background_tasks: BackgroundTasks):
 
                 lat, lon, status = None, None, "not_found"
 
-                # 1. yandex_url
+                # 1. Try parse_yandex_link from map_url first (most accurate for Russian addresses)
                 if store.get("map_url"):
                     try:
-                        coords = parse_yandex_link(store["map_url"])
-                        if coords:
-                            lat, lon = coords
+                        y_lat, y_lon = parse_yandex_link(store["map_url"])
+                        # parse_yandex_link returns (None, None) on failure — check explicitly
+                        if y_lat is not None and y_lon is not None:
+                            lat, lon = y_lat, y_lon
                             status = "found"
                     except Exception:
                         pass
 
-                # 2. address geocoding
+                # 2. address geocoding (only if URL parsing didn't yield coords)
                 if lat is None and store.get("address"):
                     coords = geocode_address(store["address"])
                     if coords:

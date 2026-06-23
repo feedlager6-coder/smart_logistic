@@ -19,7 +19,7 @@ import { ImportResultDialog, type ImportResult } from "@/components/ImportResult
 import { Link as WouterLink, useSearch } from "wouter";
 
 export function StoresPage() {
-  const { data: storesData, isLoading } = useListStores();
+  const { data: storesData, isLoading, refetch: refetchStores } = useListStores();
   const stores = Array.isArray(storesData) ? storesData : [];
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -301,6 +301,11 @@ export function StoresPage() {
               queryClient.invalidateQueries({ queryKey: getListStoresQueryKey() });
               // Show detailed result dialog (geocoding stats + duplicates)
               setImportResult(result as ImportResult);
+              // Auto-trigger background geocoding for any stores that landed without coords
+              const notFound = (result as ImportResult)?.geocode_stats?.not_found ?? 0;
+              if (notFound > 0) {
+                fetch("/api/stores/geocode-pending", { method: "POST" }).catch(() => {});
+              }
             })
             .catch(() => { setImportLoading(false); setImportStatus(null); setImportProgress(null); });
         }
@@ -707,10 +712,21 @@ export function StoresPage() {
       <Card>
         <CardHeader className="pb-2">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <CardTitle>
-              Список магазинов{" "}
-              <span className="text-muted-foreground font-normal text-base ml-1">({stores.length})</span>
-            </CardTitle>
+            <div className="flex items-center gap-2">
+              <CardTitle>
+                Список магазинов{" "}
+                <span className="text-muted-foreground font-normal text-base ml-1">({stores.length})</span>
+              </CardTitle>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                title="Обновить список магазинов"
+                onClick={() => refetchStores()}
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+              </Button>
+            </div>
             <div className="flex items-center gap-2 flex-wrap">
               {selectedIds.size > 0 && (
                 <Button
