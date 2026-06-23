@@ -2,7 +2,6 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useListStores, useBuildRoute } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,7 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Search, Loader2, MapPin, Truck, Route as RouteIcon, Plus, X, Copy, Save, AlertCircle, Warehouse, ExternalLink, Link, Filter, Package, Weight, AlertTriangle } from "lucide-react";
+import { Search, Loader2, MapPin, Truck, Route as RouteIcon, Plus, X, Copy, Save, AlertCircle, Warehouse, ExternalLink, Link, Filter, Package, Weight, AlertTriangle, ChevronDown, ChevronUp, Minus } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -81,6 +80,7 @@ export function RoutePage() {
   const [maxStopsPerVehicle, setMaxStopsPerVehicle] = useState<string>(""); // "" = no cap
   const [optimizeBy, setOptimizeBy] = useState<"distance" | "time">("distance");
   const [bulkVehicleCount, setBulkVehicleCount] = useState<string>("5");
+  const [showVehicleDetails, setShowVehicleDetails] = useState(false);
 
   // Today's orders (заявки) — for banner showing weight data, auto-select, per-store weights
   const todayDate = new Date().toISOString().slice(0, 10);
@@ -211,6 +211,24 @@ export function RoutePage() {
     setVehicles(newVehicles);
   };
 
+  const handleSetVehicleCount = (count: number) => {
+    const newCount = Math.max(1, Math.min(50, count));
+    if (newCount > vehicles.length) {
+      const toAdd = newCount - vehicles.length;
+      setVehicles(prev => [
+        ...prev,
+        ...Array.from({ length: toAdd }, (_, i) => ({
+          id: Math.random().toString(),
+          name: `Газель ${prev.length + i + 1}`,
+          capacity_kg: prev[0]?.capacity_kg ?? "1500",
+          average_speed: prev[0]?.average_speed ?? "",
+        }))
+      ]);
+    } else {
+      setVehicles(prev => prev.slice(0, newCount));
+    }
+  };
+
   const handleRemoveVehicle = (id: string) => {
     setVehicles(vehicles.filter(v => v.id !== id));
   };
@@ -294,7 +312,7 @@ export function RoutePage() {
         optimize_by: optimizeBy,
       } as any
     }, {
-      onSuccess: (result) => {
+      onSuccess: (result: any) => {
         if (result.session_id) {
           setLocation(`/result/${result.session_id}`);
         } else {
@@ -337,408 +355,442 @@ export function RoutePage() {
     executeBuild();
   };
 
+  // Computed totals for display
+  const totalCapacityKg = vehicles.reduce((sum, v) => sum + (parseInt(v.capacity_kg) || 0), 0);
+  const totalOrderKg = todayOrders?.total_weight_kg ?? 0;
+  const isOverCapacity = totalCapacityKg > 0 && totalOrderKg > 0 && totalOrderKg > totalCapacityKg;
+
   return (
-    <div className="flex flex-col flex-1 min-h-0 gap-6">
-      <div className="shrink-0">
+    <div className="flex flex-col flex-1 min-h-0">
+
+      {/* ── Page header ── */}
+      <div className="shrink-0 mb-4">
         <h1 className="text-3xl font-bold tracking-tight">Новый маршрут</h1>
-        <p className="text-muted-foreground">Настройка параметров и запуск оптимизации</p>
+        <p className="text-muted-foreground">Выберите магазины, настройте транспорт и запустите оптимизацию</p>
       </div>
 
-      {/* Orders banner — shown when today's orders are loaded */}
-      {todayOrders && todayOrders.total_count > 0 && (() => {
-        const totalCapacityKg = vehicles.reduce((sum, v) => sum + (parseInt(v.capacity_kg) || 0), 0);
-        const totalOrderKg = todayOrders.total_weight_kg;
-        const isOverCapacity = totalCapacityKg > 0 && totalOrderKg > totalCapacityKg;
-        return (
-          <>
-            <div className={`shrink-0 flex items-center gap-3 rounded-lg border px-4 py-3 ${isOverCapacity ? "border-amber-300 bg-amber-50" : "border-blue-200 bg-blue-50"}`}>
-              <Package className={`w-4 h-4 shrink-0 ${isOverCapacity ? "text-amber-600" : "text-blue-600"}`} />
-              <p className={`text-sm flex-1 ${isOverCapacity ? "text-amber-800" : "text-blue-800"}`}>
-                <span className="font-semibold">Заявки на сегодня загружены:</span>{" "}
-                {todayOrders.total_count} точек
-                {totalOrderKg > 0 && (
-                  <> · <Weight className="inline w-3.5 h-3.5 mx-0.5" />{totalOrderKg.toLocaleString("ru-RU", {maximumFractionDigits: 0})} кг</>
-                )}
-                {todayOrders.total_volume_m3 > 0 && ` · ${todayOrders.total_volume_m3} м³`}
-                {" — "}весовые данные будут учтены при распределении нагрузки
+      {/* ── Orders / weight banners ── */}
+      {todayOrders && todayOrders.total_count > 0 && (
+        <div className="shrink-0 flex flex-col gap-2 mb-4">
+          <div className={`flex items-center gap-3 rounded-lg border px-4 py-2.5 ${isOverCapacity ? "border-amber-300 bg-amber-50" : "border-blue-200 bg-blue-50"}`}>
+            <Package className={`w-4 h-4 shrink-0 ${isOverCapacity ? "text-amber-600" : "text-blue-600"}`} />
+            <p className={`text-sm flex-1 ${isOverCapacity ? "text-amber-800" : "text-blue-800"}`}>
+              <span className="font-semibold">Заявки на сегодня:</span>{" "}
+              {todayOrders.total_count} точек
+              {totalOrderKg > 0 && <> · <Weight className="inline w-3.5 h-3.5 mx-0.5" />{totalOrderKg.toLocaleString("ru-RU", {maximumFractionDigits: 0})} кг</>}
+              {todayOrders.total_volume_m3 > 0 && ` · ${todayOrders.total_volume_m3} м³`}
+            </p>
+            <a href="/orders" className={`text-xs underline shrink-0 ${isOverCapacity ? "text-amber-600" : "text-blue-600"}`}>изменить</a>
+          </div>
+          {isOverCapacity && (
+            <div className="flex items-start gap-3 rounded-lg border border-red-300 bg-red-50 px-4 py-2.5">
+              <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+              <p className="text-sm text-red-800">
+                <span className="font-semibold">Перегруз:</span>{" "}
+                заявки {totalOrderKg.toLocaleString("ru-RU", {maximumFractionDigits: 0})} кг, вместимость парка {totalCapacityKg.toLocaleString("ru-RU")} кг.
+                Добавьте машины или увеличьте грузоподъёмность.
               </p>
-              <a href="/orders" className={`text-xs underline shrink-0 ${isOverCapacity ? "text-amber-600" : "text-blue-600"}`}>изменить</a>
             </div>
-            {/* Capacity pre-check warning */}
-            {isOverCapacity && (
-              <div className="shrink-0 flex items-start gap-3 rounded-lg border border-red-300 bg-red-50 px-4 py-3">
-                <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
-                <p className="text-sm text-red-800">
-                  <span className="font-semibold">Недостаточно грузоподъёмности:</span>{" "}
-                  вес заявок <strong>{totalOrderKg.toLocaleString("ru-RU", {maximumFractionDigits: 0})} кг</strong>,
-                  {" "}суммарная вместимость транспорта <strong>{totalCapacityKg.toLocaleString("ru-RU")} кг</strong>.
-                  {" "}Добавьте машины или увеличьте грузоподъёмность перед построением маршрута.
-                </p>
-              </div>
-            )}
-            {/* No weight data warning */}
-            {totalOrderKg === 0 && (
-              <div className="shrink-0 flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3">
-                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                <p className="text-sm text-amber-800">
-                  <span className="font-semibold">Данные о весе отсутствуют.</span>{" "}
-                  Контроль грузоподъёмности отключён — ограничения по тоннажу не учитываются.{" "}
-                  <a href="/orders" className="underline">Загрузите файл с весами</a>, чтобы включить контроль.
-                </p>
-              </div>
-            )}
-          </>
-        );
-      })()}
+          )}
+          {totalOrderKg === 0 && (
+            <div className="flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <p className="text-sm text-amber-800">
+                <span className="font-semibold">Данные о весе отсутствуют.</span>{" "}
+                Контроль грузоподъёмности отключён.{" "}
+                <a href="/orders" className="underline">Загрузите файл с весами</a>.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
 
-      {/* Depot address */}
-      <Card className="shrink-0">
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Warehouse className="w-4 h-4 text-primary" />
-            Адрес склада (депо)
-          </CardTitle>
-          <CardDescription>Откуда начинаются и куда возвращаются все машины. Сохраняется автоматически.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex gap-2 items-end flex-wrap">
-            <div className="flex-1 min-w-[260px] space-y-1.5">
-              <Label className="text-xs">Адрес</Label>
-              <Input
-                value={depotAddress}
-                onChange={(e) => setDepotAddress(e.target.value)}
-                placeholder="Махачкала, ул. Ленина 1 (или оставьте пустым для центра Махачкалы)"
-                onKeyDown={(e) => e.key === "Enter" && handleGeocodeDepot()}
-              />
-            </div>
-            <div className="flex-1 min-w-[200px] space-y-1.5">
-              <Label className="text-xs flex items-center gap-1.5">
-                <Link className="w-3 h-3" />
-                Ссылка Яндекс Карт (необязательно)
-              </Label>
-              <Input
-                value={depotYandexUrl}
-                onChange={(e) => setDepotYandexUrl(e.target.value)}
-                placeholder="https://yandex.ru/maps/..."
-                onKeyDown={(e) => e.key === "Enter" && handleGeocodeDepot()}
-              />
-            </div>
-          </div>
-          <div className="flex gap-2 items-center flex-wrap">
-            <Button variant="outline" onClick={handleGeocodeDepot} disabled={depotGeocoding} className="shrink-0">
-              {depotGeocoding ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <MapPin className="w-4 h-4 mr-2" />}
-              Геокодировать
-            </Button>
-            {depotLat && depotLon && (
-              <>
-                <div className="text-xs text-muted-foreground font-mono bg-muted px-2 py-1.5 rounded border">
-                  {parseFloat(depotLat).toFixed(4)}, {parseFloat(depotLon).toFixed(4)}
-                </div>
-                {depotYandexNavUrl && (
-                  <Button variant="ghost" size="sm" className="text-xs h-7 px-2 gap-1" asChild>
-                    <a href={depotYandexNavUrl} target="_blank" rel="noopener noreferrer">
-                      <ExternalLink className="w-3 h-3" />
-                      Яндекс Карты
-                    </a>
-                  </Button>
+      {/* ── Main grid: stores (left, wide) + config panel (right) ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 flex-1 min-h-0">
+
+        {/* ═══════════════════════════════════════════
+            LEFT: Store picker — takes 7/12 columns
+            ═══════════════════════════════════════════ */}
+        <Card className="lg:col-span-7 flex flex-col h-[56vh] lg:h-[calc(100vh-230px)]">
+          <CardHeader className="pb-3 shrink-0">
+            {/* Header row */}
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <CardTitle className="text-lg">Точки доставки</CardTitle>
+                <CardDescription className="text-xs mt-0.5">Выберите магазины для включения в маршрут</CardDescription>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {selectedStores.size > 0 && (
+                  <Badge className="text-sm px-2.5 py-1 bg-primary/10 text-primary border border-primary/20 font-semibold">
+                    {selectedStores.size} из {stores.length}
+                  </Badge>
                 )}
-              </>
-            )}
-          </div>
-        </CardContent>
-      </Card>
+                {selectedStores.size === 0 && stores.length > 0 && (
+                  <Badge variant="outline" className="text-sm px-2.5 py-1 text-muted-foreground">
+                    0 из {stores.length}
+                  </Badge>
+                )}
+              </div>
+            </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 flex-1 min-h-0 lg:grid-rows-1">
-
-        {/* Left Panel: Stores */}
-        <Card className="lg:col-span-2 flex flex-col h-[60vh] lg:h-[calc(100vh-320px)]">
-          <CardHeader className="pb-4 shrink-0">
-            <CardTitle className="flex items-center justify-between">
-              Магазины
-              <Badge variant="secondary">{selectedStores.size} выбрано</Badge>
-            </CardTitle>
-            <CardDescription>Выберите точки для доставки</CardDescription>
+            {/* Search */}
             <div className="relative mt-2">
-              <Search className="w-4 h-4 absolute left-2.5 top-2.5 text-muted-foreground" />
+              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
               <Input
-                placeholder="Поиск..."
-                className="pl-8"
+                placeholder="Поиск по названию или адресу..."
+                className="pl-9 h-9"
                 value={search}
                 onChange={e => setSearch(e.target.value)}
               />
             </div>
-            {/* City filter — only shown when stores span multiple cities */}
+
+            {/* City filter */}
             {cities.length > 1 && (
-              <div className="flex gap-1 flex-wrap mt-2">
-                <span className="flex items-center gap-1 text-xs text-muted-foreground mr-1">
-                  <Filter className="w-3 h-3" /> Город:
+              <div className="flex gap-1.5 flex-wrap mt-1.5">
+                <span className="flex items-center gap-1 text-xs text-muted-foreground mr-0.5 self-center">
+                  <Filter className="w-3 h-3" />
                 </span>
-                <button
-                  onClick={() => setCityFilter("all")}
-                  className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${cityFilter === "all" ? "bg-primary text-primary-foreground border-primary" : "bg-background border-border hover:bg-muted"}`}
-                >
-                  Все
-                </button>
-                {cities.map(city => (
+                {["all", ...cities].map(c => (
                   <button
-                    key={city}
-                    onClick={() => setCityFilter(city)}
-                    className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${cityFilter === city ? "bg-primary text-primary-foreground border-primary" : "bg-background border-border hover:bg-muted"}`}
+                    key={c}
+                    onClick={() => setCityFilter(c)}
+                    className={`text-xs px-2.5 py-1 rounded-full border transition-colors font-medium ${
+                      cityFilter === c
+                        ? "bg-primary text-primary-foreground border-primary"
+                        : "bg-background border-border hover:bg-muted text-muted-foreground"
+                    }`}
                   >
-                    {city}
+                    {c === "all" ? "Все города" : c}
                   </button>
                 ))}
               </div>
             )}
-            <div className="flex gap-2 mt-2">
-              <Button variant="outline" size="sm" onClick={handleSelectAll} className="flex-1">Выбрать все</Button>
-              <Button variant="outline" size="sm" onClick={handleDeselectAll} className="flex-1">Снять все</Button>
+
+            {/* Select / Deselect */}
+            <div className="flex gap-2 mt-1.5">
+              <Button variant="outline" size="sm" onClick={handleSelectAll} className="flex-1 h-8 text-xs">
+                Выбрать все ({filteredStores.length})
+              </Button>
+              <Button variant="outline" size="sm" onClick={handleDeselectAll} className="flex-1 h-8 text-xs" disabled={selectedStores.size === 0}>
+                Снять выбор
+              </Button>
             </div>
           </CardHeader>
+
           <CardContent className="flex-1 overflow-hidden p-0">
-            <ScrollArea className="h-full px-6 pb-4">
+            <ScrollArea className="h-full px-4 pb-4">
               {isLoading ? (
-                <div className="flex justify-center p-8"><Loader2 className="w-6 h-6 animate-spin text-muted-foreground" /></div>
+                <div className="flex justify-center p-10">
+                  <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+                </div>
+              ) : filteredStores.length === 0 ? (
+                <div className="text-center p-10 text-muted-foreground text-sm">
+                  {stores.length === 0 ? (
+                    <>Нет магазинов. <a href="/stores" className="underline text-primary">Добавьте магазины</a>.</>
+                  ) : "Ничего не найдено"}
+                </div>
               ) : (
-                <div className="space-y-2">
-                  {filteredStores.map(store => (
-                    <label key={store.id} className={`flex items-start gap-3 p-3 rounded-lg border hover:bg-muted/50 cursor-pointer transition-colors ${store.geocode_status === 'not_found' ? 'border-destructive/40 bg-destructive/5' : ''}`}>
-                      <Checkbox
-                        checked={selectedStores.has(store.id)}
-                        onCheckedChange={() => handleToggleStore(store.id)}
-                        className="mt-1"
-                      />
-                      <div className="flex-1 min-w-0 space-y-1">
-                        <p className="font-medium text-sm leading-none flex items-center gap-1.5">
-                          <span className="truncate">{store.name}</span>
-                          {store.geocode_status === 'not_found' && (
-                            <span title="Координаты не найдены — точка будет пропущена">
-                              <AlertCircle className="w-3.5 h-3.5 text-destructive shrink-0" />
+                <div className="space-y-1.5">
+                  {filteredStores.map(store => {
+                    const isSelected = selectedStores.has(store.id);
+                    const weight = orderWeightMap.get(store.id);
+                    const noCoords = store.geocode_status === 'not_found';
+                    return (
+                      <label
+                        key={store.id}
+                        className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border cursor-pointer transition-all select-none ${
+                          isSelected
+                            ? "border-primary/40 bg-primary/5 hover:bg-primary/8"
+                            : noCoords
+                            ? "border-destructive/30 bg-destructive/5 hover:bg-destructive/8"
+                            : "border-transparent hover:border-border hover:bg-muted/50"
+                        }`}
+                      >
+                        <Checkbox
+                          checked={isSelected}
+                          onCheckedChange={() => handleToggleStore(store.id)}
+                          className="shrink-0"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <span className={`font-medium text-sm truncate ${isSelected ? "text-foreground" : "text-foreground/80"}`}>
+                              {store.name}
                             </span>
-                          )}
-                        </p>
-                        <p className="text-xs text-muted-foreground flex items-center gap-1 min-w-0">
-                          <MapPin className="w-3 h-3 shrink-0" />
-                          <span className="truncate">{store.address}</span>
-                        </p>
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <p className="text-xs text-muted-foreground">
-                            Окно: {store.time_window_from}-{store.time_window_to} | {store.unload_minutes} мин
-                          </p>
-                          {orderWeightMap.has(store.id) && (
-                            <span className="inline-flex items-center gap-0.5 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5">
-                              <Weight className="w-3 h-3" />
-                              {orderWeightMap.get(store.id)!.toLocaleString("ru-RU", { maximumFractionDigits: 0 })} кг
+                            {noCoords && (
+                              <span title="Нет координат — будет пропущен">
+                                <AlertCircle className="w-3.5 h-3.5 text-destructive shrink-0" />
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2 mt-0.5 min-w-0">
+                            <span className="text-xs text-muted-foreground truncate flex items-center gap-1">
+                              <MapPin className="w-3 h-3 shrink-0" />
+                              {store.address}
                             </span>
-                          )}
+                          </div>
                         </div>
-                      </div>
-                    </label>
-                  ))}
-                  {filteredStores.length === 0 && (
-                    <div className="text-center p-8 text-muted-foreground">Ничего не найдено</div>
-                  )}
+                        <div className="flex items-center gap-2 shrink-0">
+                          {weight !== undefined && (
+                            <span className="inline-flex items-center gap-0.5 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">
+                              <Weight className="w-3 h-3" />
+                              {weight.toLocaleString("ru-RU", { maximumFractionDigits: 0 })} кг
+                            </span>
+                          )}
+                          <span className="text-xs text-muted-foreground hidden sm:block whitespace-nowrap">
+                            {store.time_window_from}–{store.time_window_to}
+                          </span>
+                        </div>
+                      </label>
+                    );
+                  })}
                 </div>
               )}
             </ScrollArea>
           </CardContent>
         </Card>
 
-        {/* Right Panel: Tabs — Транспорт / Параметры */}
-        <div className="lg:col-span-3 flex flex-col h-[70vh] lg:h-[calc(100vh-320px)]">
-          <Tabs defaultValue="vehicles" className="flex flex-col h-full">
+        {/* ═══════════════════════════════════════════
+            RIGHT: Config + Build — 5/12 columns
+            ═══════════════════════════════════════════ */}
+        <div className="lg:col-span-5 flex flex-col gap-4 lg:h-[calc(100vh-230px)]">
 
-            {/* Tab bar */}
-            <TabsList className="shrink-0 w-full mb-3">
-              <TabsTrigger value="vehicles" className="flex-1">
-                <Truck className="w-4 h-4 mr-2" />
-                Транспорт
-                <Badge variant="secondary" className="ml-2">{vehicles.length}</Badge>
-              </TabsTrigger>
-              <TabsTrigger value="settings" className="flex-1">
-                Параметры оптимизации
-              </TabsTrigger>
-            </TabsList>
+          {/* Scrollable config area */}
+          <div className="flex-1 min-h-0 overflow-y-auto space-y-4 pr-0.5">
 
-            {/* ── Vehicles tab ── */}
-            <TabsContent value="vehicles" className="flex-1 overflow-hidden flex flex-col mt-0">
-              <Card className="flex-1 flex flex-col overflow-hidden">
-                <CardHeader className="shrink-0 pb-2">
-                  <div className="flex flex-row items-center justify-between">
-                    <div>
-                      <CardTitle>Автомобили</CardTitle>
-                      <CardDescription>Название, вместимость и скорость</CardDescription>
-                    </div>
-                    <div className="flex gap-2">
-                      <Button variant="outline" size="sm" onClick={handleSaveFleet} title="Сохранить автопарк как шаблон">
-                        <Save className="w-4 h-4 mr-2" />
-                        Шаблон
-                      </Button>
-                      <Button variant="outline" size="sm" onClick={handleAddVehicle}>
-                        <Plus className="w-4 h-4 mr-2" /> Добавить
-                      </Button>
-                    </div>
-                  </div>
-                  {/* Bulk create */}
-                  <div className="flex items-center gap-2 mt-3 pt-3 border-t flex-wrap">
-                    <Label className="text-xs text-muted-foreground shrink-0">Создать сразу:</Label>
-                    <Input
-                      type="number"
-                      min={1}
-                      max={50}
-                      value={bulkVehicleCount}
-                      onChange={e => setBulkVehicleCount(e.target.value)}
-                      className="h-8 w-20 text-sm"
-                    />
-                    <span className="text-xs text-muted-foreground">авт.</span>
-                    <Button size="sm" variant="secondary" onClick={handleBulkCreate} className="h-8 text-xs">
-                      <Truck className="w-3.5 h-3.5 mr-1.5" />
-                      Создать список
+            {/* ── Depot ── */}
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <Warehouse className="w-4 h-4 text-primary" />
+                  Склад (депо)
+                  {depotLat && depotLon && (
+                    <span className="ml-auto font-normal text-xs text-muted-foreground font-mono">
+                      {parseFloat(depotLat).toFixed(4)}, {parseFloat(depotLon).toFixed(4)}
+                    </span>
+                  )}
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2.5">
+                <div className="flex gap-2">
+                  <Input
+                    value={depotAddress}
+                    onChange={(e) => setDepotAddress(e.target.value)}
+                    placeholder="Адрес склада (пусто = центр Махачкалы)"
+                    onKeyDown={(e) => e.key === "Enter" && handleGeocodeDepot()}
+                    className="flex-1 text-sm h-9"
+                  />
+                  <Button variant="outline" size="sm" onClick={handleGeocodeDepot} disabled={depotGeocoding} className="shrink-0 h-9 px-3">
+                    {depotGeocoding ? <Loader2 className="w-4 h-4 animate-spin" /> : <MapPin className="w-4 h-4" />}
+                  </Button>
+                  {depotLat && depotLon && depotYandexNavUrl && (
+                    <Button variant="ghost" size="sm" className="shrink-0 h-9 px-3" asChild>
+                      <a href={depotYandexNavUrl} target="_blank" rel="noopener noreferrer">
+                        <ExternalLink className="w-4 h-4" />
+                      </a>
                     </Button>
-                    <span className="text-xs text-muted-foreground hidden sm:inline">(заменит текущий)</span>
+                  )}
+                </div>
+                <Input
+                  value={depotYandexUrl}
+                  onChange={(e) => setDepotYandexUrl(e.target.value)}
+                  placeholder="Ссылка Яндекс Карт (необязательно)"
+                  className="text-sm h-9 text-muted-foreground"
+                />
+              </CardContent>
+            </Card>
+
+            {/* ── Fleet / Vehicles ── */}
+            <Card>
+              <CardHeader className="pb-3">
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-sm flex items-center gap-2">
+                    <Truck className="w-4 h-4 text-primary" />
+                    Автомобили
+                  </CardTitle>
+                  <div className="flex items-center gap-1.5">
+                    <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground gap-1" onClick={handleSaveFleet}>
+                      <Save className="w-3.5 h-3.5" />
+                      Шаблон
+                    </Button>
                   </div>
-                </CardHeader>
-                <CardContent className="flex-1 overflow-hidden p-0">
-                  <ScrollArea className="h-full px-6 pb-4">
-                    <div className="space-y-3 pt-2">
-                      {vehicles.map((vehicle) => (
-                        <div key={vehicle.id} className="flex items-center gap-3 p-3 rounded-lg border bg-card">
-                          <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center text-primary shrink-0">
-                            <Truck className="w-4 h-4" />
-                          </div>
-                          <div className="flex-1 grid grid-cols-1 sm:grid-cols-3 gap-3">
-                            <div className="space-y-1.5">
-                              <Label className="text-xs">Название / Водитель</Label>
-                              <Input
-                                value={vehicle.name}
-                                onChange={e => handleVehicleChange(vehicle.id, 'name', e.target.value)}
-                                className="h-8 text-sm"
-                              />
-                            </div>
-                            <div className="space-y-1.5">
-                              <Label className="text-xs">Вместимость (кг)</Label>
-                              <Input
-                                type="number"
-                                value={vehicle.capacity_kg}
-                                onChange={e => handleVehicleChange(vehicle.id, 'capacity_kg', e.target.value)}
-                                className="h-8 text-sm"
-                              />
-                            </div>
-                            <div className="space-y-1.5">
-                              <Label className="text-xs">Скорость (км/ч)</Label>
-                              <Input
-                                type="number"
-                                placeholder="авто"
-                                value={vehicle.average_speed}
-                                onChange={e => handleVehicleChange(vehicle.id, 'average_speed', e.target.value)}
-                                className="h-8 text-sm"
-                              />
-                            </div>
-                          </div>
-                          <div className="flex gap-1 shrink-0">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="w-8 h-8 text-muted-foreground hover:text-primary"
-                              title="Дублировать"
-                              onClick={() => handleDuplicateVehicle(vehicle.id)}
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {/* Stepper */}
+                <div className="flex items-center justify-between gap-4 bg-muted/40 rounded-xl px-4 py-3 border">
+                  <button
+                    type="button"
+                    onClick={() => handleSetVehicleCount(vehicles.length - 1)}
+                    disabled={vehicles.length <= 1}
+                    className="w-10 h-10 rounded-full border-2 border-border bg-background flex items-center justify-center text-xl font-bold text-muted-foreground hover:border-primary hover:text-primary transition-colors disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
+                  >
+                    <Minus className="w-4 h-4" />
+                  </button>
+
+                  <div className="text-center flex-1">
+                    <div className="text-4xl font-bold tabular-nums text-foreground leading-none">
+                      {vehicles.length}
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1">
+                      {vehicles.length === 1 ? "автомобиль" : vehicles.length < 5 ? "автомобиля" : "автомобилей"}
+                    </div>
+                    {totalCapacityKg > 0 && (
+                      <div className="text-xs text-muted-foreground mt-0.5">
+                        {totalCapacityKg.toLocaleString("ru-RU")} кг суммарно
+                      </div>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => handleSetVehicleCount(vehicles.length + 1)}
+                    disabled={vehicles.length >= 50}
+                    className="w-10 h-10 rounded-full border-2 border-border bg-background flex items-center justify-center text-xl font-bold text-muted-foreground hover:border-primary hover:text-primary transition-colors disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {/* Expand/collapse individual vehicle editing */}
+                <button
+                  type="button"
+                  onClick={() => setShowVehicleDetails(v => !v)}
+                  className="w-full flex items-center justify-between text-xs text-muted-foreground hover:text-foreground transition-colors py-1"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <Truck className="w-3.5 h-3.5" />
+                    Настроить названия и вместимость
+                  </span>
+                  {showVehicleDetails ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                </button>
+
+                {showVehicleDetails && (
+                  <div className="space-y-2 border rounded-lg p-2 bg-muted/20 max-h-56 overflow-y-auto">
+                    {vehicles.map((vehicle, idx) => (
+                      <div key={vehicle.id} className="flex items-center gap-2 bg-background rounded-md p-2 border">
+                        <span className="text-xs text-muted-foreground w-5 text-center shrink-0">{idx + 1}</span>
+                        <Input
+                          value={vehicle.name}
+                          onChange={e => handleVehicleChange(vehicle.id, 'name', e.target.value)}
+                          className="h-7 text-xs flex-1 min-w-0"
+                          placeholder="Название / водитель"
+                        />
+                        <Input
+                          type="number"
+                          value={vehicle.capacity_kg}
+                          onChange={e => handleVehicleChange(vehicle.id, 'capacity_kg', e.target.value)}
+                          className="h-7 text-xs w-20 shrink-0"
+                          placeholder="кг"
+                          title="Вместимость (кг)"
+                        />
+                        <div className="flex shrink-0">
+                          {vehicles.length > 1 && (
+                            <button
+                              type="button"
+                              className="w-7 h-7 flex items-center justify-center text-muted-foreground hover:text-destructive transition-colors"
+                              onClick={() => handleRemoveVehicle(vehicle.id)}
                             >
-                              <Copy className="w-4 h-4" />
-                            </Button>
-                            {vehicles.length > 1 && (
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="w-8 h-8 text-muted-foreground hover:text-destructive"
-                                onClick={() => handleRemoveVehicle(vehicle.id)}
-                              >
-                                <X className="w-4 h-4" />
-                              </Button>
-                            )}
-                          </div>
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                         </div>
-                      ))}
-                    </div>
-                  </ScrollArea>
-                </CardContent>
-              </Card>
-            </TabsContent>
-
-            {/* ── Settings tab ── */}
-            <TabsContent value="settings" className="flex-1 overflow-hidden flex flex-col mt-0">
-              <Card className="flex-1 flex flex-col overflow-hidden">
-                <CardContent className="flex-1 overflow-auto pt-6">
-                  <div className="space-y-6">
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label className="text-base">Учитывать временные окна</Label>
-                        <p className="text-sm text-muted-foreground">Строгий контроль времени прибытия</p>
                       </div>
-                      <Switch checked={useTimeWindows} onCheckedChange={setUseTimeWindows} />
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label className="text-base">Учитывать время разгрузки</Label>
-                        <p className="text-sm text-muted-foreground">Добавление времени нахождения в точке</p>
-                      </div>
-                      <Switch checked={useUnloadTime} onCheckedChange={setUseUnloadTime} />
-                    </div>
-
-                    {/* Max stops */}
-                    <div className="space-y-2">
-                      <Label className="text-base">Макс. точек на машину</Label>
-                      <p className="text-sm text-muted-foreground">
-                        Ограничивает нагрузку на водителя. Рекомендуется 24 при дисбалансе.
-                      </p>
-                      <div className="flex gap-2 flex-wrap">
-                        {["", "30", "26", "24"].map(val => (
-                          <button
-                            key={val}
-                            type="button"
-                            onClick={() => setMaxStopsPerVehicle(val)}
-                            className={`px-3 py-1.5 rounded-md text-sm font-medium border transition-colors ${
-                              maxStopsPerVehicle === val
-                                ? "bg-primary text-primary-foreground border-primary"
-                                : "bg-background text-foreground border-border hover:bg-muted"
-                            }`}
-                          >
-                            {val === "" ? "Без лимита" : `≤${val}`}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
+                    ))}
+                    <button
+                      type="button"
+                      onClick={handleAddVehicle}
+                      className="w-full h-7 text-xs text-primary hover:text-primary/80 border border-dashed border-primary/30 hover:border-primary/60 rounded-md flex items-center justify-center gap-1 transition-colors"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> Добавить автомобиль
+                    </button>
                   </div>
-                </CardContent>
-              </Card>
-            </TabsContent>
+                )}
+              </CardContent>
+            </Card>
 
-          </Tabs>
+            {/* ── Optimization settings ── */}
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-sm">Параметры оптимизации</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {/* Toggles */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium">Временны́е окна</p>
+                      <p className="text-xs text-muted-foreground">Строгий контроль времени прибытия</p>
+                    </div>
+                    <Switch checked={useTimeWindows} onCheckedChange={setUseTimeWindows} />
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium">Время разгрузки</p>
+                      <p className="text-xs text-muted-foreground">Учитывать время нахождения в точке</p>
+                    </div>
+                    <Switch checked={useUnloadTime} onCheckedChange={setUseUnloadTime} />
+                  </div>
+                </div>
 
-          {/* Build button — always visible outside tabs */}
-          <Button
-            className="w-full h-14 text-lg shadow-lg shadow-primary/20 mt-3 shrink-0"
-            size="lg"
-            onClick={handleBuild}
-            disabled={buildRoute.isPending || selectedStores.size === 0 || vehicles.length === 0}
-          >
-            {buildRoute.isPending ? (
-              <>
-                <Loader2 className="w-5 h-5 animate-spin mr-3" />
-                ⏳ Оптимизирую маршруты...
-              </>
-            ) : (
-              <>
-                <RouteIcon className="w-5 h-5 mr-3" />
-                🚀 Построить маршруты
-              </>
+                {/* Max stops */}
+                <div className="space-y-2 pt-1 border-t">
+                  <p className="text-sm font-medium">Макс. точек на машину</p>
+                  <div className="flex gap-2 flex-wrap">
+                    {["", "30", "26", "24"].map(val => (
+                      <button
+                        key={val}
+                        type="button"
+                        onClick={() => setMaxStopsPerVehicle(val)}
+                        className={`px-3 py-1.5 rounded-md text-xs font-medium border transition-colors ${
+                          maxStopsPerVehicle === val
+                            ? "bg-primary text-primary-foreground border-primary"
+                            : "bg-background text-foreground border-border hover:bg-muted"
+                        }`}
+                      >
+                        {val === "" ? "Без лимита" : `≤${val}`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+          </div>{/* end scrollable config */}
+
+          {/* ── BUILD BUTTON — pinned at bottom, always visible ── */}
+          <div className="shrink-0 pt-1">
+            {selectedStores.size === 0 && (
+              <p className="text-xs text-muted-foreground text-center mb-2">
+                Выберите магазины слева для построения маршрута
+              </p>
             )}
-          </Button>
-        </div>
+            <Button
+              className="w-full h-14 text-base font-semibold shadow-lg shadow-primary/20 rounded-xl"
+              size="lg"
+              onClick={handleBuild}
+              disabled={buildRoute.isPending || selectedStores.size === 0 || vehicles.length === 0}
+            >
+              {buildRoute.isPending ? (
+                <span className="flex items-center gap-3">
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  Оптимизирую маршруты...
+                </span>
+              ) : (
+                <span className="flex items-center gap-3">
+                  <RouteIcon className="w-5 h-5" />
+                  Построить маршруты
+                  {selectedStores.size > 0 && (
+                    <Badge variant="secondary" className="ml-1 text-xs bg-white/20 text-white border-0">
+                      {selectedStores.size} точек · {vehicles.length} авт.
+                    </Badge>
+                  )}
+                </span>
+              )}
+            </Button>
+          </div>
 
-      </div>
+        </div>{/* end right panel */}
+      </div>{/* end grid */}
 
       {/* Confirmation dialog: not_found stores will be skipped */}
       <AlertDialog open={showNotFoundConfirm} onOpenChange={setShowNotFoundConfirm}>
