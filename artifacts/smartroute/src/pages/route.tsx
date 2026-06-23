@@ -163,14 +163,12 @@ export function RoutePage() {
     localStorage.setItem(DEPOT_KEY, JSON.stringify({ address: depotAddress, yandexUrl: depotYandexUrl, lat: depotLat, lon: depotLon }));
   }, [depotAddress, depotYandexUrl, depotLat, depotLon]);
 
-  // Unique cities extracted from store addresses (first token before comma)
+  // Unique cities from dedicated city field (falls back to first address token for legacy stores)
   const cities = useMemo(() => {
     const citySet = new Set<string>();
     stores.forEach(s => {
-      if (s.address) {
-        const city = s.address.split(",")[0].trim();
-        if (city) citySet.add(city);
-      }
+      const city = (s as any).city?.trim() || s.address?.split(",")[0].trim() || "";
+      if (city) citySet.add(city);
     });
     return Array.from(citySet).sort();
   }, [stores]);
@@ -178,7 +176,8 @@ export function RoutePage() {
   const filteredStores = stores.filter(s => {
     const q = search.toLowerCase();
     const matchesSearch = s.name.toLowerCase().includes(q) || s.address.toLowerCase().includes(q);
-    const matchesCity = cityFilter === "all" || (s.address ?? "").split(",")[0].trim() === cityFilter;
+    const storeCity = (s as any).city?.trim() || s.address?.split(",")[0].trim() || "";
+    const matchesCity = cityFilter === "all" || storeCity === cityFilter;
     return matchesSearch && matchesCity;
   });
 

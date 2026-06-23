@@ -1720,6 +1720,21 @@ def init_db():
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP")
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE")
     cur.execute("ALTER TABLE stores ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id)")
+    cur.execute("ALTER TABLE stores ADD COLUMN IF NOT EXISTS city TEXT DEFAULT ''")
+    # ── Import history ─────────────────────────────────────────────────────────
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS order_import_history (
+            id SERIAL PRIMARY KEY,
+            owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            delivery_date DATE NOT NULL,
+            filename TEXT DEFAULT '',
+            total_rows INTEGER DEFAULT 0,
+            matched_rows INTEGER DEFAULT 0,
+            unmatched_rows INTEGER DEFAULT 0,
+            imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_import_history_owner ON order_import_history(owner_id, delivery_date DESC)")
     cur.execute("ALTER TABLE route_sessions ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id)")
     cur.execute("ALTER TABLE company_settings ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_stores_owner ON stores(owner_id)")
@@ -2580,6 +2595,7 @@ def store_row_to_dict(row) -> dict:
         "id": row["id"],
         "name": row["name"],
         "address": row["address"],
+        "city": row.get("city") or "",
         "lat": row["lat"],
         "lon": row["lon"],
         "map_url": row.get("map_url"),
@@ -3103,12 +3119,18 @@ def create_store(request: Request, body: StoreInput, force: bool = Query(False, 
     # Store yandex_url as map_url if no explicit map_url provided
     map_url = body.map_url or body.yandex_url
 
+    # Prepend city to address for consistent "Город, адрес" format (enables city filter)
+    if city and address and city not in address:
+        address = f"{city}, {address}"
+    elif city and not address:
+        address = city
+
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        """INSERT INTO stores (name, address, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
-        (body.name.strip(), address, lat, lon, map_url,
+        """INSERT INTO stores (name, address, city, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+        (body.name.strip(), address, city, lat, lon, map_url,
          status, body.time_window_from, body.time_window_to, body.unload_minutes, uid)
     )
     row = cur.fetchone()
@@ -3225,7 +3247,7 @@ def export_stores(request: Request):
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        "SELECT name, map_url, address, lat, lon, unload_minutes, time_window_from, time_window_to "
+        "SELECT name, map_url, address, city, lat, lon, unload_minutes, time_window_from, time_window_to "
         "FROM stores WHERE owner_id = %s ORDER BY id",
         (uid,),
     )
@@ -3264,7 +3286,7 @@ def export_stores(request: Request):
             row.get("name") or "",
             row.get("map_url") or "",
             row.get("address") or "",
-            "",  # city — not stored separately, skip
+            row.get("city") or "",
             row.get("unload_minutes") or 15,
             row.get("time_window_from") or "09:00",
             row.get("time_window_to") or "18:00",
@@ -3927,17 +3949,17 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
             if existing_store_id and import_mode == "update":
                 # Update existing store in-place
                 cur2.execute(
-                    """UPDATE stores SET name=%s, address=%s, lat=%s, lon=%s, map_url=%s,
+                    """UPDATE stores SET name=%s, address=%s, city=%s, lat=%s, lon=%s, map_url=%s,
                        geocode_status=%s, time_window_from=%s, time_window_to=%s, unload_minutes=%s
                        WHERE id=%s AND owner_id=%s RETURNING *""",
-                    (name, address, lat, lon, final_map_url, status, tw_from, tw_to, unload,
+                    (name, address, city, lat, lon, final_map_url, status, tw_from, tw_to, unload,
                      existing_store_id, owner_id),
                 )
             else:
                 cur2.execute(
-                    """INSERT INTO stores (name, address, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
-                    (name, address, lat, lon, final_map_url, status, tw_from, tw_to, unload, owner_id),
+                    """INSERT INTO stores (name, address, city, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+                    (name, address, city, lat, lon, final_map_url, status, tw_from, tw_to, unload, owner_id),
                 )
 
             db_row = cur2.fetchone()
@@ -4105,8 +4127,7 @@ def update_store(id: int, body: StoreUpdate, request: Request):
                 fields["lon"] = lon_y
                 fields["geocode_status"] = "found"
     if body.city is not None:
-        # Store city as part of address if address not separately updated
-        pass  # city is used in geocoding, stored implicitly in address
+        fields["city"] = body.city.strip()
     if body.lat is not None:
         fields["lat"] = body.lat
     if body.lon is not None:
@@ -4144,6 +4165,31 @@ def delete_store(id: int, request: Request):
     conn.close()
     if deleted == 0:
         raise HTTPException(status_code=404, detail="Store not found")
+
+
+class BulkDeleteRequest(BaseModel):
+    ids: list[int]
+
+
+@app.post("/api/stores/bulk-delete", status_code=200)
+def bulk_delete_stores(request: Request, body: BulkDeleteRequest):
+    """Delete multiple stores by ID. Only deletes stores owned by the current user."""
+    uid = get_user_id(request)
+    if not body.ids:
+        return {"deleted": 0}
+    if len(body.ids) > 500:
+        raise HTTPException(status_code=422, detail="Максимум 500 магазинов за один запрос")
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM stores WHERE id = ANY(%s) AND owner_id = %s",
+        (body.ids, uid)
+    )
+    deleted = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"deleted": deleted}
 
 
 @app.post("/api/stores/{id}/geocode")
@@ -4341,6 +4387,7 @@ class OrderImportRequest(BaseModel):
     delivery_date: str   # "YYYY-MM-DD"
     rows: list[OrderImportRow]
     clear_existing: bool = True  # replace today's orders on re-import
+    filename: str = ""   # original Excel filename for history
 
 
 @app.post("/api/orders/preview")
@@ -4505,12 +4552,27 @@ def orders_import(request: Request, body: OrderImportRequest):
         """SELECT COUNT(*) as cnt,
                   COALESCE(SUM(weight_kg),0) as total_weight,
                   COALESCE(SUM(volume_m3),0) as total_volume,
-                  COALESCE(SUM(amount_rub),0) as total_amount
+                  COALESCE(SUM(amount_rub),0) as total_amount,
+                  COUNT(CASE WHEN store_id IS NOT NULL THEN 1 END) as matched_cnt,
+                  COUNT(CASE WHEN store_id IS NULL THEN 1 END) as unmatched_cnt
              FROM daily_orders
             WHERE owner_id = %s AND delivery_date = %s""",
         (uid, body.delivery_date)
     )
     row = cur.fetchone()
+
+    # Save import history record
+    try:
+        cur.execute(
+            """INSERT INTO order_import_history (owner_id, delivery_date, filename, total_rows, matched_rows, unmatched_rows)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (uid, body.delivery_date, body.filename[:200] if body.filename else "",
+             row[0], row[4], row[5])
+        )
+        conn.commit()
+    except Exception as _he:
+        logger.warning("Failed to save import history: %s", _he)
+
     cur.close()
     conn.close()
 
@@ -4520,6 +4582,8 @@ def orders_import(request: Request, body: OrderImportRequest):
         "total_weight_kg": round(row[1], 2),
         "total_volume_m3": round(row[2], 3),
         "total_amount_rub": round(row[3], 2),
+        "matched_count": row[4],
+        "unmatched_count": row[5],
     }
 
 
@@ -4566,6 +4630,27 @@ def get_orders(request: Request, date: Optional[str] = None):
         "total_volume_m3": round(float(summary["total_volume"]), 3),
         "total_amount_rub": round(float(summary["total_amount"]), 2),
     }
+
+
+@app.get("/api/orders/import-history")
+def get_import_history(request: Request, limit: int = Query(20, ge=1, le=100)):
+    """Return the last N import history records for the current user."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """SELECT id, delivery_date::text, filename, total_rows, matched_rows, unmatched_rows,
+                  imported_at::text as imported_at
+             FROM order_import_history
+            WHERE owner_id = %s
+            ORDER BY imported_at DESC
+            LIMIT %s""",
+        (uid, limit)
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return {"imports": rows}
 
 
 @app.delete("/api/orders")

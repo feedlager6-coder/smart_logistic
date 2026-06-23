@@ -11,7 +11,7 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store, ChevronDown, ChevronUp, ExternalLink, Link, Pencil, AlertCircle, FileDown } from "lucide-react";
+import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store, ChevronDown, ChevronUp, ExternalLink, Link, Pencil, AlertCircle, FileDown, CheckSquare, Square } from "lucide-react";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useToast } from "@/hooks/use-toast";
 import { ImportMappingDialog } from "@/components/ImportMappingDialog";
@@ -65,6 +65,11 @@ export function StoresPage() {
 
   // Delete confirmation dialog state
   const [deleteConfirm, setDeleteConfirm] = useState<{ id: number; name: string } | null>(null);
+
+  // Bulk selection state
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   // Add form state
   const [name, setName] = useState("");
@@ -286,6 +291,44 @@ export function StoresPage() {
     queryClient.invalidateQueries({ queryKey: getListStoresQueryKey() });
     toast({ title: `Удалено ${ids.length} дублирующих точек` });
   }, [queryClient, toast]);
+
+  const toggleSelect = (id: number) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === filteredStores.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(filteredStores.map(s => s.id)));
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    setBulkDeleting(true);
+    try {
+      const res = await fetch("/api/stores/bulk-delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: Array.from(selectedIds) }),
+      });
+      if (!res.ok) throw new Error("Ошибка удаления");
+      const data = await res.json();
+      queryClient.invalidateQueries({ queryKey: getListStoresQueryKey() });
+      setSelectedIds(new Set());
+      toast({ title: `Удалено ${data.deleted} магазин${data.deleted < 5 ? (data.deleted === 1 ? "" : "а") : "ов"}` });
+    } catch {
+      toast({ title: "Ошибка массового удаления", variant: "destructive" });
+    } finally {
+      setBulkDeleting(false);
+      setBulkDeleteConfirm(false);
+    }
+  };
 
   const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -627,6 +670,18 @@ export function StoresPage() {
               <span className="text-muted-foreground font-normal text-base ml-1">({stores.length})</span>
             </CardTitle>
             <div className="flex items-center gap-2 flex-wrap">
+              {selectedIds.size > 0 && (
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  className="gap-2"
+                  onClick={() => setBulkDeleteConfirm(true)}
+                  disabled={bulkDeleting}
+                >
+                  {bulkDeleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                  Удалить выбранные ({selectedIds.size})
+                </Button>
+              )}
               {noCoordsCount > 0 && (
                 <button
                   type="button"
@@ -672,6 +727,18 @@ export function StoresPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
+                    <TableHead className="w-10">
+                      <button
+                        type="button"
+                        className="flex items-center justify-center"
+                        title={selectedIds.size === filteredStores.length ? "Снять всё" : "Выбрать все"}
+                        onClick={toggleSelectAll}
+                      >
+                        {selectedIds.size === filteredStores.length && filteredStores.length > 0
+                          ? <CheckSquare className="w-4 h-4 text-primary" />
+                          : <Square className="w-4 h-4 text-muted-foreground" />}
+                      </button>
+                    </TableHead>
                     <TableHead>Название</TableHead>
                     <TableHead>Адрес</TableHead>
                     <TableHead>Геокодинг</TableHead>
@@ -683,7 +750,22 @@ export function StoresPage() {
                 </TableHeader>
                 <TableBody>
                   {filteredStores.map((store) => (
-                    <TableRow key={store.id}>
+                    <TableRow
+                      key={store.id}
+                      data-selected={selectedIds.has(store.id)}
+                      className={selectedIds.has(store.id) ? "bg-primary/5" : undefined}
+                    >
+                      <TableCell>
+                        <button
+                          type="button"
+                          className="flex items-center justify-center"
+                          onClick={() => toggleSelect(store.id)}
+                        >
+                          {selectedIds.has(store.id)
+                            ? <CheckSquare className="w-4 h-4 text-primary" />
+                            : <Square className="w-4 h-4 text-muted-foreground" />}
+                        </button>
+                      </TableCell>
                       <TableCell className="font-medium">{store.name}</TableCell>
                       <TableCell className="text-muted-foreground text-sm max-w-[260px]">
                         <span className="block truncate" title={store.address ?? ""}>{store.address}</span>
@@ -750,6 +832,28 @@ export function StoresPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Bulk delete confirmation dialog */}
+      <AlertDialog open={bulkDeleteConfirm} onOpenChange={(open) => { if (!open) setBulkDeleteConfirm(false); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Удалить {selectedIds.size} магазин{selectedIds.size < 5 ? (selectedIds.size === 1 ? "" : "а") : "ов"}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Выбранные магазины будут удалены безвозвратно. Это действие нельзя отменить.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Отмена</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={handleBulkDelete}
+            >
+              {bulkDeleting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+              Удалить
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Delete confirmation dialog */}
       <AlertDialog open={!!deleteConfirm} onOpenChange={(open) => { if (!open) setDeleteConfirm(null); }}>

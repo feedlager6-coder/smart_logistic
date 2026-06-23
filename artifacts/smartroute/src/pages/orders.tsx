@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import {
   Upload, Package, CheckCircle, XCircle, Loader2, Trash2, ArrowRight,
-  AlertTriangle, FileSpreadsheet, RotateCcw, Weight, Box, Plus, Wand2,
+  AlertTriangle, FileSpreadsheet, RotateCcw, Weight, Box, Plus, Wand2, History,
 } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -122,6 +122,22 @@ export function OrdersPage() {
   // Unmatched store data extracted at import time (name → extra data from Excel)
   const [pendingUnmatched, setPendingUnmatched] = useState<UnmatchedStoreData[]>([]);
   const [bulkCreating, setBulkCreating] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState<{ total: number; created: number; failed: number } | null>(null);
+  const [bulkFailures, setBulkFailures] = useState<{ name: string; reason: string }[]>([]);
+  const [showBulkReport, setShowBulkReport] = useState(false);
+
+  // Import history
+  const { data: importHistory } = useQuery<{ imports: { id: number; delivery_date: string; filename: string; total_rows: number; matched_rows: number; unmatched_rows: number; imported_at: string }[] }>({
+    queryKey: ["import_history"],
+    queryFn: async () => {
+      const res = await fetch("/api/orders/import-history");
+      if (!res.ok) return { imports: [] };
+      return res.json();
+    },
+  });
+
+  // Current file name (for history record)
+  const [currentFileName, setCurrentFileName] = useState("");
 
   // Query: today's saved orders
   const { data: savedOrders, isLoading: ordersLoading } = useQuery<OrdersResponse>({
@@ -142,6 +158,7 @@ export function OrdersPage() {
     if (!file) return;
     e.target.value = "";
 
+    setCurrentFileName(file.name);
     if (!file.name.match(/\.(xlsx|xls)$/i)) {
       toast({ title: "Неверный формат", description: "Загрузите файл Excel (.xlsx или .xls)", variant: "destructive" });
       return;
@@ -242,7 +259,7 @@ export function OrdersPage() {
       const res = await fetch("/api/orders/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ delivery_date: TODAY, rows, clear_existing: true }),
+        body: JSON.stringify({ delivery_date: TODAY, rows, clear_existing: true, filename: currentFileName }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -258,9 +275,10 @@ export function OrdersPage() {
       setPendingUnmatched(Array.from(unmatchedMap.values()));
 
       await qc.invalidateQueries({ queryKey: ["daily_orders", TODAY] });
+      await qc.invalidateQueries({ queryKey: ["import_history"] });
       toast({
         title: "Заявки загружены",
-        description: `${result.saved_count} точек · ${fmt(result.total_weight_kg)} кг · ${fmt(result.total_volume_m3, 2)} м³`,
+        description: `${result.saved_count} точек · ${result.matched_count ?? "?"} сопоставлено · ${result.unmatched_count ?? "?"} нет`,
       });
       setPhase("idle");
       setPreview(null);
@@ -290,9 +308,13 @@ export function OrdersPage() {
   const handleBulkCreateStores = async () => {
     if (pendingUnmatched.length === 0) return;
     setBulkCreating(true);
+    setBulkProgress({ total: pendingUnmatched.length, created: 0, failed: 0 });
+    setBulkFailures([]);
+    setShowBulkReport(false);
 
     let created = 0;
-    let failed = 0;
+    const failures: { name: string; reason: string }[] = [];
+    const stillPending: UnmatchedStoreData[] = [];
 
     for (const store of pendingUnmatched) {
       try {
@@ -305,48 +327,63 @@ export function OrdersPage() {
         const unloadInt = parseInt(store.unload_minutes);
         if (!isNaN(unloadInt) && unloadInt > 0) body.unload_minutes = unloadInt;
 
-        const res = await fetch("/api/stores", {
+        const res = await fetch("/api/stores?force=true", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
+
         if (res.ok) {
           created++;
         } else {
-          failed++;
+          const err = await res.json().catch(() => ({}));
+          const reason = typeof err.detail === "string"
+            ? err.detail
+            : err.detail?.message ?? `HTTP ${res.status}`;
+          failures.push({ name: store.name, reason });
+          stillPending.push(store);
         }
-      } catch {
-        failed++;
+      } catch (e) {
+        const reason = e instanceof Error ? e.message : "Сетевая ошибка";
+        failures.push({ name: store.name, reason });
+        stillPending.push(store);
       }
+
+      setBulkProgress({ total: pendingUnmatched.length, created, failed: failures.length });
     }
 
     // Re-match orders with newly created stores
+    let rematchResult = { matched_count: 0, still_unmatched: 0 };
     try {
-      await fetch("/api/orders/rematch", { method: "POST" });
+      const r = await fetch("/api/orders/rematch", { method: "POST" });
+      if (r.ok) rematchResult = await r.json();
     } catch {
-      // Non-fatal — orders will show updated on next refresh
+      // Non-fatal
     }
 
     // Invalidate queries so stores list and orders list both refresh
     await qc.invalidateQueries({ queryKey: ["daily_orders", TODAY] });
     await qc.invalidateQueries({ queryKey: ["stores"] });
 
-    // Clear pending unmatched — new stores are now in DB
-    setPendingUnmatched([]);
+    // Keep only the stores that failed — let user retry or add manually
+    setPendingUnmatched(stillPending);
+    setBulkFailures(failures);
     setBulkCreating(false);
+    setBulkProgress(null);
 
     // Also clear sessionStorage so autoselect fires fresh when user goes to /route
     sessionStorage.removeItem(TODAY_AUTOSELECT_KEY);
 
-    if (failed === 0) {
+    if (failures.length === 0) {
       toast({
         title: `Создано ${created} магазин${created === 1 ? "" : created < 5 ? "а" : "ов"}`,
-        description: "Заявки автоматически сопоставлены с новыми магазинами.",
+        description: `Заявки сопоставлены: ${rematchResult.matched_count} новых.`,
       });
     } else {
+      setShowBulkReport(true);
       toast({
-        title: `Создано ${created}, ошибок: ${failed}`,
-        description: "Часть магазинов не удалось создать. Добавьте их вручную.",
+        title: `Создано ${created} из ${pendingUnmatched.length}`,
+        description: `Ошибок: ${failures.length}. Подробности — в карточке ниже.`,
         variant: "destructive",
       });
     }
@@ -695,23 +732,38 @@ export function OrdersPage() {
                   </CardDescription>
                 </div>
 
-                {/* Bulk create button (FIX #1) — only shown when we have Excel data from this session */}
+                {/* Bulk create button — shown when we have Excel data from this session */}
                 {pendingUnmatched.length > 0 && (
-                  <Button
-                    size="sm"
-                    className="gap-2 shrink-0 bg-amber-600 hover:bg-amber-700 text-white"
-                    onClick={handleBulkCreateStores}
-                    disabled={bulkCreating}
-                  >
-                    {bulkCreating ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Wand2 className="w-3.5 h-3.5" />
+                  <div className="flex flex-col items-end gap-1.5 shrink-0">
+                    <Button
+                      size="sm"
+                      className="gap-2 bg-amber-600 hover:bg-amber-700 text-white"
+                      onClick={handleBulkCreateStores}
+                      disabled={bulkCreating}
+                    >
+                      {bulkCreating ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Wand2 className="w-3.5 h-3.5" />
+                      )}
+                      {bulkCreating && bulkProgress
+                        ? `Создано ${bulkProgress.created} из ${bulkProgress.total}...`
+                        : `Добавить все ${pendingUnmatched.length} магазин${pendingUnmatched.length === 1 ? "" : pendingUnmatched.length < 5 ? "а" : "ов"}`}
+                    </Button>
+                    {bulkCreating && bulkProgress && (
+                      <div className="w-full text-right">
+                        <div className="h-1.5 w-40 bg-amber-200 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-amber-600 transition-all"
+                            style={{ width: `${Math.round((bulkProgress.created + bulkProgress.failed) / bulkProgress.total * 100)}%` }}
+                          />
+                        </div>
+                        {bulkProgress.failed > 0 && (
+                          <p className="text-xs text-red-600 mt-0.5">Ошибок: {bulkProgress.failed}</p>
+                        )}
+                      </div>
                     )}
-                    {bulkCreating
-                      ? "Создаём магазины..."
-                      : `Добавить все ${pendingUnmatched.length} магазин${pendingUnmatched.length === 1 ? "" : pendingUnmatched.length < 5 ? "а" : "ов"}`}
-                  </Button>
+                  </div>
                 )}
               </div>
             </CardHeader>
@@ -763,6 +815,31 @@ export function OrdersPage() {
                   Для автозаполнения формы — загрузите файл заново. Для ручного добавления нажмите «Добавить».
                 </p>
               )}
+
+              {/* Error report after partial bulk create */}
+              {showBulkReport && bulkFailures.length > 0 && (
+                <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3">
+                  <p className="text-xs font-semibold text-red-800 mb-2 flex items-center gap-1.5">
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    Не удалось создать {bulkFailures.length} магазин{bulkFailures.length < 5 ? (bulkFailures.length === 1 ? "" : "а") : "ов"}
+                  </p>
+                  <div className="space-y-1">
+                    {bulkFailures.map((f, i) => (
+                      <div key={i} className="text-xs text-red-700 flex gap-2">
+                        <span className="font-medium truncate max-w-[140px]">{f.name}</span>
+                        <span className="text-red-500">—</span>
+                        <span className="truncate">{f.reason}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    className="text-xs text-red-600 underline mt-2"
+                    onClick={() => setShowBulkReport(false)}
+                  >
+                    Скрыть
+                  </button>
+                </div>
+              )}
             </CardContent>
           </Card>
         );
@@ -773,6 +850,46 @@ export function OrdersPage() {
         <Card>
           <CardContent className="flex justify-center py-8">
             <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Import history */}
+      {importHistory && importHistory.imports.length > 0 && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-semibold flex items-center gap-2">
+              <History className="w-4 h-4 text-muted-foreground" />
+              История загрузок
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b bg-muted/40">
+                    <th className="text-left px-4 py-2 font-medium text-muted-foreground">Дата заявок</th>
+                    <th className="text-left px-4 py-2 font-medium text-muted-foreground">Файл</th>
+                    <th className="text-right px-4 py-2 font-medium text-muted-foreground">Строк</th>
+                    <th className="text-right px-4 py-2 font-medium text-muted-foreground">Сопост.</th>
+                    <th className="text-right px-4 py-2 font-medium text-muted-foreground">Без магазина</th>
+                    <th className="text-right px-4 py-2 font-medium text-muted-foreground">Загружено</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {importHistory.imports.map((h) => (
+                    <tr key={h.id} className="border-b last:border-0 hover:bg-muted/30">
+                      <td className="px-4 py-2 font-medium">{h.delivery_date}</td>
+                      <td className="px-4 py-2 text-muted-foreground max-w-[160px] truncate" title={h.filename}>{h.filename || "—"}</td>
+                      <td className="px-4 py-2 text-right">{h.total_rows}</td>
+                      <td className="px-4 py-2 text-right text-green-700">{h.matched_rows}</td>
+                      <td className="px-4 py-2 text-right text-amber-600">{h.unmatched_rows}</td>
+                      <td className="px-4 py-2 text-right text-muted-foreground">{new Date(h.imported_at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </CardContent>
         </Card>
       )}
