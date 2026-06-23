@@ -177,6 +177,7 @@ AVG_SPEED_KMH = 30
 TRAFFIC_MULTIPLIER = 1.2
 geocode_cache: dict = {}
 import_jobs: dict = {}  # job_id → progress/result dict (in-memory, TTL not needed for MVP)
+bulk_create_jobs: dict = {}  # job_id → progress/result dict for bulk store creation
 
 # ── GraphHopper Matrix API ────────────────────────────────────────────────────
 
@@ -4192,6 +4193,184 @@ def bulk_delete_stores(request: Request, body: BulkDeleteRequest):
     return {"deleted": deleted}
 
 
+# ── Bulk store creation background job ────────────────────────────────────────
+
+class BulkCreateStoreItem(BaseModel):
+    name: str
+    address: Optional[str] = None
+    yandex_url: Optional[str] = None
+    city: Optional[str] = None
+    time_window_from: Optional[str] = "09:00"
+    time_window_to: Optional[str] = "18:00"
+    unload_minutes: Optional[int] = 15
+
+
+class BulkCreateStartRequest(BaseModel):
+    stores: list[BulkCreateStoreItem]
+    delivery_date: Optional[str] = None
+
+
+def _bulk_create_stores_sync(stores: list[dict], job: dict, uid: int):
+    """Background thread: create stores one by one, update job dict in-place."""
+    job["total"] = len(stores)
+    job["created"] = 0
+    job["failed"] = 0
+    job["done"] = False
+    job["results"] = []
+
+    for store_data in stores:
+        if job.get("cancelled"):
+            break
+        name = store_data.get("name", "").strip()
+        if not name:
+            job["failed"] += 1
+            job["results"].append({"name": name or "(пусто)", "status": "failed", "reason": "Пустое название"})
+            continue
+
+        try:
+            conn = get_db()
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+            address = store_data.get("address", "")
+            yandex_url = store_data.get("yandex_url", "")
+            city = store_data.get("city", "")
+            time_from = store_data.get("time_window_from") or "09:00"
+            time_to = store_data.get("time_window_to") or "18:00"
+            unload = store_data.get("unload_minutes") or 15
+
+            # Determine coordinates
+            lat, lon, geocode_status = None, None, "pending"
+            if yandex_url:
+                coords = parse_yandex_link(yandex_url)
+                if coords:
+                    lat, lon = coords
+                    geocode_status = "found"
+                    # Reverse geocode to get address if not provided
+                    if not address:
+                        rev = reverse_geocode(lat, lon)
+                        if rev:
+                            address = rev
+
+            if lat is None and address:
+                geocode_query = f"{city}, {address}" if city else address
+                coords = geocode_address(geocode_query)
+                if coords:
+                    lat, lon = coords
+                    geocode_status = "found"
+                else:
+                    geocode_status = "not_found"
+
+            # Build full address with city prefix
+            full_address = address or ""
+            if city and full_address and not full_address.startswith(city):
+                full_address = f"{city}, {full_address}"
+            elif city and not full_address:
+                full_address = city
+
+            cur.execute(
+                """INSERT INTO stores (owner_id, name, address, city, map_url, lat, lon,
+                           geocode_status, time_window_from, time_window_to, unload_minutes)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   RETURNING id""",
+                (uid, name, full_address or None, city or None, yandex_url or None,
+                 lat, lon, geocode_status, time_from, time_to, int(unload))
+            )
+            new_id = cur.fetchone()["id"]
+            conn.commit()
+            cur.close()
+            conn.close()
+
+            job["created"] += 1
+            job["results"].append({
+                "name": name,
+                "status": "created",
+                "store_id": new_id,
+                "geocode_status": geocode_status,
+                "reason": None,
+            })
+
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            try:
+                cur.close()
+                conn.close()
+            except Exception:
+                pass
+            reason = str(exc)[:200]
+            job["failed"] += 1
+            job["results"].append({"name": name, "status": "failed", "reason": reason})
+
+    job["done"] = True
+
+
+@app.post("/api/stores/bulk-create/start", status_code=202)
+def start_bulk_create_stores(request: Request, body: BulkCreateStartRequest):
+    """Start a background job to bulk-create stores. Returns job_id for polling."""
+    uid = get_user_id(request)
+    if not body.stores:
+        raise HTTPException(status_code=422, detail="Список магазинов пуст")
+    if len(body.stores) > 500:
+        raise HTTPException(status_code=422, detail="Максимум 500 магазинов за один запрос")
+
+    job_id = _uuid.uuid4().hex[:8]
+    job: dict = {
+        "owner_id": uid,
+        "total": len(body.stores),
+        "created": 0,
+        "failed": 0,
+        "done": False,
+        "cancelled": False,
+        "results": [],
+    }
+    bulk_create_jobs[job_id] = job
+
+    stores_data = [s.model_dump() for s in body.stores]
+    t = threading.Thread(target=_bulk_create_stores_sync, args=(stores_data, job, uid), daemon=True)
+    t.start()
+
+    return {"job_id": job_id}
+
+
+@app.get("/api/stores/bulk-create/progress/{job_id}")
+def get_bulk_create_progress(job_id: str, request: Request):
+    """Poll progress of a bulk-create job."""
+    uid = get_user_id(request)
+    if job_id not in bulk_create_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = bulk_create_jobs[job_id]
+    if job.get("owner_id") != uid:
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    return {
+        "job_id": job_id,
+        "total": job["total"],
+        "created": job["created"],
+        "failed": job["failed"],
+        "done": job["done"],
+    }
+
+
+@app.get("/api/stores/bulk-create/result/{job_id}")
+def get_bulk_create_result(job_id: str, request: Request):
+    """Fetch final results of a completed bulk-create job."""
+    uid = get_user_id(request)
+    if job_id not in bulk_create_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = bulk_create_jobs[job_id]
+    if job.get("owner_id") != uid:
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    return {
+        "job_id": job_id,
+        "total": job["total"],
+        "created": job["created"],
+        "failed": job["failed"],
+        "done": job["done"],
+        "results": job.get("results", []),
+    }
+
+
 @app.post("/api/stores/{id}/geocode")
 def geocode_store(id: int, request: Request):
     uid = get_user_id(request)
@@ -4633,7 +4812,7 @@ def get_orders(request: Request, date: Optional[str] = None):
 
 
 @app.get("/api/orders/import-history")
-def get_import_history(request: Request, limit: int = Query(20, ge=1, le=100)):
+def get_import_history(request: Request, limit: int = Query(50, ge=1, le=200)):
     """Return the last N import history records for the current user."""
     uid = get_user_id(request)
     conn = get_db()
@@ -4651,6 +4830,38 @@ def get_import_history(request: Request, limit: int = Query(20, ge=1, le=100)):
     cur.close()
     conn.close()
     return {"imports": rows}
+
+
+@app.delete("/api/orders/import-history/{record_id}", status_code=204)
+def delete_import_history_record(record_id: int, request: Request):
+    """Delete a single import history record."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM order_import_history WHERE id = %s AND owner_id = %s",
+        (record_id, uid)
+    )
+    deleted = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="Record not found")
+
+
+@app.delete("/api/orders/import-history", status_code=200)
+def clear_import_history(request: Request):
+    """Delete all import history records for the current user."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM order_import_history WHERE owner_id = %s", (uid,))
+    deleted = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"deleted": deleted}
 
 
 @app.delete("/api/orders")

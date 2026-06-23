@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { Link } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -119,15 +119,83 @@ export function OrdersPage() {
   const [mapping, setMapping] = useState<Record<string, string | null>>({});
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
-  // Unmatched store data extracted at import time (name → extra data from Excel)
-  const [pendingUnmatched, setPendingUnmatched] = useState<UnmatchedStoreData[]>([]);
-  const [bulkCreating, setBulkCreating] = useState(false);
-  const [bulkProgress, setBulkProgress] = useState<{ total: number; created: number; failed: number } | null>(null);
-  const [bulkFailures, setBulkFailures] = useState<{ name: string; reason: string }[]>([]);
-  const [showBulkReport, setShowBulkReport] = useState(false);
+  // ── Pending unmatched — persisted to localStorage so it survives tab navigation ──
+  const PENDING_KEY = `smartroute_pending_unmatched_${TODAY}`;
+  const [pendingUnmatched, setPendingUnmatchedRaw] = useState<UnmatchedStoreData[]>(() => {
+    try {
+      const raw = localStorage.getItem(PENDING_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  });
+  const setPendingUnmatched = useCallback((val: UnmatchedStoreData[] | ((prev: UnmatchedStoreData[]) => UnmatchedStoreData[])) => {
+    setPendingUnmatchedRaw(prev => {
+      const next = typeof val === "function" ? val(prev) : val;
+      try { localStorage.setItem(PENDING_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, [PENDING_KEY]);
+
+  // ── Bulk create server job ──────────────────────────────────────────────────
+  const BULK_JOB_KEY = `smartroute_bulk_job_${TODAY}`;
+  const [bulkJobId, setBulkJobIdRaw] = useState<string | null>(() => localStorage.getItem(BULK_JOB_KEY));
+  const setBulkJobId = (id: string | null) => {
+    setBulkJobIdRaw(id);
+    if (id) localStorage.setItem(BULK_JOB_KEY, id);
+    else localStorage.removeItem(BULK_JOB_KEY);
+  };
+  const [bulkProgress, setBulkProgress] = useState<{ total: number; created: number; failed: number; done: boolean } | null>(null);
+  const [bulkResult, setBulkResult] = useState<{ name: string; status: "created" | "failed"; reason?: string; geocode_status?: string }[] | null>(null);
+  const [showBulkResult, setShowBulkResult] = useState(false);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const startPolling = useCallback((jobId: string) => {
+    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/stores/bulk-create/progress/${jobId}`);
+        if (!res.ok) {
+          setBulkJobId(null);
+          return;
+        }
+        const prog = await res.json();
+        setBulkProgress({ total: prog.total, created: prog.created, failed: prog.failed, done: prog.done });
+        if (!prog.done) {
+          pollTimerRef.current = setTimeout(poll, 800);
+        } else {
+          // Fetch full result
+          const rRes = await fetch(`/api/stores/bulk-create/result/${jobId}`);
+          if (rRes.ok) {
+            const result = await rRes.json();
+            setBulkResult(result.results ?? []);
+            setShowBulkResult(true);
+            // Remove completed stores from pending
+            const createdNames = new Set((result.results ?? []).filter((r: any) => r.status === "created").map((r: any) => r.name));
+            setPendingUnmatched(prev => prev.filter(p => !createdNames.has(p.name)));
+          }
+          // Re-run rematch after job completes
+          fetch("/api/orders/rematch", { method: "POST" }).catch(() => {});
+          qc.invalidateQueries({ queryKey: ["daily_orders", TODAY] });
+          qc.invalidateQueries({ queryKey: ["stores"] });
+          setBulkJobId(null);
+        }
+      } catch {
+        pollTimerRef.current = setTimeout(poll, 2000);
+      }
+    };
+    poll();
+  }, [qc, setPendingUnmatched]);
+
+  // Resume polling on mount if there's a pending job
+  useEffect(() => {
+    if (bulkJobId) {
+      startPolling(bulkJobId);
+    }
+    return () => { if (pollTimerRef.current) clearTimeout(pollTimerRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Import history
-  const { data: importHistory } = useQuery<{ imports: { id: number; delivery_date: string; filename: string; total_rows: number; matched_rows: number; unmatched_rows: number; imported_at: string }[] }>({
+  const { data: importHistory, refetch: refetchHistory } = useQuery<{ imports: { id: number; delivery_date: string; filename: string; total_rows: number; matched_rows: number; unmatched_rows: number; imported_at: string }[] }>({
     queryKey: ["import_history"],
     queryFn: async () => {
       const res = await fetch("/api/orders/import-history");
@@ -135,6 +203,8 @@ export function OrdersPage() {
       return res.json();
     },
   });
+  const [deletingHistoryId, setDeletingHistoryId] = useState<number | null>(null);
+  const [clearHistoryConfirm, setClearHistoryConfirm] = useState(false);
 
   // Current file name (for history record)
   const [currentFileName, setCurrentFileName] = useState("");
@@ -296,97 +366,94 @@ export function OrdersPage() {
       const res = await fetch(`/api/orders?date=${TODAY}`, { method: "DELETE" });
       if (!res.ok) throw new Error();
       await qc.invalidateQueries({ queryKey: ["daily_orders", TODAY] });
+      // Also clear pending unmatched and any running bulk job
       setPendingUnmatched([]);
+      setBulkJobId(null);
+      setBulkProgress(null);
+      setBulkResult(null);
+      if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
       toast({ title: "Заявки удалены" });
     } catch {
       toast({ title: "Ошибка при удалении", variant: "destructive" });
     }
   };
 
-  // ── Bulk create unmatched stores ───────────────────────────────────────────
+  // ── History delete ──────────────────────────────────────────────────────────
+
+  const handleDeleteHistoryRecord = async (id: number) => {
+    setDeletingHistoryId(id);
+    try {
+      await fetch(`/api/orders/import-history/${id}`, { method: "DELETE" });
+      refetchHistory();
+    } catch {
+      toast({ title: "Ошибка удаления записи", variant: "destructive" });
+    } finally {
+      setDeletingHistoryId(null);
+    }
+  };
+
+  const handleClearHistory = async () => {
+    try {
+      await fetch("/api/orders/import-history", { method: "DELETE" });
+      refetchHistory();
+      setClearHistoryConfirm(false);
+      toast({ title: "История очищена" });
+    } catch {
+      toast({ title: "Ошибка очистки истории", variant: "destructive" });
+    }
+  };
+
+  // ── Bulk create unmatched stores (server-side background job) ──────────────
 
   const handleBulkCreateStores = async () => {
     if (pendingUnmatched.length === 0) return;
-    setBulkCreating(true);
-    setBulkProgress({ total: pendingUnmatched.length, created: 0, failed: 0 });
-    setBulkFailures([]);
-    setShowBulkReport(false);
+    setBulkProgress({ total: pendingUnmatched.length, created: 0, failed: 0, done: false });
+    setBulkResult(null);
+    setShowBulkResult(false);
 
-    let created = 0;
-    const failures: { name: string; reason: string }[] = [];
-    const stillPending: UnmatchedStoreData[] = [];
-
-    for (const store of pendingUnmatched) {
-      try {
-        const body: Record<string, unknown> = { name: store.name };
-        if (store.yandex_url) body.yandex_url = store.yandex_url;
-        if (store.address)    body.address    = store.address;
-        if (store.city)       body.city       = store.city;
-        if (store.time_from)  body.time_window_from = store.time_from;
-        if (store.time_to)    body.time_window_to   = store.time_to;
-        const unloadInt = parseInt(store.unload_minutes);
-        if (!isNaN(unloadInt) && unloadInt > 0) body.unload_minutes = unloadInt;
-
-        const res = await fetch("/api/stores?force=true", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-
-        if (res.ok) {
-          created++;
-        } else {
-          const err = await res.json().catch(() => ({}));
-          const reason = typeof err.detail === "string"
-            ? err.detail
-            : err.detail?.message ?? `HTTP ${res.status}`;
-          failures.push({ name: store.name, reason });
-          stillPending.push(store);
-        }
-      } catch (e) {
-        const reason = e instanceof Error ? e.message : "Сетевая ошибка";
-        failures.push({ name: store.name, reason });
-        stillPending.push(store);
-      }
-
-      setBulkProgress({ total: pendingUnmatched.length, created, failed: failures.length });
-    }
-
-    // Re-match orders with newly created stores
-    let rematchResult = { matched_count: 0, still_unmatched: 0 };
     try {
-      const r = await fetch("/api/orders/rematch", { method: "POST" });
-      if (r.ok) rematchResult = await r.json();
-    } catch {
-      // Non-fatal
-    }
-
-    // Invalidate queries so stores list and orders list both refresh
-    await qc.invalidateQueries({ queryKey: ["daily_orders", TODAY] });
-    await qc.invalidateQueries({ queryKey: ["stores"] });
-
-    // Keep only the stores that failed — let user retry or add manually
-    setPendingUnmatched(stillPending);
-    setBulkFailures(failures);
-    setBulkCreating(false);
-    setBulkProgress(null);
-
-    // Also clear sessionStorage so autoselect fires fresh when user goes to /route
-    sessionStorage.removeItem(TODAY_AUTOSELECT_KEY);
-
-    if (failures.length === 0) {
-      toast({
-        title: `Создано ${created} магазин${created === 1 ? "" : created < 5 ? "а" : "ов"}`,
-        description: `Заявки сопоставлены: ${rematchResult.matched_count} новых.`,
+      const res = await fetch("/api/stores/bulk-create/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stores: pendingUnmatched.map(s => ({
+            name: s.name,
+            address: s.address || null,
+            yandex_url: s.yandex_url || null,
+            city: s.city || null,
+            time_window_from: s.time_from || "09:00",
+            time_window_to: s.time_to || "18:00",
+            unload_minutes: parseInt(s.unload_minutes) || 15,
+          })),
+          delivery_date: TODAY,
+        }),
       });
-    } else {
-      setShowBulkReport(true);
-      toast({
-        title: `Создано ${created} из ${pendingUnmatched.length}`,
-        description: `Ошибок: ${failures.length}. Подробности — в карточке ниже.`,
-        variant: "destructive",
-      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail ?? "Ошибка запуска задачи");
+      }
+      const { job_id } = await res.json();
+      setBulkJobId(job_id);
+      startPolling(job_id);
+      sessionStorage.removeItem(TODAY_AUTOSELECT_KEY);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Неизвестная ошибка";
+      toast({ title: "Ошибка запуска", description: msg, variant: "destructive" });
+      setBulkProgress(null);
     }
+  };
+
+  const handleRetryFailed = async () => {
+    if (!bulkResult) return;
+    const failed = bulkResult.filter(r => r.status === "failed");
+    if (failed.length === 0) return;
+    // Keep only failed stores in pending
+    const failedNames = new Set(failed.map(r => r.name));
+    const retryStores = pendingUnmatched.filter(p => failedNames.has(p.name));
+    if (retryStores.length === 0) return;
+    setBulkResult(null);
+    setShowBulkResult(false);
+    await handleBulkCreateStores();
   };
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -732,39 +799,38 @@ export function OrdersPage() {
                   </CardDescription>
                 </div>
 
-                {/* Bulk create button — shown when we have Excel data from this session */}
-                {pendingUnmatched.length > 0 && (
-                  <div className="flex flex-col items-end gap-1.5 shrink-0">
+                {/* Bulk create button / progress */}
+                <div className="flex flex-col items-end gap-1.5 shrink-0">
+                  {/* Running job progress */}
+                  {bulkJobId && bulkProgress && !bulkProgress.done && (
+                    <div className="flex flex-col items-end gap-1">
+                      <p className="text-xs font-medium text-amber-800">
+                        Создаётся на сервере... {bulkProgress.created + bulkProgress.failed}/{bulkProgress.total}
+                      </p>
+                      <div className="h-1.5 w-44 bg-amber-200 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-amber-600 transition-all"
+                          style={{ width: `${Math.round((bulkProgress.created + bulkProgress.failed) / Math.max(bulkProgress.total, 1) * 100)}%` }}
+                        />
+                      </div>
+                      <p className="text-xs text-amber-700">
+                        ✓ {bulkProgress.created} создано · {bulkProgress.failed > 0 && <span className="text-red-600">✗ {bulkProgress.failed} ошибок</span>}
+                      </p>
+                      <p className="text-xs text-muted-foreground">Можно перейти на другую вкладку — процесс продолжится</p>
+                    </div>
+                  )}
+                  {/* Start button — shown when no job running and pending stores exist */}
+                  {pendingUnmatched.length > 0 && !bulkJobId && (
                     <Button
                       size="sm"
                       className="gap-2 bg-amber-600 hover:bg-amber-700 text-white"
                       onClick={handleBulkCreateStores}
-                      disabled={bulkCreating}
                     >
-                      {bulkCreating ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Wand2 className="w-3.5 h-3.5" />
-                      )}
-                      {bulkCreating && bulkProgress
-                        ? `Создано ${bulkProgress.created} из ${bulkProgress.total}...`
-                        : `Добавить все ${pendingUnmatched.length} магазин${pendingUnmatched.length === 1 ? "" : pendingUnmatched.length < 5 ? "а" : "ов"}`}
+                      <Wand2 className="w-3.5 h-3.5" />
+                      Добавить все {pendingUnmatched.length} магазин{pendingUnmatched.length === 1 ? "" : pendingUnmatched.length < 5 ? "а" : "ов"}
                     </Button>
-                    {bulkCreating && bulkProgress && (
-                      <div className="w-full text-right">
-                        <div className="h-1.5 w-40 bg-amber-200 rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-amber-600 transition-all"
-                            style={{ width: `${Math.round((bulkProgress.created + bulkProgress.failed) / bulkProgress.total * 100)}%` }}
-                          />
-                        </div>
-                        {bulkProgress.failed > 0 && (
-                          <p className="text-xs text-red-600 mt-0.5">Ошибок: {bulkProgress.failed}</p>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
             </CardHeader>
             <CardContent>
@@ -810,34 +876,38 @@ export function OrdersPage() {
                 })}
               </div>
 
-              {pendingUnmatched.length === 0 && (
+              {pendingUnmatched.length === 0 && !bulkJobId && !bulkResult && (
                 <p className="text-xs text-amber-700 mt-3">
                   Для автозаполнения формы — загрузите файл заново. Для ручного добавления нажмите «Добавить».
                 </p>
               )}
 
-              {/* Error report after partial bulk create */}
-              {showBulkReport && bulkFailures.length > 0 && (
-                <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3">
-                  <p className="text-xs font-semibold text-red-800 mb-2 flex items-center gap-1.5">
-                    <AlertTriangle className="w-3.5 h-3.5" />
-                    Не удалось создать {bulkFailures.length} магазин{bulkFailures.length < 5 ? (bulkFailures.length === 1 ? "" : "а") : "ов"}
-                  </p>
-                  <div className="space-y-1">
-                    {bulkFailures.map((f, i) => (
-                      <div key={i} className="text-xs text-red-700 flex gap-2">
-                        <span className="font-medium truncate max-w-[140px]">{f.name}</span>
-                        <span className="text-red-500">—</span>
-                        <span className="truncate">{f.reason}</span>
-                      </div>
-                    ))}
+              {/* Full result report after job completes */}
+              {showBulkResult && bulkResult && bulkResult.length > 0 && (
+                <div className="mt-3 space-y-1.5">
+                  {/* Summary row */}
+                  <div className="flex items-center gap-3 text-xs font-semibold mb-2">
+                    <span className="text-emerald-700">✓ Создано: {bulkResult.filter(r => r.status === "created").length}</span>
+                    {bulkResult.some(r => r.status === "failed") && (
+                      <span className="text-red-600">✗ Ошибок: {bulkResult.filter(r => r.status === "failed").length}</span>
+                    )}
+                    <button className="ml-auto text-muted-foreground underline font-normal" onClick={() => setShowBulkResult(false)}>Скрыть</button>
+                    {bulkResult.some(r => r.status === "failed") && pendingUnmatched.length > 0 && (
+                      <button className="text-amber-700 underline font-normal" onClick={handleRetryFailed}>Повторить ошибочные</button>
+                    )}
                   </div>
-                  <button
-                    className="text-xs text-red-600 underline mt-2"
-                    onClick={() => setShowBulkReport(false)}
-                  >
-                    Скрыть
-                  </button>
+                  {bulkResult.map((r, i) => (
+                    <div key={i} className={`flex items-start gap-2 text-xs rounded px-2 py-1 ${r.status === "created" ? "bg-emerald-50 text-emerald-800" : "bg-red-50 text-red-800"}`}>
+                      <span className="font-medium shrink-0">{r.status === "created" ? "✓" : "✗"}</span>
+                      <span className="font-medium truncate max-w-[160px]">{r.name}</span>
+                      {r.status === "created" && r.geocode_status === "not_found" && (
+                        <span className="text-amber-600 italic">— без координат</span>
+                      )}
+                      {r.status === "failed" && r.reason && (
+                        <span className="text-red-600 truncate">— {r.reason}</span>
+                      )}
+                    </div>
+                  ))}
                 </div>
               )}
             </CardContent>
@@ -858,10 +928,21 @@ export function OrdersPage() {
       {importHistory && importHistory.imports.length > 0 && (
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-semibold flex items-center gap-2">
-              <History className="w-4 h-4 text-muted-foreground" />
-              История загрузок
-            </CardTitle>
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <History className="w-4 h-4 text-muted-foreground" />
+                История загрузок ({importHistory.imports.length})
+              </CardTitle>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-xs text-muted-foreground gap-1.5 h-7 px-2"
+                onClick={() => setClearHistoryConfirm(true)}
+              >
+                <Trash2 className="w-3 h-3" />
+                Очистить всё
+              </Button>
+            </div>
           </CardHeader>
           <CardContent className="p-0">
             <div className="overflow-x-auto">
@@ -874,17 +955,30 @@ export function OrdersPage() {
                     <th className="text-right px-4 py-2 font-medium text-muted-foreground">Сопост.</th>
                     <th className="text-right px-4 py-2 font-medium text-muted-foreground">Без магазина</th>
                     <th className="text-right px-4 py-2 font-medium text-muted-foreground">Загружено</th>
+                    <th className="w-8" />
                   </tr>
                 </thead>
                 <tbody>
                   {importHistory.imports.map((h) => (
-                    <tr key={h.id} className="border-b last:border-0 hover:bg-muted/30">
+                    <tr key={h.id} className="border-b last:border-0 hover:bg-muted/30 group">
                       <td className="px-4 py-2 font-medium">{h.delivery_date}</td>
                       <td className="px-4 py-2 text-muted-foreground max-w-[160px] truncate" title={h.filename}>{h.filename || "—"}</td>
                       <td className="px-4 py-2 text-right">{h.total_rows}</td>
                       <td className="px-4 py-2 text-right text-green-700">{h.matched_rows}</td>
                       <td className="px-4 py-2 text-right text-amber-600">{h.unmatched_rows}</td>
                       <td className="px-4 py-2 text-right text-muted-foreground">{new Date(h.imported_at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
+                      <td className="px-2 py-1">
+                        <button
+                          className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
+                          title="Удалить запись"
+                          onClick={() => handleDeleteHistoryRecord(h.id)}
+                          disabled={deletingHistoryId === h.id}
+                        >
+                          {deletingHistoryId === h.id
+                            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            : <Trash2 className="w-3.5 h-3.5" />}
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -903,7 +997,28 @@ export function OrdersPage() {
         onChange={handleFileChange}
       />
 
-      {/* Clear confirmation */}
+      {/* Clear history confirmation */}
+      <AlertDialog open={clearHistoryConfirm} onOpenChange={setClearHistoryConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Очистить историю загрузок?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Все записи истории импортов будут удалены. Сами заявки и маршруты не затрагиваются.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Отмена</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={handleClearHistory}
+            >
+              Очистить
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Clear orders confirmation */}
       <AlertDialog open={showClearConfirm} onOpenChange={setShowClearConfirm}>
         <AlertDialogContent>
           <AlertDialogHeader>
