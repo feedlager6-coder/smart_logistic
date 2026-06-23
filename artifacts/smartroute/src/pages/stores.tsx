@@ -11,7 +11,7 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store, ChevronDown, ChevronUp, ExternalLink, Link, Pencil, AlertCircle, FileDown, CheckSquare, Square } from "lucide-react";
+import { Search, Plus, Upload, Download, Trash2, MapPin, Loader2, Store, ChevronDown, ChevronUp, ExternalLink, Link, Pencil, AlertCircle, FileDown, CheckSquare, Square, RefreshCw } from "lucide-react";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useToast } from "@/hooks/use-toast";
 import { ImportMappingDialog } from "@/components/ImportMappingDialog";
@@ -62,6 +62,8 @@ export function StoresPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const [exportLoading, setExportLoading] = useState(false);
+  const [geocodePendingLoading, setGeocodePendingLoading] = useState(false);
+  const [geocodePendingCount, setGeocodePendingCount] = useState<number | null>(null);
 
   // Delete confirmation dialog state
   const [deleteConfirm, setDeleteConfirm] = useState<{ id: number; name: string } | null>(null);
@@ -235,6 +237,30 @@ export function StoresPage() {
       toast({ title: "Ошибка экспорта", description: "Попробуйте ещё раз", variant: "destructive" });
     } finally {
       setExportLoading(false);
+    }
+  };
+
+  const handleGeocodePending = async () => {
+    const noCoords = stores.filter(s => s.geocode_status === "not_found" || s.geocode_status === "pending" || !s.lat);
+    if (noCoords.length === 0) {
+      toast({ title: "Все магазины уже геокодированы" });
+      return;
+    }
+    setGeocodePendingLoading(true);
+    setGeocodePendingCount(null);
+    try {
+      const res = await fetch("/api/stores/geocode-pending", { method: "POST" });
+      if (!res.ok) throw new Error("Ошибка");
+      const json = await res.json();
+      setGeocodePendingCount(json.queued);
+      toast({
+        title: "Геокодирование запущено в фоне",
+        description: `${json.queued} магазинов в очереди. Обновите страницу через несколько минут.`,
+      });
+    } catch {
+      toast({ title: "Ошибка запуска геокодирования", variant: "destructive" });
+    } finally {
+      setGeocodePendingLoading(false);
     }
   };
 
@@ -442,6 +468,22 @@ export function StoresPage() {
             <Button variant="outline" size="sm" onClick={handleExportStores} disabled={exportLoading}>
               {exportLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <FileDown className="w-4 h-4 mr-2" />}
               Экспорт магазинов
+            </Button>
+          )}
+          {stores.some(s => s.geocode_status === "not_found" || s.geocode_status === "pending" || !s.lat) && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleGeocodePending}
+              disabled={geocodePendingLoading}
+              className="text-amber-700 border-amber-300 hover:bg-amber-50"
+              title="Геокодировать все магазины без координат"
+            >
+              {geocodePendingLoading
+                ? <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                : <RefreshCw className="w-4 h-4 mr-2" />}
+              Геокодировать без координат
+              {geocodePendingCount !== null && ` (${geocodePendingCount})`}
             </Button>
           )}
           <Label htmlFor="import-file" className="cursor-pointer">

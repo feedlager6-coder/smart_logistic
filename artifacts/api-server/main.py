@@ -17,7 +17,7 @@ from typing import Optional
 import secrets
 import psycopg2
 import psycopg2.extras
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, Depends, Request, Response
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, Depends, Request, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
@@ -2328,9 +2328,11 @@ def geocode_address(address: str) -> Optional[tuple]:
         result = geocode_address_nominatim(address)
         source = "nominatim"
 
-    # Cache result in memory always; persist to DB only on success
-    geocode_cache[cache_key] = result
+    # Cache successful results in memory; persist to DB only on success.
+    # IMPORTANT: do NOT cache None — a transient Nominatim timeout would permanently
+    # poison the in-memory cache for this server session, making retries futile.
     if result is not None:
+        geocode_cache[cache_key] = result
         _geocache_db_store(cache_key, result[0], result[1], source)
 
     return result
@@ -4240,15 +4242,17 @@ def _bulk_create_stores_sync(stores: list[dict], job: dict, uid: int):
             unload = store_data.get("unload_minutes") or 15
 
             # Determine coordinates
-            lat, lon, geocode_status = None, None, "pending"
+            lat, lon, geocode_status = None, None, "not_found"
             if yandex_url:
                 coords = parse_yandex_link(yandex_url)
-                if coords:
+                # IMPORTANT: parse_yandex_link may return (None, None) — tuple is always
+                # truthy, so check the actual lat value, not just `if coords:`
+                if coords and coords[0] is not None and coords[1] is not None:
                     lat, lon = coords
                     geocode_status = "found"
                     # Reverse geocode to get address if not provided
                     if not address:
-                        rev = reverse_geocode(lat, lon)
+                        rev = reverse_geocode_nominatim(lat, lon)
                         if rev:
                             address = rev
 
@@ -4260,6 +4264,9 @@ def _bulk_create_stores_sync(stores: list[dict], job: dict, uid: int):
                     geocode_status = "found"
                 else:
                     geocode_status = "not_found"
+                # Nominatim rate-limit: 1 req/sec (skip if Yandex API key is set)
+                if not YANDEX_GEOCODER_API_KEY:
+                    time.sleep(1.1)
 
             # Build full address with city prefix
             full_address = address or ""
@@ -4267,6 +4274,9 @@ def _bulk_create_stores_sync(stores: list[dict], job: dict, uid: int):
                 full_address = f"{city}, {full_address}"
             elif city and not full_address:
                 full_address = city
+            # Guarantee non-empty address (DB NOT NULL constraint)
+            if not full_address:
+                full_address = "Адрес не указан"
 
             cur.execute(
                 """INSERT INTO stores (owner_id, name, address, city, map_url, lat, lon,
@@ -4384,10 +4394,24 @@ def geocode_store(id: int, request: Request):
         conn.close()
         raise HTTPException(status_code=404, detail="Store not found")
 
-    coords = geocode_address(store["address"])
-    lat = coords[0] if coords else None
-    lon = coords[1] if coords else None
-    status = "found" if coords else "not_found"
+    lat, lon, status = None, None, "not_found"
+
+    # 1. Try yandex_url first (coordinate-precise, no geocoding needed)
+    if store.get("map_url"):
+        try:
+            coords = parse_yandex_link(store["map_url"])
+            if coords:
+                lat, lon = coords
+                status = "found"
+        except Exception:
+            pass
+
+    # 2. Geocode by address
+    if lat is None and store.get("address"):
+        coords = geocode_address(store["address"])
+        lat = coords[0] if coords else None
+        lon = coords[1] if coords else None
+        status = "found" if coords else "not_found"
 
     cur.execute(
         "UPDATE stores SET lat = %s, lon = %s, geocode_status = %s WHERE id = %s AND owner_id = %s RETURNING *",
@@ -4398,6 +4422,70 @@ def geocode_store(id: int, request: Request):
     cur.close()
     conn.close()
     return store_row_to_dict(row)
+
+
+@app.post("/api/stores/geocode-pending")
+def geocode_pending_stores(request: Request, background_tasks: BackgroundTasks):
+    """
+    Background task: geocode all stores with geocode_status='not_found' or 'pending'
+    for the current user. Returns immediately with a count.
+    """
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        "SELECT id FROM stores WHERE owner_id = %s AND (geocode_status = 'not_found' OR geocode_status = 'pending' OR lat IS NULL)",
+        (uid,)
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    store_ids = [r["id"] for r in rows]
+
+    def _geocode_all(ids: list, owner_id: int):
+        for sid in ids:
+            try:
+                conn2 = get_db()
+                cur2 = conn2.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cur2.execute("SELECT * FROM stores WHERE id = %s AND owner_id = %s", (sid, owner_id))
+                store = cur2.fetchone()
+                if not store:
+                    cur2.close(); conn2.close()
+                    continue
+
+                lat, lon, status = None, None, "not_found"
+
+                # 1. yandex_url
+                if store.get("map_url"):
+                    try:
+                        coords = parse_yandex_link(store["map_url"])
+                        if coords:
+                            lat, lon = coords
+                            status = "found"
+                    except Exception:
+                        pass
+
+                # 2. address geocoding
+                if lat is None and store.get("address"):
+                    coords = geocode_address(store["address"])
+                    if coords:
+                        lat, lon = coords
+                        status = "found"
+                    if not YANDEX_GEOCODER_API_KEY:
+                        time.sleep(1.1)
+
+                cur2.execute(
+                    "UPDATE stores SET lat=%s, lon=%s, geocode_status=%s WHERE id=%s AND owner_id=%s",
+                    (lat, lon, status, sid, owner_id)
+                )
+                conn2.commit()
+                cur2.close(); conn2.close()
+                logger.info("geocode_pending: store %d → %s (%.4f, %.4f)", sid, status, lat or 0, lon or 0)
+            except Exception as e:
+                logger.warning("geocode_pending: store %d error: %s", sid, e)
+
+    background_tasks.add_task(_geocode_all, store_ids, uid)
+    return {"queued": len(store_ids)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
