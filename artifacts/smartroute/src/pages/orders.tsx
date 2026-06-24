@@ -241,6 +241,11 @@ export function OrdersPage() {
   const [bulkProgress, setBulkProgress] = useState<{ total: number; created: number; failed: number; done: boolean } | null>(null);
   const [bulkResult, setBulkResult] = useState<{ name: string; address?: string; status: "created" | "failed"; reason?: string; geocode_status?: string }[] | null>(null);
   const [showBulkResult, setShowBulkResult] = useState(false);
+  // City confirmation dialog before bulk-create geocoding
+  const [cityDialogOpen, setCityDialogOpen] = useState(false);
+  const [bulkDefaultCity, setBulkDefaultCity] = useState(() =>
+    localStorage.getItem("smartroute_bulk_default_city") || "Махачкала"
+  );
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentFileRef = useRef<File | null>(null);
   const previewDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -806,7 +811,7 @@ export function OrdersPage() {
 
   // ── Bulk create unmatched stores (server-side background job) ──────────────
 
-  const handleBulkCreateStores = async () => {
+  const handleBulkCreateStores = async (defaultCity?: string) => {
     if (pendingUnmatched.length === 0) return;
     setBulkProgress({ total: pendingUnmatched.length, created: 0, failed: 0, done: false });
     setBulkResult(null);
@@ -821,7 +826,7 @@ export function OrdersPage() {
             name: s.name,
             address: s.address || null,
             yandex_url: s.yandex_url || null,
-            city: s.city || null,
+            city: s.city || defaultCity || null,
             time_window_from: s.time_from || "09:00",
             time_window_to: s.time_to || "18:00",
             unload_minutes: parseInt(s.unload_minutes) || 15,
@@ -854,7 +859,17 @@ export function OrdersPage() {
     if (retryStores.length === 0) return;
     setBulkResult(null);
     setShowBulkResult(false);
-    await handleBulkCreateStores();
+    await handleBulkCreateStores(bulkDefaultCity);
+  };
+
+  // Intercept the "Добавить все" button: if any store lacks a city, ask first.
+  const handleBulkCreateClick = () => {
+    const hasMissingCity = pendingUnmatched.some(s => !s.city);
+    if (hasMissingCity) {
+      setCityDialogOpen(true);
+    } else {
+      handleBulkCreateStores();
+    }
   };
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -1431,7 +1446,7 @@ export function OrdersPage() {
                     <Button
                       size="sm"
                       className="gap-2 bg-amber-600 hover:bg-amber-700 text-white"
-                      onClick={handleBulkCreateStores}
+                      onClick={handleBulkCreateClick}
                     >
                       <Wand2 className="w-3.5 h-3.5" />
                       Добавить все {pendingUnmatched.length} магазин{pendingUnmatched.length === 1 ? "" : pendingUnmatched.length < 5 ? "а" : "ов"}
@@ -1758,6 +1773,50 @@ export function OrdersPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* ── City dialog for bulk-create geocoding ── */}
+      <Dialog open={cityDialogOpen} onOpenChange={setCityDialogOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Укажите город для геокодинга</DialogTitle>
+            <DialogDescription>
+              {pendingUnmatched.filter(s => !s.city).length} из {pendingUnmatched.length} магазинов
+              не имеют города в адресе. Без города геокодинг может найти улицу в другом регионе.
+              Город будет добавлен к адресам при поиске координат.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-2">
+            <label className="text-sm font-medium mb-1.5 block">Город по умолчанию</label>
+            <Input
+              value={bulkDefaultCity}
+              onChange={e => setBulkDefaultCity(e.target.value)}
+              placeholder="Например: Махачкала"
+              autoFocus
+              onKeyDown={e => {
+                if (e.key === "Enter" && bulkDefaultCity.trim()) {
+                  setCityDialogOpen(false);
+                  localStorage.setItem("smartroute_bulk_default_city", bulkDefaultCity.trim());
+                  handleBulkCreateStores(bulkDefaultCity.trim());
+                }
+              }}
+            />
+          </div>
+          <div className="flex justify-end gap-2 pt-1">
+            <Button variant="outline" onClick={() => setCityDialogOpen(false)}>Отмена</Button>
+            <Button
+              disabled={!bulkDefaultCity.trim()}
+              onClick={() => {
+                const city = bulkDefaultCity.trim();
+                setCityDialogOpen(false);
+                localStorage.setItem("smartroute_bulk_default_city", city);
+                handleBulkCreateStores(city);
+              }}
+            >
+              Продолжить
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Clear orders confirmation */}
       <AlertDialog open={showClearConfirm} onOpenChange={setShowClearConfirm}>
