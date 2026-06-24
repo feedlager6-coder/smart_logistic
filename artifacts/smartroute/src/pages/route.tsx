@@ -27,6 +27,7 @@ interface Vehicle {
   id: string;
   name: string;
   capacity_kg: string;
+  capacity_m3: string;
   average_speed: string;
 }
 
@@ -49,7 +50,7 @@ function loadFleet(): Vehicle[] | null {
   return null;
 }
 
-const DEFAULT_VEHICLE: Vehicle = { id: "1", name: "Газель 1", capacity_kg: "1500", average_speed: "" };
+const DEFAULT_VEHICLE: Vehicle = { id: "1", name: "Газель 1", capacity_kg: "1500", capacity_m3: "", average_speed: "" };
 
 export function RoutePage() {
   const { data: storesData, isLoading } = useListStores();
@@ -302,6 +303,7 @@ export function RoutePage() {
           name: v.name,
           // parseInt("abc") = NaN — guard with || null so backend gets null not NaN
           capacity_kg: v.capacity_kg ? (parseInt(v.capacity_kg) || null) : null,
+          capacity_m3: v.capacity_m3 ? (parseFloat(v.capacity_m3) || null) : null,
           average_speed: v.average_speed ? (parseFloat(v.average_speed) || null) : null,
         })),
         depot_lat: depotLatNum ?? null,
@@ -681,7 +683,16 @@ export function RoutePage() {
                           onChange={e => handleVehicleChange(vehicle.id, 'capacity_kg', e.target.value)}
                           className="h-7 text-xs w-20 shrink-0"
                           placeholder="кг"
-                          title="Вместимость (кг)"
+                          title="Грузоподъёмность (кг)"
+                        />
+                        <Input
+                          type="number"
+                          value={vehicle.capacity_m3}
+                          onChange={e => handleVehicleChange(vehicle.id, 'capacity_m3', e.target.value)}
+                          className="h-7 text-xs w-16 shrink-0"
+                          placeholder="м³"
+                          title="Объём кузова (м³)"
+                          step="0.1"
                         />
                         <div className="flex shrink-0">
                           {vehicles.length > 1 && (

@@ -796,27 +796,39 @@ def _cluster_by_capacitated_sweep(store_indices: list, all_coords: list,
     return [c for c in chunks if c]
 
 
+def _can_route_accept(route: list, node: int,
+                      demands_kg=None, demands_m3=None,
+                      capacities_kg=None, capacities_m3=None,
+                      v_idx: int = 0) -> bool:
+    """Return True when adding *node* to *route* (vehicle *v_idx*) stays within
+    BOTH kg and m³ capacity limits.  A None cap means "unlimited"."""
+    if capacities_kg is not None and v_idx < len(capacities_kg):
+        cap = capacities_kg[v_idx]
+        load = sum((demands_kg[n] if n < len(demands_kg) else 1) for n in route)
+        d = demands_kg[node] if node < len(demands_kg) else 1
+        if load + d > cap:
+            return False
+    if capacities_m3 is not None and v_idx < len(capacities_m3):
+        cap = capacities_m3[v_idx]
+        load = sum((demands_m3[n] if demands_m3 and n < len(demands_m3) else 0.0) for n in route)
+        d = demands_m3[node] if demands_m3 and node < len(demands_m3) else 0.0
+        if load + d > cap:
+            return False
+    return True
+
+
 def _cluster_by_weight_sweep(store_indices: list, all_coords: list, num_vehicles: int,
-                              capacities: list, demands: list) -> list:
+                              capacities: list, demands: list,
+                              capacities_m3: list = None, demands_m3: list = None) -> list:
     """
-    Capacity-aware sweep clustering for CVRP (Sweep Algorithm, Gillett & Miller 1974).
+    Dual-capacity-aware sweep clustering for CVRP (Sweep Algorithm, Gillett & Miller 1974).
 
-    Sorts stores by polar angle around the depot and assigns them to vehicles
-    sequentially, respecting each vehicle's weight capacity.  When a vehicle
-    would be overloaded by the next store, the algorithm opens the next vehicle.
+    Sorts stores by polar angle and assigns them to vehicles sequentially,
+    respecting BOTH kg and m³ capacity per vehicle simultaneously.  A stop is
+    only assigned to a vehicle when it fits in *both* dimensions.
 
-    This is the primary fix for: weight data present + capacity_kg set but
-    vehicle loads still unbalanced — because the previous pure-angle sweep
-    never consulted demands or capacities at all.
-
-    Args:
-        store_indices:  node indices of stores (0 = depot in all_coords)
-        all_coords:     full coordinate list (depot at index 0)
-        num_vehicles:   number of vehicles
-        capacities:     list of vehicle weight capacities (one per vehicle, scaled)
-        demands:        list of demands indexed by node (demands[0] = depot = 0)
-
-    Returns: list of clusters (one per vehicle), non-empty clusters only.
+    When capacities_m3 / demands_m3 are None the function behaves as the original
+    single-dimension (kg-only) sweep.
     """
     if not store_indices:
         return []
@@ -829,37 +841,50 @@ def _cluster_by_weight_sweep(store_indices: list, all_coords: list, num_vehicles
 
     sorted_nodes = sorted(store_indices, key=angle_from_depot)
 
-    def get_cap(v_idx: int) -> float:
+    def get_cap_kg(v_idx: int) -> float:
         if v_idx < len(capacities):
             return capacities[v_idx]
         return capacities[-1] if capacities else 99999
 
+    def get_cap_m3(v_idx: int):
+        """Return m³ cap for vehicle v_idx, or None if unlimited."""
+        if capacities_m3 and v_idx < len(capacities_m3):
+            return capacities_m3[v_idx]
+        return None
+
     clusters = [[] for _ in range(num_vehicles)]
-    vehicle_loads = [0.0] * num_vehicles
+    vehicle_loads_kg = [0.0] * num_vehicles
+    vehicle_loads_m3 = [0.0] * num_vehicles
     current_vehicle = 0
     overflow = []
 
     for node in sorted_nodes:
-        demand = demands[node] if node < len(demands) else 1
+        demand_kg = demands[node] if node < len(demands) else 1
+        demand_m3 = (demands_m3[node] if demands_m3 and node < len(demands_m3) else 0.0)
 
         placed = False
 
-        # If all vehicles already full, skip straight to overflow
         if current_vehicle < num_vehicles:
-            cap = get_cap(current_vehicle)
-            if vehicle_loads[current_vehicle] + demand <= cap:
-                # Fits in current vehicle
+            cap_kg = get_cap_kg(current_vehicle)
+            cap_m3 = get_cap_m3(current_vehicle)
+            kg_ok = vehicle_loads_kg[current_vehicle] + demand_kg <= cap_kg
+            m3_ok = cap_m3 is None or vehicle_loads_m3[current_vehicle] + demand_m3 <= cap_m3
+            if kg_ok and m3_ok:
                 clusters[current_vehicle].append(node)
-                vehicle_loads[current_vehicle] += demand
+                vehicle_loads_kg[current_vehicle] += demand_kg
+                vehicle_loads_m3[current_vehicle] += demand_m3
                 placed = True
             else:
-                # Current vehicle full — advance through remaining vehicles
                 current_vehicle += 1
                 while current_vehicle < num_vehicles:
-                    cap = get_cap(current_vehicle)
-                    if vehicle_loads[current_vehicle] + demand <= cap:
+                    cap_kg = get_cap_kg(current_vehicle)
+                    cap_m3 = get_cap_m3(current_vehicle)
+                    kg_ok = vehicle_loads_kg[current_vehicle] + demand_kg <= cap_kg
+                    m3_ok = cap_m3 is None or vehicle_loads_m3[current_vehicle] + demand_m3 <= cap_m3
+                    if kg_ok and m3_ok:
                         clusters[current_vehicle].append(node)
-                        vehicle_loads[current_vehicle] += demand
+                        vehicle_loads_kg[current_vehicle] += demand_kg
+                        vehicle_loads_m3[current_vehicle] += demand_m3
                         placed = True
                         break
                     current_vehicle += 1
@@ -867,15 +892,21 @@ def _cluster_by_weight_sweep(store_indices: list, all_coords: list, num_vehicles
         if not placed:
             overflow.append(node)
 
-    # Distribute overflow to least-loaded vehicle by capacity utilisation ratio
+    # Distribute overflow to least-loaded vehicle by worst-dimension utilisation ratio
     for node in overflow:
-        demand = demands[node] if node < len(demands) else 1
-        best_v = min(
-            range(num_vehicles),
-            key=lambda i: vehicle_loads[i] / max(get_cap(i), 1)
-        )
+        demand_kg = demands[node] if node < len(demands) else 1
+        demand_m3 = (demands_m3[node] if demands_m3 and node < len(demands_m3) else 0.0)
+
+        def _util(i):
+            kg_ratio = vehicle_loads_kg[i] / max(get_cap_kg(i), 1)
+            _cap_m3 = get_cap_m3(i)
+            m3_ratio = (vehicle_loads_m3[i] / max(_cap_m3, 0.001) if _cap_m3 else 0.0)
+            return max(kg_ratio, m3_ratio)
+
+        best_v = min(range(num_vehicles), key=_util)
         clusters[best_v].append(node)
-        vehicle_loads[best_v] += demand
+        vehicle_loads_kg[best_v] += demand_kg
+        vehicle_loads_m3[best_v] += demand_m3
 
     if overflow:
         logger.warning(
@@ -885,41 +916,54 @@ def _cluster_by_weight_sweep(store_indices: list, all_coords: list, num_vehicles
         )
 
     logger.info(
-        "_cluster_by_weight_sweep: %d stores → %d clusters, loads=%s, caps=%s",
+        "_cluster_by_weight_sweep: %d stores → %d clusters, "
+        "kg_loads=%s, kg_caps=%s, m3_loads=%s",
         len(store_indices),
         len([c for c in clusters if c]),
-        [round(vehicle_loads[i]) for i in range(num_vehicles)],
-        [get_cap(i) for i in range(num_vehicles)],
+        [round(vehicle_loads_kg[i]) for i in range(num_vehicles)],
+        [get_cap_kg(i) for i in range(num_vehicles)],
+        [round(vehicle_loads_m3[i], 2) for i in range(num_vehicles)],
     )
 
     return [c for c in clusters if c]
 
 
 def _enforce_capacity(routes: list, demands: list, capacities: list,
-                      full_matrix: list) -> list:
+                      full_matrix: list,
+                      demands_m3: list = None, capacities_m3: list = None) -> list:
     """
     Post-processing: move stores from over-capacity routes to routes that
-    still have remaining capacity.
+    still have remaining capacity in BOTH kg and m³.
 
-    Greedy: picks the cheapest (minimum distance penalty) store to evict
-    from each overloaded route and inserts it at the best position in any
-    receiving route that has room.
-
-    Args:
-        routes:      list of routes (each route = list of global node indices)
-        demands:     demands[node] = weight of that node
-        capacities:  capacities[v] = weight limit for vehicle v
-        full_matrix: Haversine distance matrix (used for insertion cost)
-
-    Returns: adjusted routes (same structure, some stops may be moved).
+    Greedy: picks the cheapest (minimum distance penalty) store to evict from
+    each overloaded route and inserts it at the best position in any receiving
+    route that has room in all active dimensions.
     """
-    def get_cap(v_idx: int) -> float:
+    def get_cap_kg(v_idx: int) -> float:
         if v_idx < len(capacities):
             return capacities[v_idx]
         return capacities[-1] if capacities else 99999
 
-    def route_load(route):
+    def get_cap_m3(v_idx: int):
+        if capacities_m3 and v_idx < len(capacities_m3):
+            return capacities_m3[v_idx]
+        return None
+
+    def route_load_kg(route):
         return sum(demands[n] if n < len(demands) else 1 for n in route)
+
+    def route_load_m3(route):
+        if not demands_m3:
+            return 0.0
+        return sum(demands_m3[n] if n < len(demands_m3) else 0.0 for n in route)
+
+    def is_overloaded(vi):
+        if route_load_kg(routes[vi]) > get_cap_kg(vi):
+            return True
+        cap_m3 = get_cap_m3(vi)
+        if cap_m3 is not None and route_load_m3(routes[vi]) > cap_m3:
+            return True
+        return False
 
     max_iterations = sum(len(r) for r in routes) + 1
     changed = True
@@ -930,12 +974,9 @@ def _enforce_capacity(routes: list, demands: list, capacities: list,
         iterations += 1
 
         for vi in range(len(routes)):
-            cap = get_cap(vi)
-            load = route_load(routes[vi])
-            if load <= cap:
+            if not is_overloaded(vi):
                 continue
 
-            # Find cheapest node to remove from this overloaded route
             best_node = None
             best_removal_gain = float('-inf')
             best_pos = -1
@@ -945,7 +986,6 @@ def _enforce_capacity(routes: list, demands: list, capacities: list,
                     continue
                 prev_n = routes[vi][pos - 1] if pos > 0 else 0
                 next_n = routes[vi][pos + 1] if pos < len(routes[vi]) - 1 else 0
-                # Gain = how much distance we save by removing this node
                 gain = (full_matrix[prev_n][node] + full_matrix[node][next_n]
                         - full_matrix[prev_n][next_n])
                 if gain > best_removal_gain:
@@ -956,9 +996,10 @@ def _enforce_capacity(routes: list, demands: list, capacities: list,
             if best_node is None:
                 continue
 
-            demand_to_move = demands[best_node] if best_node < len(demands) else 1
+            demand_kg_move = demands[best_node] if best_node < len(demands) else 1
+            demand_m3_move = (demands_m3[best_node]
+                              if demands_m3 and best_node < len(demands_m3) else 0.0)
 
-            # Find receiving vehicle with capacity and best insertion cost
             best_receiver = -1
             best_insert_cost = float('inf')
             best_insert_pos = -1
@@ -966,10 +1007,14 @@ def _enforce_capacity(routes: list, demands: list, capacities: list,
             for vj in range(len(routes)):
                 if vj == vi:
                     continue
-                recv_cap = get_cap(vj)
-                recv_load = route_load(routes[vj])
-                if recv_load + demand_to_move > recv_cap:
-                    continue  # Would also overflow
+                # Check kg fits
+                if route_load_kg(routes[vj]) + demand_kg_move > get_cap_kg(vj):
+                    continue
+                # Check m³ fits
+                cap_m3_j = get_cap_m3(vj)
+                if cap_m3_j is not None:
+                    if route_load_m3(routes[vj]) + demand_m3_move > cap_m3_j:
+                        continue
 
                 recv = routes[vj]
                 for ins_pos in range(len(recv) + 1):
@@ -985,9 +1030,9 @@ def _enforce_capacity(routes: list, demands: list, capacities: list,
 
             if best_receiver == -1:
                 logger.warning(
-                    "_enforce_capacity: node=%d (demand=%d) cannot be relocated "
+                    "_enforce_capacity: node=%d (kg=%g, m3=%g) cannot be relocated "
                     "— no vehicle has remaining capacity; route %d stays overloaded",
-                    best_node, demand_to_move, vi
+                    best_node, demand_kg_move, demand_m3_move, vi
                 )
                 continue
 
@@ -995,8 +1040,8 @@ def _enforce_capacity(routes: list, demands: list, capacities: list,
             routes[best_receiver].insert(best_insert_pos, best_node)
             changed = True
             logger.info(
-                "_enforce_capacity: moved node=%d (demand=%d) from vehicle %d to %d",
-                best_node, demand_to_move, vi, best_receiver
+                "_enforce_capacity: moved node=%d (kg=%g, m3=%g) from vehicle %d to %d",
+                best_node, demand_kg_move, demand_m3_move, vi, best_receiver
             )
 
     return routes
@@ -1248,21 +1293,18 @@ def _fallback_distribution(store_nodes: list, num_vehicles: int) -> list:
 
 
 def _inter_route_relocate(routes: list, full_matrix: list, max_iter: int = 5,
-                          min_stops: int = 1) -> list:
+                          min_stops: int = 1,
+                          demands_kg=None, demands_m3=None,
+                          capacities_kg=None, capacities_m3=None) -> list:
     """
     Post-process routes with inter-route Or-opt relocate moves.
 
     For each stop in each route, tries removing it and inserting it into every
     position in every other route.  Applies the best move (highest km saving)
-    if it reduces total distance.  Repeats up to max_iter passes or until no
-    improvement is found.
+    only if it reduces total distance AND the destination has capacity for the
+    stop in BOTH kg and m³ (when constraints are provided).
 
     min_stops: do not reduce a route below this many stops (hard floor).
-    This equalises route quality across all vehicles — the first route solved
-    by TSP is typically the best; relocate spreads good stops more evenly.
-
-    Complexity: O(max_iter * stops * routes * max_route_len) — fast for ≤ 50 stops.
-    Uses the pre-built full Haversine matrix (metres).
     """
     if len(routes) <= 1:
         return routes
@@ -1280,7 +1322,6 @@ def _inter_route_relocate(routes: list, full_matrix: list, max_iter: int = 5,
         for i in range(len(routes)):
             si = 0
             while si < len(routes[i]):
-                # Respect the minimum-stops floor: never reduce a route below min_stops.
                 if len(routes[i]) <= min_stops:
                     si += 1
                     continue
@@ -1296,6 +1337,15 @@ def _inter_route_relocate(routes: list, full_matrix: list, max_iter: int = 5,
                 for j in range(len(routes)):
                     if i == j:
                         continue
+                    # ── Capacity guard ────────────────────────────────────────
+                    # Skip destination if adding this stop would violate either
+                    # kg or m³ capacity.  None capacities = unlimited.
+                    if not _can_route_accept(routes[j], stop,
+                                            demands_kg, demands_m3,
+                                            capacities_kg, capacities_m3,
+                                            v_idx=j):
+                        continue
+                    # ─────────────────────────────────────────────────────────
                     base_j = route_cost(routes[j])
                     for pos in range(len(routes[j]) + 1):
                         r_j_with = routes[j][:pos] + [stop] + routes[j][pos:]
@@ -1360,17 +1410,15 @@ def _two_opt_route(route: list, full_matrix: list) -> list:
     return best
 
 
-def _rebalance_min_stops(routes: list, full_matrix: list, min_stops: int) -> list:
+def _rebalance_min_stops(routes: list, full_matrix: list, min_stops: int,
+                         demands_kg=None, demands_m3=None,
+                         capacities_kg=None, capacities_m3=None) -> list:
     """
     Ensure every route has at least `min_stops` stops by stealing cheapest stops
     from donor routes (those above the floor).
 
-    The algorithm picks the stop whose (removal_gain - insertion_cost) is best,
-    i.e. it minimises the total distance penalty of the rebalancing move.
-    Runs until no underfull routes remain or no donor can provide more stops.
-
-    effective_min = min(min_stops, total_stops // num_routes) so that small
-    datasets (e.g. 8 stops on 3 vehicles → effective_min=2) scale gracefully.
+    Capacity guard: a stop is only stolen when the receiving route has room in
+    BOTH kg and m³ dimensions (when constraints are provided).
     """
     if len(routes) <= 1:
         return routes
@@ -1395,7 +1443,6 @@ def _rebalance_min_stops(routes: list, full_matrix: list, min_stops: int) -> lis
             if len(route) >= effective_min:
                 continue
 
-            # Route i is underfull — find the cheapest stop to steal from any donor.
             best_net_cost = float("inf")
             best_stop_val = None
             best_donor_idx = -1
@@ -1404,19 +1451,26 @@ def _rebalance_min_stops(routes: list, full_matrix: list, min_stops: int) -> lis
 
             for j, donor in enumerate(routes):
                 if i == j or len(donor) <= effective_min:
-                    continue  # donor must keep at least effective_min stops
+                    continue
 
                 base_donor = route_cost(donor)
                 base_route = route_cost(route)
 
                 for k, stop in enumerate(donor):
+                    # Capacity guard: check receiving route i has room for this stop
+                    if not _can_route_accept(route, stop,
+                                            demands_kg, demands_m3,
+                                            capacities_kg, capacities_m3,
+                                            v_idx=i):
+                        continue
+
                     donor_without = donor[:k] + donor[k + 1:]
                     removal_gain = base_donor - route_cost(donor_without)
 
                     for pos in range(len(route) + 1):
                         route_with = route[:pos] + [stop] + route[pos:]
                         insertion_cost = route_cost(route_with) - base_route
-                        net_cost = insertion_cost - removal_gain  # lower = better
+                        net_cost = insertion_cost - removal_gain
                         if net_cost < best_net_cost:
                             best_net_cost = net_cost
                             best_stop_val = stop
@@ -1425,7 +1479,6 @@ def _rebalance_min_stops(routes: list, full_matrix: list, min_stops: int) -> lis
                             best_insert_pos = pos
 
             if best_stop_val is not None:
-                # Apply the best steal
                 routes[i] = route[:best_insert_pos] + [best_stop_val] + route[best_insert_pos:]
                 d = routes[best_donor_idx]
                 routes[best_donor_idx] = d[:best_donor_stop_pos] + d[best_donor_stop_pos + 1:]
@@ -1435,7 +1488,7 @@ def _rebalance_min_stops(routes: list, full_matrix: list, min_stops: int) -> lis
                     best_stop_val, best_donor_idx, i, i, len(routes[i]), best_net_cost,
                 )
                 changed = True
-                break  # restart outer loop — route sizes have changed
+                break
 
     return [r for r in routes if r]
 
@@ -1526,21 +1579,16 @@ def _rebalance_count_balance(routes: list, full_matrix: list, max_imbalance: int
     return [r for r in routes if r]
 
 
-def _rebalance_max_stops(routes: list, full_matrix: list, max_stops: int) -> tuple:
+def _rebalance_max_stops(routes: list, full_matrix: list, max_stops: int,
+                         demands_kg=None, demands_m3=None,
+                         capacities_kg=None, capacities_m3=None) -> tuple:
     """
     Cap overloaded routes by moving excess stops to less-loaded routes.
 
-    Symmetric counterpart to _rebalance_min_stops: iteratively identifies routes
-    that exceed `max_stops` and relocates the stop whose (insertion_cost - removal_gain)
-    is lowest (i.e. the cheapest move to any accepting route).
+    Capacity guard: a stop is only moved to a destination that has room in
+    BOTH kg and m³ dimensions (when constraints are provided).
 
-    Returns:
-        (rebalanced_routes, moves_count)
-
-    Benchmark results (120 stores / 9 vehicles, Haversine):
-      max=24: ratio 3.9x → 2.7x (−30.8%), km −0.8 km (−0.5%) — passes success criteria
-      max=26: ratio 3.9x → 2.9x (−25.6%), km −0.8 km (−0.5%) — below 30% threshold
-      max=30: ratio 3.9x → 3.3x (−15.4%), km −0.9 km (−0.6%) — below 30% threshold
+    Returns: (rebalanced_routes, moves_count)
     """
     if len(routes) <= 1 or max_stops is None:
         return routes, 0
@@ -1575,6 +1623,12 @@ def _rebalance_max_stops(routes: list, full_matrix: list, max_stops: int) -> tup
                 for j, dest in enumerate(routes):
                     if i == j:
                         continue
+                    # Capacity guard: dest must have room in both dimensions
+                    if not _can_route_accept(dest, stop,
+                                            demands_kg, demands_m3,
+                                            capacities_kg, capacities_m3,
+                                            v_idx=j):
+                        continue
                     base_dest = route_cost(dest)
                     for pos in range(len(dest) + 1):
                         dest_with = dest[:pos] + [stop] + dest[pos:]
@@ -1601,7 +1655,7 @@ def _rebalance_max_stops(routes: list, full_matrix: list, max_stops: int) -> tup
                 )
                 total_moves += 1
                 changed = True
-                break  # restart outer loop
+                break
 
     return [r for r in routes if r], total_moves
 
@@ -1840,7 +1894,8 @@ def haversine_meters(c1: tuple, c2: tuple) -> int:
 def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None,
               store_time_windows: list = None,
               max_stops_per_vehicle: int = None,
-              optimize_by: str = "distance") -> list:
+              optimize_by: str = "distance",
+              capacities_m3=None, demands_m3=None) -> list:
     """
     Solve VRP with efficiency as the primary objective (min total km / time).
 
@@ -1890,10 +1945,17 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
     if not ORTOOLS_AVAILABLE:
         if store_count >= 1:
             all_store_nodes = list(range(1, n))
-            if (capacities is not None and demands is not None
-                    and any(c < 99999 for c in capacities)):
+            _use_cap_sweep_fb = (
+                (capacities is not None and demands is not None
+                 and any(c < 99999 for c in capacities))
+                or (capacities_m3 is not None)
+            )
+            if _use_cap_sweep_fb:
+                _cap_kg_fb = capacities if capacities is not None else [99999] * num_vehicles
+                _dem_kg_fb = demands if demands is not None else [0] + [1] * store_count
                 clusters = _cluster_by_weight_sweep(
-                    all_store_nodes, all_coords, num_vehicles, capacities, demands)
+                    all_store_nodes, all_coords, num_vehicles, _cap_kg_fb, _dem_kg_fb,
+                    capacities_m3=capacities_m3, demands_m3=demands_m3)
             else:
                 clusters = _cluster_by_sweep(all_store_nodes, all_coords, num_vehicles)
             return [c for c in clusters if c], "haversine"
@@ -1913,18 +1975,21 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
     # capacity-aware sweep that fills vehicles respecting their weight limits.
     # Otherwise fall back to the classic equal-angle geographic sweep.
     all_store_nodes = list(range(1, n))
-    _use_weight_sweep = (
-        capacities is not None
-        and demands is not None
-        and any(c < 99999 for c in capacities)
+    _use_cap_sweep = (
+        (capacities is not None and demands is not None
+         and any(c < 99999 for c in capacities))
+        or (capacities_m3 is not None)
     )
-    if _use_weight_sweep:
+    if _use_cap_sweep:
+        _cap_kg = capacities if capacities is not None else [99999] * num_vehicles
+        _dem_kg = demands if demands is not None else [0] + [1] * store_count
         logger.info(
-            "solve_vrp: using weight-aware sweep clustering (capacities=%s)",
-            capacities,
+            "solve_vrp: dual-capacity sweep clustering (kg_caps=%s, m3_caps=%s)",
+            _cap_kg, capacities_m3,
         )
         clusters = _cluster_by_weight_sweep(
-            all_store_nodes, all_coords, num_vehicles, capacities, demands)
+            all_store_nodes, all_coords, num_vehicles, _cap_kg, _dem_kg,
+            capacities_m3=capacities_m3, demands_m3=demands_m3)
     else:
         clusters = _cluster_by_sweep(all_store_nodes, all_coords, num_vehicles)
 
@@ -2116,7 +2181,9 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
         ) / 1000
         routes = _inter_route_relocate(routes, full_matrix,
                                        max_iter=relocate_iters,
-                                       min_stops=effective_min)
+                                       min_stops=effective_min,
+                                       demands_kg=demands, demands_m3=demands_m3,
+                                       capacities_kg=capacities, capacities_m3=capacities_m3)
         after_km = sum(
             sum(full_matrix[r[k]][r[k + 1]] for k in range(len(r) - 1))
             + (full_matrix[0][r[0]] + full_matrix[r[-1]][0] if r else 0)
@@ -2175,8 +2242,11 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
     # across weight boundaries.  Run _enforce_capacity to move excess load from
     # over-capacity vehicles to those with remaining headroom.
     # Only active when real capacities were provided (not 99999 placeholders).
-    if _use_weight_sweep and len(routes) > 1:
-        routes = _enforce_capacity(routes, demands, capacities, full_matrix)
+    if _use_cap_sweep and len(routes) > 1:
+        _enf_dem = demands if demands is not None else ([0] + [1] * store_count)
+        _enf_cap = capacities if capacities is not None else [99999] * num_vehicles
+        routes = _enforce_capacity(routes, _enf_dem, _enf_cap, full_matrix,
+                                   demands_m3=demands_m3, capacities_m3=capacities_m3)
 
     # ── Step 6: rebalance to minimum stops per vehicle ────────────────────────
     # After sector sweep + Or-opt some vehicles may still be underfull (< effective_min
@@ -2184,7 +2254,9 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
     # route that has more than effective_min stops and insert it optimally.
     # This step runs always (also when store_count > 80, where Or-opt is skipped).
     if len(routes) > 1 and effective_min >= 2:
-        routes = _rebalance_min_stops(routes, full_matrix, effective_min)
+        routes = _rebalance_min_stops(routes, full_matrix, effective_min,
+                                      demands_kg=demands, demands_m3=demands_m3,
+                                      capacities_kg=capacities, capacities_m3=capacities_m3)
 
     # ── Step 7: cap overloaded routes (optional) ──────────────────────────────
     # When max_stops_per_vehicle is specified, redistribute excess stops from
@@ -2199,7 +2271,9 @@ def solve_vrp(all_coords: list, num_vehicles: int, capacities=None, demands=None
              + sum(full_matrix[r[k]][r[k + 1]] for k in range(len(r) - 1)))
             for r in routes if r
         ) / 1000
-        routes, moves = _rebalance_max_stops(routes, full_matrix, max_stops_per_vehicle)
+        routes, moves = _rebalance_max_stops(routes, full_matrix, max_stops_per_vehicle,
+                                             demands_kg=demands, demands_m3=demands_m3,
+                                             capacities_kg=capacities, capacities_m3=capacities_m3)
         routes = [
             _two_opt_route(r, full_matrix) if len(r) >= 3 else r
             for r in routes
@@ -2665,6 +2739,7 @@ class StoreUpdate(BaseModel):
 class VehicleInput(BaseModel):
     name: str
     capacity_kg: Optional[int] = None
+    capacity_m3: Optional[float] = None
     average_speed: Optional[float] = None
 
 
@@ -5153,6 +5228,27 @@ def build_route(request: Request, body: RouteRequest):
         else:
             demands = [0] + [1] * len(store_list)  # unit demands — no weight data today
 
+    # ── Volume (м³) capacity pipeline ────────────────────────────────────────
+    # Mirrors kg pipeline: build capacities_m3 / demands_m3 only when any
+    # vehicle has capacity_m3 set.  demands_m3 are floats (no integer scaling
+    # needed since m³ values are naturally small).
+    capacities_m3 = None
+    demands_m3 = None
+    if any(v.capacity_m3 for v in body.vehicles):
+        capacities_m3 = [float(v.capacity_m3) if v.capacity_m3 else 1e9
+                         for v in body.vehicles]
+        if _store_volumes:
+            demands_m3 = [0.0] + [
+                max(0.0, float(_store_volumes.get(s["id"], 0.0)))
+                for s in store_list
+            ]
+            logger.info(
+                "build_route: m³-based demands (max_demand=%.3f m³, vehicles=%s)",
+                max(demands_m3[1:], default=0.0), capacities_m3,
+            )
+        else:
+            demands_m3 = [0.0] + [0.0] * len(store_list)
+
     # ── Time windows (TSPTW) ─────────────────────────────────────────────────
     # When use_time_windows is True, pass (tw_from_min, tw_to_min, service_min)
     # per store to solve_vrp so OR-Tools enforces arrival constraints.
@@ -5237,6 +5333,49 @@ def build_route(request: Request, body: RouteRequest):
             100 * _total_demand_kg / max(_total_capacity_kg, 1),
         )
 
+    # ── Pre-flight m³ capacity check ──────────────────────────────────────────
+    if capacities_m3 is not None and demands_m3 is not None and _store_volumes:
+        _total_demand_m3 = sum(
+            float(_store_volumes.get(s["id"], 0)) for s in store_list
+        )
+        _total_cap_m3 = sum(
+            float(v.capacity_m3) for v in body.vehicles if v.capacity_m3
+        )
+        _max_cap_m3 = max(
+            (float(v.capacity_m3) for v in body.vehicles if v.capacity_m3), default=1e9
+        )
+        _oversized_m3 = [
+            (s["name"], round(float(_store_volumes[s["id"]]), 3))
+            for s in store_list
+            if s["id"] in _store_volumes and float(_store_volumes[s["id"]]) > _max_cap_m3
+        ]
+        if _oversized_m3:
+            names_m3 = ", ".join(f"{n} ({v} м³)" for n, v in _oversized_m3[:3])
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Объём {len(_oversized_m3)} магазин(ов) превышает вместимость "
+                    f"самого большого кузова ({round(_max_cap_m3, 2)} м³): {names_m3}"
+                    + (" и др." if len(_oversized_m3) > 3 else "") +
+                    ". Увеличьте объём кузова или разбейте заявки."
+                )
+            )
+        if _total_demand_m3 > _total_cap_m3:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Суммарный объём заявок ({round(_total_demand_m3, 2)} м³) превышает "
+                    f"суммарный объём кузовов ({round(_total_cap_m3, 2)} м³). "
+                    f"Добавьте машины или увеличьте объём кузова."
+                )
+            )
+        logger.info(
+            "build_route: m³ pre-check OK — total_demand=%.2f m³, "
+            "total_capacity=%.2f m³, utilisation=%.0f%%",
+            _total_demand_m3, _total_cap_m3,
+            100 * _total_demand_m3 / max(_total_cap_m3, 0.001),
+        )
+
     # ── Degradation chain ────────────────────────────────────────────────────
     # Level 1: TW enabled (if requested)
     # Level 2: retry without TW on any solver exception
@@ -5295,6 +5434,7 @@ def build_route(request: Request, body: RouteRequest):
             all_coords, num_vehicles, capacities, demands, store_time_windows,
             max_stops_per_vehicle=effective_max_stops,
             optimize_by=body.optimize_by,
+            capacities_m3=capacities_m3, demands_m3=demands_m3,
         )
     except Exception as vrp_exc_1:
         logger.error("solve_vrp (with TW) failed:\n%s", traceback.format_exc())
@@ -5313,6 +5453,7 @@ def build_route(request: Request, body: RouteRequest):
                     all_coords, num_vehicles, capacities, demands, None,
                     max_stops_per_vehicle=effective_max_stops,
                     optimize_by=body.optimize_by,
+                    capacities_m3=capacities_m3, demands_m3=demands_m3,
                 )
             except Exception as vrp_exc_2:
                 logger.error("solve_vrp (no TW) also failed:\n%s", traceback.format_exc())
@@ -5478,7 +5619,8 @@ def build_route(request: Request, body: RouteRequest):
         wurl = whatsapp_url(vehicle.name, route_stores, km, yurls)
 
         _route_weight = round(sum(_store_weights.get(rs["store_id"], 0) for rs in route_stores), 1)
-        _vehicle_cap = int(vehicle.capacity_kg) if vehicle.capacity_kg else 0
+        _vehicle_cap_kg = int(vehicle.capacity_kg) if vehicle.capacity_kg else 0
+        _vehicle_cap_m3 = float(vehicle.capacity_m3) if vehicle.capacity_m3 else 0.0
         routes.append({
             "vehicle_name": vehicle.name,
             "stores": route_stores,
@@ -5494,7 +5636,8 @@ def build_route(request: Request, body: RouteRequest):
             "total_weight_kg": _route_weight,
             "total_volume_m3": round(sum(_store_volumes.get(rs["store_id"], 0) for rs in route_stores), 3),
             # Vehicle capacity for frontend overload indicator (0 = not configured)
-            "capacity_kg": _vehicle_cap,
+            "capacity_kg": _vehicle_cap_kg,
+            "capacity_m3": _vehicle_cap_m3,
         })
 
     # ── Capacity overflow warning ─────────────────────────────────────────────
@@ -5521,6 +5664,29 @@ def build_route(request: Request, body: RouteRequest):
             logger.warning(
                 "build_route: capacity overflow in %d route(s): %s",
                 len(overloaded), details,
+            )
+
+    # ── Volume (m³) overflow warning ──────────────────────────────────────────
+    if _store_volumes and capacities_m3:
+        overloaded_m3 = [
+            r for r in routes
+            if r["capacity_m3"] > 0 and r["total_volume_m3"] > r["capacity_m3"]
+        ]
+        if overloaded_m3:
+            details_m3 = "; ".join(
+                f"{r['vehicle_name']}: {r['total_volume_m3']:.2f} / {r['capacity_m3']:.2f} м³ "
+                f"(+{r['total_volume_m3'] - r['capacity_m3']:.2f} м³ перебор)"
+                for r in overloaded_m3
+            )
+            route_warnings.append(
+                f"Перебор по объёму: {details_m3}. "
+                f"Суммарный объём заявок вписывается в автопарк, но несколько крупных "
+                f"заявок невозможно распределить без переполнения кузова по объёму. "
+                f"Решение: добавьте ещё одну машину или разбейте крупные заявки на части."
+            )
+            logger.warning(
+                "build_route: m³ overflow in %d route(s): %s",
+                len(overloaded_m3), details_m3,
             )
 
     _cost_settings = get_company_settings(user_id=uid)

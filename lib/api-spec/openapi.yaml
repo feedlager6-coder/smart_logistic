@@ -676,6 +676,9 @@ components:
           type: string
         capacity_kg:
           type: ["integer", "null"]
+        capacity_m3:
+          type: ["number", "null"]
+          description: "Объём кузова (м³). Независимое ограничение от kg. null = без ограничения по объёму."
         average_speed:
           type: ["number", "null"]
           description: Average speed in km/h for this vehicle (overrides global default)

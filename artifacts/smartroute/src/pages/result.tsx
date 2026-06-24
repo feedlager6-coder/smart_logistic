@@ -588,7 +588,7 @@ export function ResultPage() {
                       </Tooltip>
                     </TooltipProvider>
                   </div>
-                  {/* Capacity progress bar — shown only when weight data exists */}
+                  {/* Capacity progress bars — kg and m³ shown independently when set */}
                   {(route as any).capacity_kg > 0 && (route as any).total_weight_kg > 0 && (() => {
                     const pct = Math.min(100, Math.round((route as any).total_weight_kg / (route as any).capacity_kg * 100));
                     const over = (route as any).total_weight_kg > (route as any).capacity_kg;
@@ -596,13 +596,35 @@ export function ResultPage() {
                       <div className="mt-2 space-y-1">
                         <div className="flex justify-between text-xs">
                           <span className={over ? "text-red-600 font-medium" : "text-muted-foreground"}>
-                            {over ? `⚠ Перегруз +${((route as any).total_weight_kg - (route as any).capacity_kg).toFixed(0)} кг` : "Загрузка кузова"}
+                            {over ? `⚠ Перегруз +${((route as any).total_weight_kg - (route as any).capacity_kg).toFixed(0)} кг` : "Загрузка (кг)"}
                           </span>
                           <span className={over ? "text-red-600 font-bold" : "text-muted-foreground"}>{pct}%</span>
                         </div>
                         <div className="w-full h-1.5 rounded-full bg-muted overflow-hidden">
                           <div
                             className={`h-full rounded-full transition-all ${over ? "bg-red-500" : pct > 80 ? "bg-amber-500" : "bg-emerald-500"}`}
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })()}
+                  {(route as any).capacity_m3 > 0 && (route as any).total_volume_m3 > 0 && (() => {
+                    const pct = Math.min(100, Math.round((route as any).total_volume_m3 / (route as any).capacity_m3 * 100));
+                    const over = (route as any).total_volume_m3 > (route as any).capacity_m3;
+                    return (
+                      <div className="mt-1 space-y-1">
+                        <div className="flex justify-between text-xs">
+                          <span className={over ? "text-red-600 font-medium" : "text-muted-foreground"}>
+                            {over
+                              ? `⚠ Перебор объёма +${((route as any).total_volume_m3 - (route as any).capacity_m3).toFixed(2)} м³`
+                              : `Загрузка (м³) ${(route as any).total_volume_m3.toFixed(2)} / ${(route as any).capacity_m3.toFixed(2)} м³`}
+                          </span>
+                          <span className={over ? "text-red-600 font-bold" : "text-muted-foreground"}>{pct}%</span>
+                        </div>
+                        <div className="w-full h-1.5 rounded-full bg-muted overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all ${over ? "bg-red-500" : pct > 80 ? "bg-amber-500" : "bg-sky-500"}`}
                             style={{ width: `${pct}%` }}
                           />
                         </div>
