@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { Link } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -6,6 +6,9 @@ import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { useToast } from "@/hooks/use-toast";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
@@ -13,13 +16,15 @@ import {
 } from "@/components/ui/alert-dialog";
 import {
   Upload, Package, CheckCircle, XCircle, Loader2, Trash2, ArrowRight,
-  AlertTriangle, FileSpreadsheet, RotateCcw, Weight, Box, Plus, Wand2, History, Eye,
+  AlertTriangle, Weight, Box, Plus, Wand2, History, Eye,
+  Check, ClipboardList, Banknote, CalendarDays, Download,
 } from "lucide-react";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useListStores } from "@workspace/api-client-react";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -95,6 +100,20 @@ interface OrdersResponse {
   total_amount_rub: number;
 }
 
+// Local editable row buffer (string fields for inputs)
+interface EditableRow {
+  id: number;
+  store_id: number | null;
+  store_name_raw: string;
+  store_name_db: string | null;
+  store_address: string | null;
+  order_number: string;
+  weight_kg: string;
+  volume_m3: string;
+  amount_rub: string;
+  notes: string;
+}
+
 // Unmatched store data extracted from preview (for bulk create + enhanced prefill)
 interface UnmatchedStoreData {
   name: string;
@@ -124,7 +143,6 @@ const FIELD_LABELS: Record<string, string> = {
 };
 
 const TODAY = new Date().toISOString().slice(0, 10);
-const TODAY_AUTOSELECT_KEY = `smartroute_autoselect_${TODAY}`;
 
 function fmt(n: number, digits = 1) {
   return n.toLocaleString("ru-RU", { minimumFractionDigits: 0, maximumFractionDigits: digits });
@@ -150,6 +168,10 @@ export function OrdersPage() {
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // Selected delivery date — drives view / import / manual add / clear
+  const [date, setDate] = useState<string>(TODAY);
+  const AUTOSELECT_KEY = `smartroute_autoselect_${date}`;
+
   // State
   const [phase, setPhase] = useState<"idle" | "loading" | "preview" | "saving">("idle");
   const [preview, setPreview] = useState<PreviewResult | null>(null);
@@ -157,10 +179,10 @@ export function OrdersPage() {
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
   // ── Pending unmatched — persisted to localStorage so it survives tab navigation ──
-  const PENDING_KEY = `smartroute_pending_unmatched_${TODAY}`;
+  const PENDING_KEY = `smartroute_pending_unmatched_${date}`;
   const [pendingUnmatched, setPendingUnmatchedRaw] = useState<UnmatchedStoreData[]>(() => {
     try {
-      const raw = localStorage.getItem(PENDING_KEY);
+      const raw = localStorage.getItem(`smartroute_pending_unmatched_${TODAY}`);
       return raw ? JSON.parse(raw) : [];
     } catch { return []; }
   });
@@ -173,8 +195,8 @@ export function OrdersPage() {
   }, [PENDING_KEY]);
 
   // ── Bulk create server job ──────────────────────────────────────────────────
-  const BULK_JOB_KEY = `smartroute_bulk_job_${TODAY}`;
-  const [bulkJobId, setBulkJobIdRaw] = useState<string | null>(() => localStorage.getItem(BULK_JOB_KEY));
+  const BULK_JOB_KEY = `smartroute_bulk_job_${date}`;
+  const [bulkJobId, setBulkJobIdRaw] = useState<string | null>(() => localStorage.getItem(`smartroute_bulk_job_${TODAY}`));
   const setBulkJobId = (id: string | null) => {
     setBulkJobIdRaw(id);
     if (id) localStorage.setItem(BULK_JOB_KEY, id);
@@ -212,7 +234,7 @@ export function OrdersPage() {
           // Re-run rematch after job completes — MUST await before invalidating cache
           // so daily_orders refetch sees the updated store_id values in DB.
           try { await fetch("/api/orders/rematch", { method: "POST" }); } catch {}
-          await qc.invalidateQueries({ queryKey: ["daily_orders", TODAY] });
+          await qc.invalidateQueries({ queryKey: ["daily_orders", date] });
           qc.invalidateQueries({ queryKey: ["stores"] });
           setBulkJobId(null);
         }
@@ -221,16 +243,24 @@ export function OrdersPage() {
       }
     };
     poll();
-  }, [qc, setPendingUnmatched]);
+  }, [qc, setPendingUnmatched, date]);
 
-  // Resume polling on mount if there's a pending job
+  // Re-load date-scoped persisted state and resume polling whenever the date changes (also runs on mount)
   useEffect(() => {
-    if (bulkJobId) {
-      startPolling(bulkJobId);
-    }
+    try {
+      const raw = localStorage.getItem(`smartroute_pending_unmatched_${date}`);
+      setPendingUnmatchedRaw(raw ? JSON.parse(raw) : []);
+    } catch { setPendingUnmatchedRaw([]); }
+    const job = localStorage.getItem(`smartroute_bulk_job_${date}`);
+    setBulkJobIdRaw(job);
+    setBulkProgress(null);
+    setBulkResult(null);
+    setShowBulkResult(false);
+    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    if (job) startPolling(job);
     return () => { if (pollTimerRef.current) clearTimeout(pollTimerRef.current); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [date]);
 
   // Weight warning — null = unknown, true = has weight, false = no weight
   const [hasWeightData, setHasWeightData] = useState<boolean | null>(null);
@@ -262,11 +292,11 @@ export function OrdersPage() {
   // Current file name (for history record)
   const [currentFileName, setCurrentFileName] = useState("");
 
-  // Query: today's saved orders
+  // Query: saved orders for the selected date
   const { data: savedOrders, isLoading: ordersLoading } = useQuery<OrdersResponse>({
-    queryKey: ["daily_orders", TODAY],
+    queryKey: ["daily_orders", date],
     queryFn: async () => {
-      const res = await fetch(`/api/orders?date=${TODAY}`);
+      const res = await fetch(`/api/orders?date=${date}`);
       if (!res.ok) throw new Error("Ошибка загрузки заявок");
       return res.json();
     },
@@ -274,7 +304,217 @@ export function OrdersPage() {
 
   const hasOrders = (savedOrders?.total_count ?? 0) > 0;
 
+  // ── Manual orders builder: store combobox + inline editable rows ─────────────
+  const { data: storesData } = useListStores();
+  const stores = Array.isArray(storesData) ? storesData : [];
+
+  const [rows, setRows] = useState<EditableRow[]>([]);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
+  const [comboOpen, setComboOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [selectedToAdd, setSelectedToAdd] = useState<Set<number>>(new Set());
+
+  const saveTimers = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
+  const pendingSaves = useRef(0);
+  const savedHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Sync server orders → local editable rows when the order id-set changes
+  // (add / delete / date switch / Excel import). In-flight local edits are preserved by id.
+  const serverIds = (savedOrders?.orders ?? []).map((o) => o.id).join(",");
+  useEffect(() => {
+    if (!savedOrders) return;
+    setRows((prev) => {
+      const prevById = new Map(prev.map((r) => [r.id, r]));
+      return savedOrders.orders.map((o) => {
+        const existing = prevById.get(o.id);
+        if (existing) return existing;
+        return {
+          id: o.id,
+          store_id: o.store_id,
+          store_name_raw: o.store_name_raw,
+          store_name_db: o.store_name_db,
+          store_address: o.store_address,
+          order_number: o.order_number ?? "",
+          weight_kg: o.weight_kg ? String(o.weight_kg) : "",
+          volume_m3: o.volume_m3 ? String(o.volume_m3) : "",
+          amount_rub: o.amount_rub ? String(o.amount_rub) : "",
+          notes: o.notes ?? "",
+        };
+      });
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverIds, date]);
+
+  useEffect(() => {
+    return () => {
+      Object.values(saveTimers.current).forEach((t) => clearTimeout(t));
+      if (savedHideTimer.current) clearTimeout(savedHideTimer.current);
+    };
+  }, []);
+
+  const totals = useMemo(() => {
+    let w = 0, v = 0, a = 0;
+    for (const r of rows) {
+      w += Math.max(0, parseFloat(r.weight_kg) || 0);
+      v += Math.max(0, parseFloat(r.volume_m3) || 0);
+      a += Math.max(0, parseFloat(r.amount_rub) || 0);
+    }
+    return { count: rows.length, weight: w, volume: v, amount: a };
+  }, [rows]);
+
+  const addedStoreIds = useMemo(
+    () => new Set(rows.map((r) => r.store_id).filter((x): x is number => x !== null)),
+    [rows]
+  );
+
+  const markSaving = () => { pendingSaves.current += 1; setSaveStatus("saving"); };
+  const markSaved = () => {
+    pendingSaves.current = Math.max(0, pendingSaves.current - 1);
+    if (pendingSaves.current === 0) {
+      setSaveStatus("saved");
+      if (savedHideTimer.current) clearTimeout(savedHideTimer.current);
+      savedHideTimer.current = setTimeout(() => setSaveStatus("idle"), 2000);
+    }
+  };
+
+  const persistRow = useCallback(async (row: EditableRow) => {
+    markSaving();
+    try {
+      const res = await fetch(`/api/orders/${row.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          weight_kg: Math.max(0, parseFloat(row.weight_kg) || 0),
+          volume_m3: Math.max(0, parseFloat(row.volume_m3) || 0),
+          amount_rub: Math.max(0, parseFloat(row.amount_rub) || 0),
+          notes: row.notes,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || "Не удалось сохранить");
+      }
+      qc.invalidateQueries({ queryKey: ["daily_orders", date] });
+    } catch (e: any) {
+      toast({ title: "Ошибка сохранения", description: e.message, variant: "destructive" });
+    } finally {
+      markSaved();
+    }
+  }, [date, qc, toast]);
+
+  const scheduleSave = useCallback((row: EditableRow) => {
+    if (saveTimers.current[row.id]) clearTimeout(saveTimers.current[row.id]);
+    saveTimers.current[row.id] = setTimeout(() => {
+      persistRow(row);
+      delete saveTimers.current[row.id];
+    }, 600);
+  }, [persistRow]);
+
+  const updateField = (id: number, field: keyof EditableRow, value: string) => {
+    if ((field === "weight_kg" || field === "volume_m3" || field === "amount_rub") && parseFloat(value) < 0) {
+      toast({
+        title: "Отрицательное значение",
+        description: "Вес, объём и сумма не могут быть меньше нуля.",
+        variant: "destructive",
+      });
+      return;
+    }
+    setRows((prev) => {
+      const next = prev.map((r) => (r.id === id ? { ...r, [field]: value } : r));
+      const changed = next.find((r) => r.id === id);
+      if (changed) scheduleSave(changed);
+      return next;
+    });
+  };
+
+  const toggleSelectToAdd = (storeId: number) => {
+    setSelectedToAdd((prev) => {
+      const next = new Set(prev);
+      if (next.has(storeId)) next.delete(storeId);
+      else next.add(storeId);
+      return next;
+    });
+  };
+
+  const handleAddSelected = async () => {
+    const ids = [...selectedToAdd].filter((id) => !addedStoreIds.has(id));
+    if (ids.length === 0) return;
+    setAdding(true);
+    let created = 0;
+    let failed = 0;
+    try {
+      for (const storeId of ids) {
+        try {
+          const res = await fetch("/api/orders/manual", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ store_id: storeId, delivery_date: date }),
+          });
+          if (!res.ok) throw new Error();
+          created += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      await qc.invalidateQueries({ queryKey: ["daily_orders", date] });
+      setSelectedToAdd(new Set());
+      setComboOpen(false);
+      if (created > 0) {
+        toast({
+          title: failed === 0 ? "Магазины добавлены" : "Добавлено частично",
+          description: failed === 0
+            ? `Добавлено магазинов: ${created}`
+            : `Добавлено: ${created}, не удалось: ${failed}`,
+        });
+      } else {
+        toast({ title: "Ошибка", description: "Не удалось добавить магазины", variant: "destructive" });
+      }
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const handleDeleteRow = async (id: number) => {
+    if (saveTimers.current[id]) { clearTimeout(saveTimers.current[id]); delete saveTimers.current[id]; }
+    setRows((prev) => prev.filter((r) => r.id !== id));
+    try {
+      const res = await fetch(`/api/orders/${id}`, { method: "DELETE" });
+      if (!res.ok && res.status !== 204) throw new Error("Не удалось удалить");
+    } catch (e: any) {
+      toast({ title: "Ошибка", description: e.message, variant: "destructive" });
+    } finally {
+      qc.invalidateQueries({ queryKey: ["daily_orders", date] });
+    }
+  };
+
   // ── File upload & preview ──────────────────────────────────────────────────
+
+  const handleDownloadTemplate = useCallback(async () => {
+    try {
+      const response = await fetch("/api/orders/template");
+      if (!response.ok) throw new Error("Ошибка загрузки");
+      const json = await response.json();
+      const binaryStr = atob(json.data);
+      const bytes = new Uint8Array(binaryStr.length);
+      for (let i = 0; i < binaryStr.length; i++) {
+        bytes[i] = binaryStr.charCodeAt(i);
+      }
+      const blob = new Blob([bytes], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = json.filename ?? "smartroute_orders_template.xlsx";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("Ошибка скачивания шаблона:", error);
+      toast({ title: "Ошибка", description: "Не удалось скачать шаблон", variant: "destructive" });
+    }
+  }, [toast]);
 
   const handleFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -382,7 +622,7 @@ export function OrdersPage() {
       const res = await fetch("/api/orders/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ delivery_date: TODAY, rows, clear_existing: true, filename: currentFileName }),
+        body: JSON.stringify({ delivery_date: date, rows, clear_existing: true, filename: currentFileName }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -390,9 +630,9 @@ export function OrdersPage() {
       }
       const result = await res.json();
 
-      // FIX #4: Clear autoselect sessionStorage key so next visit to /route?from=orders
+      // Clear autoselect sessionStorage key so next visit to /route?from=orders
       // triggers a fresh autoselect with newly imported orders.
-      sessionStorage.removeItem(TODAY_AUTOSELECT_KEY);
+      sessionStorage.removeItem(AUTOSELECT_KEY);
 
       // Track whether weight data was present in this import
       setHasWeightData(result.has_weight ?? true);
@@ -400,7 +640,7 @@ export function OrdersPage() {
       // Save unmatched data for bulk-create / enhanced prefill in idle view
       setPendingUnmatched(Array.from(unmatchedMap.values()));
 
-      await qc.invalidateQueries({ queryKey: ["daily_orders", TODAY] });
+      await qc.invalidateQueries({ queryKey: ["daily_orders", date] });
       await qc.invalidateQueries({ queryKey: ["import_history"] });
       toast({
         title: "Заявки загружены",
@@ -419,9 +659,9 @@ export function OrdersPage() {
 
   const handleClear = async () => {
     try {
-      const res = await fetch(`/api/orders?date=${TODAY}`, { method: "DELETE" });
+      const res = await fetch(`/api/orders?date=${date}`, { method: "DELETE" });
       if (!res.ok) throw new Error();
-      await qc.invalidateQueries({ queryKey: ["daily_orders", TODAY] });
+      await qc.invalidateQueries({ queryKey: ["daily_orders", date] });
       // Also clear pending unmatched and any running bulk job
       setPendingUnmatched([]);
       setBulkJobId(null);
@@ -481,7 +721,7 @@ export function OrdersPage() {
             time_window_to: s.time_to || "18:00",
             unload_minutes: parseInt(s.unload_minutes) || 15,
           })),
-          delivery_date: TODAY,
+          delivery_date: date,
         }),
       });
       if (!res.ok) {
@@ -491,7 +731,7 @@ export function OrdersPage() {
       const { job_id } = await res.json();
       setBulkJobId(job_id);
       startPolling(job_id);
-      sessionStorage.removeItem(TODAY_AUTOSELECT_KEY);
+      sessionStorage.removeItem(AUTOSELECT_KEY);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Неизвестная ошибка";
       toast({ title: "Ошибка запуска", description: msg, variant: "destructive" });
@@ -516,24 +756,37 @@ export function OrdersPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Заявки на день</h1>
           <p className="text-muted-foreground">
-            Импорт весов и объёмов из Excel (1С, Антор или любой системы) — используется при построении маршрутов
+            Создавайте заявки вручную или импортируйте из Excel (1С, Антор, Google Sheets) — используются при построении маршрутов
           </p>
         </div>
-        {hasOrders && phase === "idle" && (
-          <Button asChild className="gap-2 shrink-0">
-            <Link
-              href="/route?from=orders"
-              onClick={() => sessionStorage.removeItem(TODAY_AUTOSELECT_KEY)}
-            >
-              <ArrowRight className="w-4 h-4" />
-              К маршруту
-            </Link>
-          </Button>
-        )}
+        <div className="flex items-center gap-3 shrink-0">
+          <div className="flex items-center gap-2">
+            <CalendarDays className="w-4 h-4 text-muted-foreground" />
+            <label className="text-sm text-muted-foreground" htmlFor="order-date">Дата</label>
+            <Input
+              id="order-date"
+              type="date"
+              value={date}
+              onChange={(e) => setDate(e.target.value || TODAY)}
+              className="w-[160px]"
+            />
+          </div>
+          {hasOrders && phase === "idle" && (
+            <Button asChild className="gap-2">
+              <Link
+                href={`/route?from=orders&date=${date}`}
+                onClick={() => sessionStorage.removeItem(AUTOSELECT_KEY)}
+              >
+                <ArrowRight className="w-4 h-4" />
+                К маршруту
+              </Link>
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* ── No weight data warning ── */}
@@ -547,71 +800,281 @@ export function OrdersPage() {
         </Alert>
       )}
 
-      {/* ── Summary banner (when orders loaded) ── */}
-      {hasOrders && phase === "idle" && savedOrders && (
-        <Card className="border-emerald-200 bg-emerald-50">
-          <CardContent className="pt-5">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center">
-                  <CheckCircle className="w-5 h-5 text-emerald-600" />
-                </div>
-                <div>
-                  <p className="font-semibold text-emerald-900">
-                    Заявки загружены на {savedOrders.delivery_date}
-                  </p>
-                  <p className="text-sm text-emerald-700">
-                    {savedOrders.total_count} точек ·{" "}
-                    {savedOrders.total_weight_kg > 0 && <><Weight className="inline w-3.5 h-3.5 mx-0.5" />{fmt(savedOrders.total_weight_kg)} кг · </>}
-                    {savedOrders.total_volume_m3 > 0 && <><Box className="inline w-3.5 h-3.5 mx-0.5" />{fmt(savedOrders.total_volume_m3, 2)} м³ · </>}
-                    {savedOrders.total_amount_rub > 0 && <>{fmt(savedOrders.total_amount_rub, 0)} ₽</>}
-                  </p>
-                </div>
-              </div>
-              <div className="flex gap-2 shrink-0">
-                <Button variant="outline" size="sm" className="gap-1.5" onClick={() => fileRef.current?.click()}>
-                  <RotateCcw className="w-3.5 h-3.5" />
-                  Перезагрузить
+      {/* ── Daily orders builder (idle phase) ── */}
+      {phase === "idle" && (
+        <>
+          {/* Toolbar: manual add + Excel import + clear + save status */}
+          <div className="flex flex-wrap items-center gap-2">
+            <Popover
+              open={comboOpen}
+              onOpenChange={(open) => {
+                setComboOpen(open);
+                if (!open) setSelectedToAdd(new Set());
+              }}
+            >
+              <PopoverTrigger asChild>
+                <Button disabled={adding} className="gap-2">
+                  {adding ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                  Добавить магазины
                 </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="gap-1.5 text-destructive hover:text-destructive"
-                  onClick={() => setShowClearConfirm(true)}
+              </PopoverTrigger>
+              <PopoverContent className="p-0 w-[420px]" align="start">
+                <Command
+                  filter={(value, search) =>
+                    value.toLowerCase().includes(search.toLowerCase()) ? 1 : 0
+                  }
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  Очистить
-                </Button>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      )}
+                  <CommandInput placeholder="Поиск: название, адрес, город, телефон, клиент…" />
+                  <CommandList>
+                    <CommandEmpty>Магазины не найдены.</CommandEmpty>
+                    <CommandGroup>
+                      {stores.map((s) => {
+                        const sa = s as any;
+                        const already = addedStoreIds.has(s.id);
+                        const checked = selectedToAdd.has(s.id);
+                        const searchValue = [s.name, s.address, sa.city, sa.phone, sa.client]
+                          .filter(Boolean)
+                          .join(" ");
+                        return (
+                          <CommandItem
+                            key={s.id}
+                            value={searchValue}
+                            disabled={already}
+                            onSelect={() => toggleSelectToAdd(s.id)}
+                            className="flex items-start justify-between gap-2"
+                          >
+                            <div className="flex items-start gap-2 min-w-0">
+                              <span
+                                className={`mt-0.5 w-4 h-4 shrink-0 rounded border flex items-center justify-center ${
+                                  checked ? "bg-primary border-primary text-primary-foreground" : "border-input"
+                                }`}
+                              >
+                                {checked && <Check className="w-3 h-3" />}
+                              </span>
+                              <div className="min-w-0">
+                                <div className="font-medium truncate">{s.name}</div>
+                                <div className="text-xs text-muted-foreground truncate">
+                                  {s.address || "—"}
+                                  {sa.phone ? ` · ${sa.phone}` : ""}
+                                  {sa.client ? ` · ${sa.client}` : ""}
+                                </div>
+                              </div>
+                            </div>
+                            {already && (
+                              <Badge variant="secondary" className="shrink-0">уже добавлен</Badge>
+                            )}
+                          </CommandItem>
+                        );
+                      })}
+                    </CommandGroup>
+                  </CommandList>
+                </Command>
+                <div className="border-t p-2">
+                  <Button
+                    className="w-full gap-2"
+                    disabled={adding || selectedToAdd.size === 0}
+                    onClick={handleAddSelected}
+                  >
+                    {adding ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                    {selectedToAdd.size > 0
+                      ? `Добавить выбранное (${selectedToAdd.size})`
+                      : "Добавить выбранное"}
+                  </Button>
+                </div>
+              </PopoverContent>
+            </Popover>
 
-      {/* ── Empty state / Upload area ── */}
-      {!hasOrders && phase === "idle" && (
-        <Card className="border-dashed border-2">
-          <CardContent className="flex flex-col items-center justify-center py-16 gap-5">
-            <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center">
-              <FileSpreadsheet className="w-8 h-8 text-muted-foreground" />
-            </div>
-            <div className="text-center max-w-sm">
-              <h3 className="font-semibold text-lg mb-1">Загрузите файл заявок</h3>
-              <p className="text-sm text-muted-foreground">
-                Excel-файл из 1С, Антор, Google Sheets или любой другой системы.
-                Система автоматически определит колонки и сопоставит с вашими магазинами.
-              </p>
-            </div>
-            <Button size="lg" className="gap-2" onClick={() => fileRef.current?.click()}>
-              <Upload className="w-5 h-5" />
-              Выбрать файл Excel
+            <Button variant="outline" className="gap-2" onClick={() => fileRef.current?.click()}>
+              <Upload className="w-4 h-4" />
+              Загрузить из Excel
             </Button>
-            <p className="text-xs text-muted-foreground">Поддерживаются .xlsx и .xls · Макс. 20 МБ</p>
-          </CardContent>
-        </Card>
+
+            <Button variant="outline" className="gap-2" onClick={handleDownloadTemplate}>
+              <Download className="w-4 h-4" />
+              Шаблон Excel
+            </Button>
+
+            {hasOrders && (
+              <Button
+                variant="outline"
+                className="gap-2 text-destructive hover:text-destructive"
+                onClick={() => setShowClearConfirm(true)}
+              >
+                <Trash2 className="w-4 h-4" />
+                Очистить день
+              </Button>
+            )}
+
+            <div className="flex-1" />
+
+            <div className="min-w-[110px] text-right text-sm">
+              {saveStatus === "saving" && (
+                <span className="inline-flex items-center gap-1 text-muted-foreground">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Сохранение…
+                </span>
+              )}
+              {saveStatus === "saved" && (
+                <span className="inline-flex items-center gap-1 text-emerald-600">
+                  <Check className="w-3.5 h-3.5" /> Сохранено
+                </span>
+              )}
+            </div>
+          </div>
+
+          {stores.length === 0 && (
+            <Alert>
+              <AlertTriangle className="w-4 h-4" />
+              <AlertDescription>
+                Сначала добавьте магазины в разделе «Магазины» — затем их можно выбрать здесь или сопоставить при импорте из Excel.
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {/* Live totals */}
+          {rows.length > 0 && (
+            <Card className="border-primary/20">
+              <CardContent className="py-3">
+                <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+                  <div className="flex items-center gap-2">
+                    <Package className="w-4 h-4 text-primary" />
+                    <span className="text-sm text-muted-foreground">Точек:</span>
+                    <span className="font-semibold tabular-nums">{totals.count}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Weight className="w-4 h-4 text-amber-600" />
+                    <span className="text-sm text-muted-foreground">Вес:</span>
+                    <span className="font-semibold tabular-nums">{fmt(totals.weight)} кг</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Box className="w-4 h-4 text-sky-600" />
+                    <span className="text-sm text-muted-foreground">Объём:</span>
+                    <span className="font-semibold tabular-nums">{fmt(totals.volume, 2)} м³</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Banknote className="w-4 h-4 text-emerald-600" />
+                    <span className="text-sm text-muted-foreground">Сумма:</span>
+                    <span className="font-semibold tabular-nums">{fmt(totals.amount, 0)} ₽</span>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Editable table OR empty state */}
+          {ordersLoading ? (
+            <Card>
+              <CardContent className="flex items-center justify-center py-16 text-muted-foreground">
+                <Loader2 className="w-5 h-5 animate-spin mr-2" /> Загрузка заявок…
+              </CardContent>
+            </Card>
+          ) : rows.length === 0 ? (
+            <Card className="border-dashed border-2">
+              <CardContent className="flex flex-col items-center justify-center py-16 gap-5">
+                <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center">
+                  <ClipboardList className="w-8 h-8 text-muted-foreground" />
+                </div>
+                <div className="text-center max-w-md">
+                  <h3 className="font-semibold text-lg mb-1">Заявок на {date} пока нет</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Добавьте магазины вручную кнопкой «Добавить магазин» или загрузите файл Excel из 1С,
+                    Антор, Google Sheets — система сама определит колонки и сопоставит с вашими магазинами.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2 justify-center">
+                  <Button className="gap-2" onClick={() => setComboOpen(true)}>
+                    <Plus className="w-4 h-4" /> Добавить магазин
+                  </Button>
+                  <Button variant="outline" className="gap-2" onClick={() => fileRef.current?.click()}>
+                    <Upload className="w-4 h-4" /> Загрузить из Excel
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">Excel: .xlsx и .xls · Макс. 20 МБ</p>
+              </CardContent>
+            </Card>
+          ) : (
+            <Card>
+              <CardContent className="p-0">
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="min-w-[220px]">Магазин</TableHead>
+                        <TableHead className="w-[130px]">Вес, кг</TableHead>
+                        <TableHead className="w-[130px]">Объём, м³</TableHead>
+                        <TableHead className="w-[140px]">Сумма, ₽</TableHead>
+                        <TableHead className="min-w-[180px]">Комментарий</TableHead>
+                        <TableHead className="w-[52px]" />
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {rows.map((r) => (
+                        <TableRow key={r.id}>
+                          <TableCell className="align-top">
+                            <div className="font-medium">{r.store_name_db || r.store_name_raw}</div>
+                            <div className="text-xs text-muted-foreground">
+                              {r.order_number ? `№ ${r.order_number}` : ""}
+                              {r.order_number && r.store_address ? " · " : ""}
+                              {r.store_address || (!r.order_number && r.store_id === null ? "не привязан к магазину" : "")}
+                            </div>
+                            {r.store_id === null && (
+                              <Badge variant="outline" className="mt-1 text-amber-600 border-amber-300">
+                                нет магазина
+                              </Badge>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <Input
+                              type="number" min="0" step="0.1" inputMode="decimal"
+                              value={r.weight_kg}
+                              onChange={(e) => updateField(r.id, "weight_kg", e.target.value)}
+                              placeholder="0"
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <Input
+                              type="number" min="0" step="0.01" inputMode="decimal"
+                              value={r.volume_m3}
+                              onChange={(e) => updateField(r.id, "volume_m3", e.target.value)}
+                              placeholder="0"
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <Input
+                              type="number" min="0" step="1" inputMode="decimal"
+                              value={r.amount_rub}
+                              onChange={(e) => updateField(r.id, "amount_rub", e.target.value)}
+                              placeholder="0"
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <Input
+                              value={r.notes}
+                              onChange={(e) => updateField(r.id, "notes", e.target.value)}
+                              placeholder="—"
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <Button
+                              variant="ghost" size="icon"
+                              onClick={() => handleDeleteRow(r.id)}
+                              className="text-muted-foreground hover:text-destructive"
+                              title="Удалить заявку"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+        </>
       )}
 
-      {/* ── Loading state ── */}
+      {/* ── Loading state (file analysis) ── */}
       {phase === "loading" && (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-16 gap-4">
@@ -696,7 +1159,7 @@ export function OrdersPage() {
             </CardContent>
           </Card>
 
-          {/* Preview table — ALL columns with horizontal scroll (FIX #3) */}
+          {/* Preview table — ALL columns with horizontal scroll */}
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-base">Предпросмотр данных</CardTitle>
@@ -771,77 +1234,7 @@ export function OrdersPage() {
         </Card>
       )}
 
-      {/* ── Saved orders table ── */}
-      {hasOrders && phase === "idle" && savedOrders && savedOrders.orders.length > 0 && (
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-base">Заявки на {savedOrders.delivery_date}</CardTitle>
-            <CardDescription>{savedOrders.total_count} точек · Используются автоматически при построении маршрутов на сегодня</CardDescription>
-          </CardHeader>
-          <CardContent className="p-0">
-            <ScrollArea className="h-80">
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead className="sticky top-0 bg-muted/80 border-b">
-                    <tr>
-                      <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Точка</th>
-                      <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Заявка №</th>
-                      <th className="text-right px-4 py-2.5 font-medium text-muted-foreground">Вес, кг</th>
-                      <th className="text-right px-4 py-2.5 font-medium text-muted-foreground">Объём, м³</th>
-                      <th className="text-right px-4 py-2.5 font-medium text-muted-foreground">Сумма, ₽</th>
-                      <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Статус</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {savedOrders.orders.map(o => (
-                      <tr key={o.id} className="border-b hover:bg-muted/30">
-                        <td className="px-4 py-2.5">
-                          <p className="font-medium">{o.store_name_db ?? o.store_name_raw}</p>
-                          {o.store_name_db && o.store_name_db !== o.store_name_raw && (
-                            <p className="text-xs text-muted-foreground">{o.store_name_raw}</p>
-                          )}
-                        </td>
-                        <td className="px-4 py-2.5 text-muted-foreground">{o.order_number || "—"}</td>
-                        <td className="px-4 py-2.5 text-right tabular-nums">{o.weight_kg > 0 ? fmt(o.weight_kg) : "—"}</td>
-                        <td className="px-4 py-2.5 text-right tabular-nums">{o.volume_m3 > 0 ? fmt(o.volume_m3, 2) : "—"}</td>
-                        <td className="px-4 py-2.5 text-right tabular-nums">{o.amount_rub > 0 ? fmt(o.amount_rub, 0) : "—"}</td>
-                        <td className="px-4 py-2.5">
-                          {o.store_id ? (
-                            <Badge variant="outline" className="text-emerald-700 border-emerald-200 bg-emerald-50 text-xs">
-                              <CheckCircle className="w-3 h-3 mr-1" />Сопоставлено
-                            </Badge>
-                          ) : (
-                            <Badge variant="outline" className="text-amber-700 border-amber-200 bg-amber-50 text-xs">
-                              <AlertTriangle className="w-3 h-3 mr-1" />Без магазина
-                            </Badge>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                  <tfoot className="border-t bg-muted/40">
-                    <tr>
-                      <td colSpan={2} className="px-4 py-2.5 font-medium text-sm">Итого</td>
-                      <td className="px-4 py-2.5 text-right font-medium tabular-nums">
-                        {savedOrders.total_weight_kg > 0 ? fmt(savedOrders.total_weight_kg) : "—"}
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-medium tabular-nums">
-                        {savedOrders.total_volume_m3 > 0 ? fmt(savedOrders.total_volume_m3, 2) : "—"}
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-medium tabular-nums">
-                        {savedOrders.total_amount_rub > 0 ? fmt(savedOrders.total_amount_rub, 0) : "—"}
-                      </td>
-                      <td />
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
-            </ScrollArea>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* ── Unmatched stores card — with bulk-create + enhanced prefill (FIX #1, #2) ── */}
+      {/* ── Unmatched stores card — bulk-create + enhanced prefill ── */}
       {hasOrders && phase === "idle" && savedOrders && (() => {
         // Merge pending data with actual unmatched orders from DB
         const unmatchedOrders = savedOrders.orders.filter(o => !o.store_id);
@@ -984,15 +1377,6 @@ export function OrdersPage() {
           </Card>
         );
       })()}
-
-      {/* Loading saved orders */}
-      {ordersLoading && (
-        <Card>
-          <CardContent className="flex justify-center py-8">
-            <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
-          </CardContent>
-        </Card>
-      )}
 
       {/* Import history */}
       {importHistory && importHistory.imports.length > 0 && (
@@ -1230,7 +1614,7 @@ export function OrdersPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>Удалить заявки?</AlertDialogTitle>
             <AlertDialogDescription>
-              Все заявки на {TODAY} будут удалены. Построенные маршруты не затронуты.
+              Все заявки на {date} будут удалены. Построенные маршруты не затронуты.
               Это действие нельзя отменить.
             </AlertDialogDescription>
           </AlertDialogHeader>

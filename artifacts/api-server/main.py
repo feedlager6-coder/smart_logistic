@@ -1815,6 +1815,8 @@ def init_db():
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE")
     cur.execute("ALTER TABLE stores ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id)")
     cur.execute("ALTER TABLE stores ADD COLUMN IF NOT EXISTS city TEXT DEFAULT ''")
+    cur.execute("ALTER TABLE stores ADD COLUMN IF NOT EXISTS phone TEXT DEFAULT ''")
+    cur.execute("ALTER TABLE stores ADD COLUMN IF NOT EXISTS client TEXT DEFAULT ''")
     # ── Import history ─────────────────────────────────────────────────────────
     cur.execute("""
         CREATE TABLE IF NOT EXISTS order_import_history (
@@ -2739,6 +2741,8 @@ def store_row_to_dict(row) -> dict:
         "name": row["name"],
         "address": row["address"],
         "city": row.get("city") or "",
+        "phone": row.get("phone") or "",
+        "client": row.get("client") or "",
         "lat": row["lat"],
         "lon": row["lon"],
         "map_url": row.get("map_url"),
@@ -2756,6 +2760,8 @@ class StoreInput(BaseModel):
     name: str
     address: Optional[str] = None
     city: Optional[str] = None
+    phone: Optional[str] = None
+    client: Optional[str] = None
     yandex_url: Optional[str] = None
     lat: Optional[float] = None
     lon: Optional[float] = None
@@ -2769,6 +2775,8 @@ class StoreUpdate(BaseModel):
     name: Optional[str] = None
     address: Optional[str] = None
     city: Optional[str] = None
+    phone: Optional[str] = None
+    client: Optional[str] = None
     yandex_url: Optional[str] = None
     lat: Optional[float] = None
     lon: Optional[float] = None
@@ -3274,9 +3282,10 @@ def create_store(request: Request, body: StoreInput, force: bool = Query(False, 
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        """INSERT INTO stores (name, address, city, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
-        (body.name.strip(), address, city, lat, lon, map_url,
+        """INSERT INTO stores (name, address, city, phone, client, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+        (body.name.strip(), address, city, (body.phone or "").strip(), (body.client or "").strip(),
+         lat, lon, map_url,
          status, body.time_window_from, body.time_window_to, body.unload_minutes, uid)
     )
     row = cur.fetchone()
@@ -3322,9 +3331,11 @@ def download_stores_template():
         "Ссылка Яндекс",    # B — recommended (coords parsed automatically)
         "Адрес",            # C — if no Yandex link
         "Город",            # D — optional, prepended to address
-        "Разгрузка мин",    # E — optional
-        "Время с",          # F — optional
-        "Время до",         # G — optional
+        "Телефон",          # E — optional
+        "Клиент",           # F — optional
+        "Разгрузка мин",    # G — optional
+        "Время с",          # H — optional
+        "Время до",         # I — optional
     ]
     ws.append(headers)
 
@@ -3341,6 +3352,8 @@ def download_stores_template():
         "https://yandex.ru/maps/?whatshere[point]=47.5046,42.9849",
         "",
         "",
+        "+7 928 000-00-00",
+        "ООО Каспий-Торг",
         15, "09:00", "18:00",
     ])
     # Example row 2: with address + city
@@ -3349,10 +3362,12 @@ def download_stores_template():
         "",
         "ул. Ленина 15",
         "Махачкала",
+        "+7 928 111-11-11",
+        "ИП Магомедов",
         20, "10:00", "17:00",
     ])
 
-    col_widths = [28, 52, 36, 16, 16, 12, 12]
+    col_widths = [28, 52, 36, 16, 18, 22, 16, 12, 12]
     for i, width in enumerate(col_widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = width
 
@@ -3362,6 +3377,8 @@ def download_stores_template():
         "← Ссылка из Яндекс: зажми место → Поделиться",
         "← Адрес если нет ссылки",
         "← Город",
+        "← Телефон (необязательно)",
+        "← Клиент/контрагент (необязательно)",
         "← Минут (число)",
         "← ЧЧ:ММ",
         "← ЧЧ:ММ",
@@ -3393,7 +3410,7 @@ def export_stores(request: Request):
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        "SELECT name, map_url, address, city, lat, lon, unload_minutes, time_window_from, time_window_to "
+        "SELECT name, map_url, address, city, phone, client, lat, lon, unload_minutes, time_window_from, time_window_to "
         "FROM stores WHERE owner_id = %s ORDER BY id",
         (uid,),
     )
@@ -3414,6 +3431,8 @@ def export_stores(request: Request):
         "Ссылка Яндекс",
         "Адрес",
         "Город",
+        "Телефон",
+        "Клиент",
         "Разгрузка мин",
         "Время с",
         "Время до",
@@ -3433,12 +3452,14 @@ def export_stores(request: Request):
             row.get("map_url") or "",
             row.get("address") or "",
             row.get("city") or "",
+            row.get("phone") or "",
+            row.get("client") or "",
             row.get("unload_minutes") or 15,
             row.get("time_window_from") or "09:00",
             row.get("time_window_to") or "18:00",
         ])
 
-    col_widths = [28, 52, 36, 16, 16, 12, 12]
+    col_widths = [28, 52, 36, 16, 18, 22, 16, 12, 12]
     for i, width in enumerate(col_widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = width
 
@@ -3481,6 +3502,8 @@ async def import_stores(request: Request, file: UploadFile = File(...)):
     c_yandex  = _col(["ссылка яндекс", "яндекс", "yandex", "ссылка"])
     c_address = _col(["адрес", "address"])
     c_city    = _col(["город", "city"])
+    c_phone   = _col(["телефон", "phone", "тел"])
+    c_client  = _col(["клиент", "client", "контрагент"])
     c_lat     = _col(["широта", "lat", "latitude"])
     c_lon     = _col(["долгота", "lon", "longitude"])
     c_mapurl  = _col(["map_url", "ссылка на карт"])
@@ -3517,6 +3540,8 @@ async def import_stores(request: Request, file: UploadFile = File(...)):
         name       = str(_get(row, c_name, "")).strip()
         yandex_url = str(_get(row, c_yandex, "")).strip() or None
         city       = str(_get(row, c_city, "")).strip()
+        phone      = str(_get(row, c_phone, "")).strip()
+        client     = str(_get(row, c_client, "")).strip()
         raw_addr   = str(_get(row, c_address, "")).strip()
 
         # Combine city + address: city goes FIRST so address.split(",")[0] == city
@@ -3614,9 +3639,9 @@ async def import_stores(request: Request, file: UploadFile = File(...)):
             conn = get_db()
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cur.execute(
-                """INSERT INTO stores (name, address, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
-                (name, address, lat, lon, final_map_url, status, tw_from, tw_to, unload, owner_id)
+                """INSERT INTO stores (name, address, city, phone, client, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+                (name, address, city, phone, client, lat, lon, final_map_url, status, tw_from, tw_to, unload, owner_id)
             )
             db_row = cur.fetchone()
             conn.commit()
@@ -4274,6 +4299,10 @@ def update_store(id: int, body: StoreUpdate, request: Request):
                 fields["geocode_status"] = "found"
     if body.city is not None:
         fields["city"] = body.city.strip()
+    if body.phone is not None:
+        fields["phone"] = body.phone.strip()
+    if body.client is not None:
+        fields["client"] = body.client.strip()
     if body.lat is not None:
         fields["lat"] = body.lat
     if body.lon is not None:
@@ -4782,6 +4811,68 @@ def _safe_float(val) -> float:
         return float(str(val).replace(",", ".").replace(" ", "").replace("\u00a0", "").strip())
     except (ValueError, TypeError):
         return 0.0
+
+
+@app.get("/api/orders/template")
+def download_orders_template():
+    """Excel template for daily orders (заявки на день). Mirrors stores template UX."""
+    if not OPENPYXL_AVAILABLE:
+        raise HTTPException(status_code=500, detail="openpyxl not installed")
+
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Заявки"
+
+    headers = [
+        "Магазин",          # A — required, matched against catalog
+        "Номер заявки",     # B — optional
+        "Вес, кг",          # C — optional
+        "Объём, м3",        # D — optional
+        "Сумма, руб",       # E — optional
+        "Комментарий",      # F — optional
+    ]
+    ws.append(headers)
+
+    header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
+    for col_num in range(1, len(headers) + 1):
+        cell = ws.cell(row=1, column=col_num)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    ws.append(["Супермаркет Каспий", "ЗАК-001", 120, 0.8, 45000, "Хрупкий груз"])
+    ws.append(["Магазин Горный", "ЗАК-002", 60, 0.4, 18000, ""])
+
+    col_widths = [28, 16, 12, 14, 14, 32]
+    for i, width in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = width
+
+    note_row = [
+        "← Название магазина (как в разделе «Магазины»)",
+        "← Номер заявки (необязательно)",
+        "← Вес груза в кг (число)",
+        "← Объём в м3 (число)",
+        "← Сумма заказа в руб (число)",
+        "← Комментарий для водителя (необязательно)",
+    ]
+    ws.append(note_row)
+    for col_num in range(1, len(note_row) + 1):
+        cell = ws.cell(row=ws.max_row, column=col_num)
+        cell.font = Font(italic=True, color="888888")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    content = buf.read()
+
+    import base64
+    return {
+        "data": base64.b64encode(content).decode("ascii"),
+        "filename": "smartroute_orders_template.xlsx",
+    }
 
 
 class OrderImportRow(BaseModel):

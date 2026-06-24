@@ -541,6 +541,15 @@ components:
           type: string
         address:
           type: string
+        city:
+          type: string
+          description: City name
+        phone:
+          type: string
+          description: Contact phone
+        client:
+          type: string
+          description: Client / counterparty name
         lat:
           type: ["number", "null"]
         lon:
@@ -579,6 +588,12 @@ components:
         city:
           type: ["string", "null"]
           description: City name (prepended to address for geocoding)
+        phone:
+          type: ["string", "null"]
+          description: Contact phone
+        client:
+          type: ["string", "null"]
+          description: Client / counterparty name
         yandex_url:
           type: ["string", "null"]
           description: Yandex Maps link — coords extracted automatically
@@ -608,6 +623,10 @@ components:
         address:
           type: string
         city:
+          type: ["string", "null"]
+        phone:
+          type: ["string", "null"]
+        client:
           type: ["string", "null"]
         yandex_url:
           type: ["string", "null"]

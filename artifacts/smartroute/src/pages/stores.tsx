@@ -78,6 +78,8 @@ export function StoresPage() {
   const [yandexUrl, setYandexUrl] = useState("");
   const [address, setAddress] = useState("");
   const [city, setCity] = useState("");
+  const [phone, setPhone] = useState("");
+  const [client, setClient] = useState("");
   const [timeFrom, setTimeFrom] = useState("09:00");
   const [timeTo, setTimeTo] = useState("18:00");
   const [unloadMinutes, setUnloadMinutes] = useState("15");
@@ -105,6 +107,9 @@ export function StoresPage() {
   const [editName, setEditName] = useState("");
   const [editAddress, setEditAddress] = useState("");
   const [editYandexUrl, setEditYandexUrl] = useState("");
+  const [editCity, setEditCity] = useState("");
+  const [editPhone, setEditPhone] = useState("");
+  const [editClient, setEditClient] = useState("");
   const [editTimeFrom, setEditTimeFrom] = useState("09:00");
   const [editTimeTo, setEditTimeTo] = useState("18:00");
   const [editUnload, setEditUnload] = useState("15");
@@ -125,6 +130,8 @@ export function StoresPage() {
     setYandexUrl("");
     setAddress("");
     setCity("");
+    setPhone("");
+    setClient("");
     setTimeFrom("09:00");
     setTimeTo("18:00");
     setUnloadMinutes("15");
@@ -142,6 +149,8 @@ export function StoresPage() {
       yandex_url: yandexUrl.trim() || null,
       address: address.trim() || null,
       city: city.trim() || null,
+      phone: phone.trim() || null,
+      client: client.trim() || null,
       time_window_from: timeFrom,
       time_window_to: timeTo,
       unload_minutes: parseInt(unloadMinutes) || 15,
@@ -409,6 +418,9 @@ export function StoresPage() {
     setEditName(store.name);
     setEditAddress(store.address ?? "");
     setEditYandexUrl(store.map_url ?? "");
+    setEditCity((store as any).city ?? "");
+    setEditPhone((store as any).phone ?? "");
+    setEditClient((store as any).client ?? "");
     setEditTimeFrom(store.time_window_from);
     setEditTimeTo(store.time_window_to);
     setEditUnload(String(store.unload_minutes));
@@ -428,10 +440,13 @@ export function StoresPage() {
           name: editName.trim(),
           address: editAddress.trim() || undefined,
           yandex_url: editYandexUrl.trim() || undefined,
+          city: editCity.trim(),
+          phone: editPhone.trim(),
+          client: editClient.trim(),
           time_window_from: editTimeFrom,
           time_window_to: editTimeTo,
           unload_minutes: parseInt(editUnload) || 15,
-        },
+        } as any,
       },
       {
         onSuccess: () => {
@@ -449,9 +464,12 @@ export function StoresPage() {
   const noCoordsCount = stores.filter((s) => s.lat == null || s.lon == null).length;
 
   const filteredStores = stores.filter((s) => {
+    const q = search.toLowerCase();
     const matchesSearch =
-      s.name.toLowerCase().includes(search.toLowerCase()) ||
-      (s.address ?? "").toLowerCase().includes(search.toLowerCase());
+      s.name.toLowerCase().includes(q) ||
+      (s.address ?? "").toLowerCase().includes(q) ||
+      ((s as any).phone ?? "").toLowerCase().includes(q) ||
+      ((s as any).client ?? "").toLowerCase().includes(q);
     const matchesCoords = !showNoCoords || s.lat == null || s.lon == null;
     return matchesSearch && matchesCoords;
   });
@@ -677,6 +695,22 @@ export function StoresPage() {
                       placeholder="Москва"
                     />
                     <p className="text-xs text-muted-foreground">Добавляется к адресу при геокодинге</p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Телефон</Label>
+                    <Input
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                      placeholder="+7 928 000-00-00"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Клиент</Label>
+                    <Input
+                      value={client}
+                      onChange={(e) => setClient(e.target.value)}
+                      placeholder="ООО Каспий-Торг"
+                    />
                   </div>
                   <div className="space-y-2">
                     <Label>Разгрузка (мин)</Label>
@@ -1003,6 +1037,20 @@ export function StoresPage() {
                 onChange={(e) => setEditAddress(e.target.value)}
                 placeholder="Махачкала, ул. Ленина 5"
               />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Город</Label>
+                <Input value={editCity} onChange={(e) => setEditCity(e.target.value)} placeholder="Махачкала" />
+              </div>
+              <div className="space-y-2">
+                <Label>Телефон</Label>
+                <Input value={editPhone} onChange={(e) => setEditPhone(e.target.value)} placeholder="+7 928 000-00-00" />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Клиент</Label>
+              <Input value={editClient} onChange={(e) => setEditClient(e.target.value)} placeholder="ООО Каспий-Торг" />
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">

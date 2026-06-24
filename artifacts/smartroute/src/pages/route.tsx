@@ -60,6 +60,7 @@ export function RoutePage() {
   const [, setLocation] = useLocation();
   const urlSearch = useSearch();
   const fromOrders = new URLSearchParams(urlSearch).get("from") === "orders";
+  const dateParam = new URLSearchParams(urlSearch).get("date");
 
   const [search, setSearch] = useState("");
   const [cityFilter, setCityFilter] = useState("all");
@@ -83,8 +84,9 @@ export function RoutePage() {
   const [bulkVehicleCount, setBulkVehicleCount] = useState<string>("5");
   const [showVehicleDetails, setShowVehicleDetails] = useState(false);
 
-  // Today's orders (заявки) — for banner showing weight data, auto-select, per-store weights
-  const todayDate = new Date().toISOString().slice(0, 10);
+  // Today's orders (заявки) — for banner showing weight data, auto-select, per-store weights.
+  // When navigating from the manual orders builder, a ?date= param can target a specific day.
+  const todayDate = dateParam || new Date().toISOString().slice(0, 10);
   const { data: todayOrders } = useQuery<{
     total_count: number;
     total_weight_kg: number;
@@ -103,7 +105,7 @@ export function RoutePage() {
   // Trigger: URL contains ?from=orders (set by "К маршруту" button in orders.tsx).
   // Waits until both stores and orders data are available, then fires exactly once
   // per browser session (survives SPA remounts via sessionStorage flag).
-  const TODAY_KEY = `smartroute_autoselect_${new Date().toISOString().slice(0, 10)}`;
+  const TODAY_KEY = `smartroute_autoselect_${todayDate}`;
   const autoSelectedRef = useRef(false);
   useEffect(() => {
     if (!fromOrders) return;
@@ -198,7 +200,7 @@ export function RoutePage() {
   };
 
   const handleAddVehicle = () => {
-    setVehicles([...vehicles, { id: Math.random().toString(), name: `Авто ${vehicles.length + 1}`, capacity_kg: "1500", average_speed: "" }]);
+    setVehicles([...vehicles, { id: Math.random().toString(), name: `Авто ${vehicles.length + 1}`, capacity_kg: "1500", capacity_m3: "", average_speed: "" }]);
   };
 
   const handleBulkCreate = () => {
@@ -207,6 +209,7 @@ export function RoutePage() {
       id: Math.random().toString(),
       name: `Газель ${i + 1}`,
       capacity_kg: "1500",
+      capacity_m3: "",
       average_speed: "",
     }));
     setVehicles(newVehicles);
@@ -222,6 +225,7 @@ export function RoutePage() {
           id: Math.random().toString(),
           name: `Газель ${prev.length + i + 1}`,
           capacity_kg: prev[0]?.capacity_kg ?? "1500",
+          capacity_m3: prev[0]?.capacity_m3 ?? "",
           average_speed: prev[0]?.average_speed ?? "",
         }))
       ]);
