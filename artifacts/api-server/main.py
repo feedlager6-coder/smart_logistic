@@ -1791,6 +1791,9 @@ def init_db():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_import_history_owner ON order_import_history(owner_id, delivery_date DESC)")
     cur.execute("ALTER TABLE order_import_history ADD COLUMN IF NOT EXISTS has_weight BOOLEAN DEFAULT TRUE")
+    cur.execute("ALTER TABLE order_import_history ADD COLUMN IF NOT EXISTS total_weight_kg DOUBLE PRECISION DEFAULT 0")
+    cur.execute("ALTER TABLE order_import_history ADD COLUMN IF NOT EXISTS total_volume_m3 DOUBLE PRECISION DEFAULT 0")
+    cur.execute("ALTER TABLE order_import_history ADD COLUMN IF NOT EXISTS total_amount_rub DOUBLE PRECISION DEFAULT 0")
     cur.execute("ALTER TABLE route_sessions ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id)")
     cur.execute("ALTER TABLE company_settings ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_stores_owner ON stores(owner_id)")
@@ -4932,14 +4935,19 @@ def orders_import(request: Request, body: OrderImportRequest):
 
     # Determine whether any weight data was provided
     _has_weight = any(r.weight_kg > 0 for r in body.rows)
+    _total_w = float(row[1])   # total_weight from the SELECT above
+    _total_v = float(row[2])   # total_volume
+    _total_a = float(row[3])   # total_amount
 
     # Save import history record
     try:
         cur.execute(
-            """INSERT INTO order_import_history (owner_id, delivery_date, filename, total_rows, matched_rows, unmatched_rows, has_weight)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            """INSERT INTO order_import_history
+               (owner_id, delivery_date, filename, total_rows, matched_rows, unmatched_rows,
+                has_weight, total_weight_kg, total_volume_m3, total_amount_rub)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (uid, body.delivery_date, body.filename[:200] if body.filename else "",
-             row[0], row[4], row[5], _has_weight)
+             row[0], row[4], row[5], _has_weight, _total_w, _total_v, _total_a)
         )
         conn.commit()
     except Exception as _he:
@@ -5014,7 +5022,10 @@ def get_import_history(request: Request, limit: int = Query(50, ge=1, le=200)):
     cur.execute(
         """SELECT id, delivery_date::text, filename, total_rows, matched_rows, unmatched_rows,
                   imported_at::text as imported_at,
-                  COALESCE(has_weight, TRUE) as has_weight
+                  COALESCE(has_weight, TRUE) as has_weight,
+                  COALESCE(total_weight_kg, 0) as total_weight_kg,
+                  COALESCE(total_volume_m3, 0) as total_volume_m3,
+                  COALESCE(total_amount_rub, 0) as total_amount_rub
              FROM order_import_history
             WHERE owner_id = %s
             ORDER BY imported_at DESC
@@ -5025,6 +5036,66 @@ def get_import_history(request: Request, limit: int = Query(50, ge=1, le=200)):
     cur.close()
     conn.close()
     return {"imports": rows}
+
+
+@app.get("/api/orders/import-history/{record_id}/details")
+def get_import_history_details(record_id: int, request: Request):
+    """Return summary + orders list for a specific import history record."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    # Fetch the import record to get delivery_date
+    cur.execute(
+        """SELECT id, delivery_date::text, filename, total_rows, matched_rows, unmatched_rows,
+                  imported_at::text as imported_at,
+                  COALESCE(total_weight_kg, 0) as total_weight_kg,
+                  COALESCE(total_volume_m3, 0) as total_volume_m3,
+                  COALESCE(total_amount_rub, 0) as total_amount_rub
+             FROM order_import_history
+            WHERE id = %s AND owner_id = %s""",
+        (record_id, uid)
+    )
+    rec = cur.fetchone()
+    if not rec:
+        cur.close(); conn.close()
+        raise HTTPException(status_code=404, detail="Import history record not found")
+    rec = dict(rec)
+
+    # Fetch orders for this delivery_date
+    cur.execute(
+        """SELECT o.id, o.store_id, o.store_name_raw, o.order_number,
+                  o.weight_kg, o.volume_m3, o.amount_rub, o.notes,
+                  s.name as store_name_db, s.address as store_address
+             FROM daily_orders o
+             LEFT JOIN stores s ON s.id = o.store_id AND s.owner_id = %s
+            WHERE o.owner_id = %s AND o.delivery_date = %s
+            ORDER BY o.id
+            LIMIT 500""",
+        (uid, uid, rec["delivery_date"])
+    )
+    orders = [dict(r) for r in cur.fetchall()]
+
+    # Unmatched stores: group by raw name where store_id IS NULL
+    cur.execute(
+        """SELECT store_name_raw, COUNT(*) as cnt,
+                  COALESCE(SUM(weight_kg),0) as weight_kg,
+                  COALESCE(SUM(volume_m3),0) as volume_m3
+             FROM daily_orders
+            WHERE owner_id = %s AND delivery_date = %s AND store_id IS NULL
+            GROUP BY store_name_raw
+            ORDER BY store_name_raw""",
+        (uid, rec["delivery_date"])
+    )
+    unmatched = [dict(r) for r in cur.fetchall()]
+
+    cur.close()
+    conn.close()
+    return {
+        "record": rec,
+        "orders": orders,
+        "unmatched_stores": unmatched,
+    }
 
 
 @app.delete("/api/orders/import-history/{record_id}", status_code=204)
@@ -5249,11 +5320,32 @@ def build_route(request: Request, body: RouteRequest):
         else:
             demands_m3 = [0.0] + [0.0] * len(store_list)
 
+    # ── Volume capacity warnings ──────────────────────────────────────────────
+    # (inserted here — after demands_m3/capacities_m3 are known, before solve_vrp)
+    _any_volume_in_orders = any(v > 0 for v in _store_volumes.values()) if _store_volumes else False
+    route_warnings: list[str] = []   # non-fatal issues surfaced to the frontend
+
+    if capacities_m3 is None and _any_volume_in_orders:
+        # User has volume data in today's orders but set no vehicle m³ limit
+        route_warnings.append(
+            "Маршрут построен без учёта объёма. "
+            "В заявках есть данные по объёму (м³), но ни одна машина не имеет ограничения "
+            "по объёму кузова. Укажите «Объём (м³)» в настройках транспорта, чтобы "
+            "система учитывала объём при распределении маршрутов."
+        )
+
+    if capacities_m3 is not None and not _any_volume_in_orders:
+        # Vehicle has m³ limit set but all orders have volume_m3 = 0
+        route_warnings.append(
+            "В заявках отсутствуют данные по объёму. "
+            "Ограничения по объёму кузова (м³) не используются, "
+            "так как во всех заявках на сегодня volume_m3 = 0."
+        )
+
     # ── Time windows (TSPTW) ─────────────────────────────────────────────────
     # When use_time_windows is True, pass (tw_from_min, tw_to_min, service_min)
     # per store to solve_vrp so OR-Tools enforces arrival constraints.
     store_time_windows = None
-    route_warnings: list[str] = []   # non-fatal issues surfaced to the frontend
     if body.use_time_windows:
         store_time_windows = []
         invalid_tw_count = 0

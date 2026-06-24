@@ -13,8 +13,12 @@ import {
 } from "@/components/ui/alert-dialog";
 import {
   Upload, Package, CheckCircle, XCircle, Loader2, Trash2, ArrowRight,
-  AlertTriangle, FileSpreadsheet, RotateCcw, Weight, Box, Plus, Wand2, History,
+  AlertTriangle, FileSpreadsheet, RotateCcw, Weight, Box, Plus, Wand2, History, Eye,
 } from "lucide-react";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
+} from "@/components/ui/dialog";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -44,6 +48,28 @@ interface ImportHistoryRecord {
   unmatched_rows: number;
   imported_at: string;
   has_weight: boolean;
+  total_weight_kg: number;
+  total_volume_m3: number;
+  total_amount_rub: number;
+}
+
+interface ImportDetailOrder {
+  id: number;
+  store_id: number | null;
+  store_name_raw: string;
+  store_name_db: string | null;
+  store_address: string | null;
+  order_number: string;
+  weight_kg: number;
+  volume_m3: number;
+  amount_rub: number;
+  notes: string;
+}
+
+interface ImportDetailResponse {
+  record: ImportHistoryRecord;
+  orders: ImportDetailOrder[];
+  unmatched_stores: { store_name_raw: string; cnt: number; weight_kg: number; volume_m3: number }[];
 }
 
 interface OrderRecord {
@@ -220,6 +246,18 @@ export function OrdersPage() {
   });
   const [deletingHistoryId, setDeletingHistoryId] = useState<number | null>(null);
   const [clearHistoryConfirm, setClearHistoryConfirm] = useState(false);
+  const [detailRecordId, setDetailRecordId] = useState<number | null>(null);
+
+  const { data: detailData, isLoading: detailLoading } = useQuery<ImportDetailResponse>({
+    queryKey: ["import_detail", detailRecordId],
+    queryFn: async () => {
+      const res = await fetch(`/api/orders/import-history/${detailRecordId}/details`);
+      if (!res.ok) throw new Error("Ошибка загрузки деталей");
+      return res.json();
+    },
+    enabled: detailRecordId !== null,
+    staleTime: 60_000,
+  });
 
   // Current file name (for history record)
   const [currentFileName, setCurrentFileName] = useState("");
@@ -1006,16 +1044,25 @@ export function OrdersPage() {
                         </span>
                       </td>
                       <td className="px-2 py-1">
-                        <button
-                          className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
-                          title="Удалить запись"
-                          onClick={() => handleDeleteHistoryRecord(h.id)}
-                          disabled={deletingHistoryId === h.id}
-                        >
-                          {deletingHistoryId === h.id
-                            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            : <Trash2 className="w-3.5 h-3.5" />}
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-primary"
+                            title="Детали импорта"
+                            onClick={() => setDetailRecordId(h.id)}
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
+                            title="Удалить запись"
+                            onClick={() => handleDeleteHistoryRecord(h.id)}
+                            disabled={deletingHistoryId === h.id}
+                          >
+                            {deletingHistoryId === h.id
+                              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              : <Trash2 className="w-3.5 h-3.5" />}
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -1034,6 +1081,124 @@ export function OrdersPage() {
         className="hidden"
         onChange={handleFileChange}
       />
+
+      {/* Import details dialog */}
+      <Dialog open={detailRecordId !== null} onOpenChange={(open) => { if (!open) setDetailRecordId(null); }}>
+        <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>Детали импорта</DialogTitle>
+            <DialogDescription>
+              {detailData?.record && (
+                <span>
+                  {detailData.record.delivery_date} · {detailData.record.filename || "без имени"}
+                </span>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+
+          {detailLoading ? (
+            <div className="flex justify-center py-10"><Loader2 className="w-6 h-6 animate-spin text-muted-foreground" /></div>
+          ) : detailData ? (
+            <div className="overflow-y-auto flex-1 space-y-4 pr-1">
+              {/* Summary cards */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="rounded-lg border bg-muted/30 p-3 text-center">
+                  <div className="text-2xl font-bold">{detailData.record.total_rows}</div>
+                  <div className="text-xs text-muted-foreground mt-0.5">Заявок</div>
+                </div>
+                <div className="rounded-lg border bg-muted/30 p-3 text-center">
+                  <div className="text-2xl font-bold">
+                    {detailData.record.total_weight_kg > 0 ? `${fmt(detailData.record.total_weight_kg, 1)} кг` : "—"}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-0.5">Общий вес</div>
+                </div>
+                <div className="rounded-lg border bg-muted/30 p-3 text-center">
+                  <div className="text-2xl font-bold">
+                    {detailData.record.total_volume_m3 > 0 ? `${fmt(detailData.record.total_volume_m3, 2)} м³` : "—"}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-0.5">Общий объём</div>
+                </div>
+                <div className="rounded-lg border bg-muted/30 p-3 text-center">
+                  <div className="text-2xl font-bold">
+                    {detailData.record.total_amount_rub > 0 ? `${fmt(detailData.record.total_amount_rub, 0)} ₽` : "—"}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-0.5">Сумма</div>
+                </div>
+              </div>
+
+              {/* Unmatched stores */}
+              {detailData.unmatched_stores.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-amber-600 mb-1.5 flex items-center gap-1">
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    Несопоставленные магазины ({detailData.unmatched_stores.length})
+                  </p>
+                  <div className="rounded-md border border-amber-200 bg-amber-50 divide-y divide-amber-100 text-xs max-h-36 overflow-y-auto">
+                    {detailData.unmatched_stores.map((u) => (
+                      <div key={u.store_name_raw} className="flex items-center justify-between px-3 py-1.5 gap-2">
+                        <span className="font-medium text-amber-900 truncate">{u.store_name_raw}</span>
+                        <span className="text-amber-700 shrink-0">
+                          {u.cnt} зак.
+                          {u.weight_kg > 0 && ` · ${fmt(u.weight_kg, 1)} кг`}
+                          {u.volume_m3 > 0 && ` · ${fmt(u.volume_m3, 2)} м³`}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Orders table */}
+              <div>
+                <p className="text-xs font-semibold text-muted-foreground mb-1.5">
+                  Заявки{detailData.orders.length >= 500 ? " (первые 500)" : ""}
+                </p>
+                <div className="rounded-md border overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="bg-muted/40 hover:bg-muted/40">
+                          <TableHead className="text-xs h-8 px-3">Магазин</TableHead>
+                          <TableHead className="text-xs h-8 px-3">Заявка</TableHead>
+                          <TableHead className="text-xs h-8 px-3 text-right">Вес кг</TableHead>
+                          <TableHead className="text-xs h-8 px-3 text-right">Объём м³</TableHead>
+                          <TableHead className="text-xs h-8 px-3 text-right">Сумма ₽</TableHead>
+                          <TableHead className="text-xs h-8 px-3">Статус</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {detailData.orders.map((o) => (
+                          <TableRow key={o.id} className="text-xs">
+                            <TableCell className="px-3 py-1.5 font-medium max-w-[180px] truncate">
+                              {o.store_name_db || o.store_name_raw}
+                            </TableCell>
+                            <TableCell className="px-3 py-1.5 text-muted-foreground">{o.order_number || "—"}</TableCell>
+                            <TableCell className="px-3 py-1.5 text-right tabular-nums">
+                              {o.weight_kg > 0 ? fmt(o.weight_kg, 1) : "—"}
+                            </TableCell>
+                            <TableCell className="px-3 py-1.5 text-right tabular-nums">
+                              {o.volume_m3 > 0 ? fmt(o.volume_m3, 2) : "—"}
+                            </TableCell>
+                            <TableCell className="px-3 py-1.5 text-right tabular-nums">
+                              {o.amount_rub > 0 ? fmt(o.amount_rub, 0) : "—"}
+                            </TableCell>
+                            <TableCell className="px-3 py-1.5">
+                              {o.store_id
+                                ? <span className="text-green-700">✓ Сопост.</span>
+                                : <span className="text-amber-600">Не найден</span>
+                              }
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
 
       {/* Clear history confirmation */}
       <AlertDialog open={clearHistoryConfirm} onOpenChange={setClearHistoryConfirm}>

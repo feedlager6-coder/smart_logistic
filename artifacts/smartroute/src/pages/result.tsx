@@ -549,18 +549,28 @@ export function ResultPage() {
                     </CardTitle>
                     <Badge variant="secondary">{route.stores.length} точек</Badge>
                   </div>
-                  <div className="flex items-center gap-4 text-sm text-muted-foreground mt-2">
+                  <div className="flex items-center gap-4 text-sm text-muted-foreground mt-2 flex-wrap">
                     <span className="flex items-center gap-1"><MapPin className="w-4 h-4" /> {Math.round(route.total_km)} км</span>
                     {(route as any).total_weight_kg > 0 && (
                       <span className={`flex items-center gap-1 font-medium ${
                         (route as any).capacity_kg > 0 && (route as any).total_weight_kg > (route as any).capacity_kg
                           ? "text-red-600"
-                          : "text-blue-600"
+                          : "text-muted-foreground"
                       }`}>
                         <span className="text-xs">⚖</span> {(route as any).total_weight_kg} кг
                         {(route as any).capacity_kg > 0 && (
-                          <span className="text-muted-foreground font-normal">/ {(route as any).capacity_kg} кг</span>
+                          <span className="font-normal">/ {(route as any).capacity_kg} кг</span>
                         )}
+                      </span>
+                    )}
+                    {(route as any).capacity_m3 > 0 && (
+                      <span className={`flex items-center gap-1 font-medium ${
+                        (route as any).total_volume_m3 > (route as any).capacity_m3
+                          ? "text-red-600"
+                          : "text-muted-foreground"
+                      }`}>
+                        <span className="text-xs">📦</span> {((route as any).total_volume_m3 ?? 0).toFixed(2)} м³
+                        <span className="font-normal">/ {(route as any).capacity_m3.toFixed(2)} м³</span>
                       </span>
                     )}
                     <TooltipProvider>
@@ -589,7 +599,7 @@ export function ResultPage() {
                     </TooltipProvider>
                   </div>
                   {/* Capacity progress bars — kg and m³ shown independently when set */}
-                  {(route as any).capacity_kg > 0 && (route as any).total_weight_kg > 0 && (() => {
+                  {(route as any).capacity_kg > 0 && (() => {
                     const pct = Math.min(100, Math.round((route as any).total_weight_kg / (route as any).capacity_kg * 100));
                     const over = (route as any).total_weight_kg > (route as any).capacity_kg;
                     return (
@@ -609,9 +619,9 @@ export function ResultPage() {
                       </div>
                     );
                   })()}
-                  {(route as any).capacity_m3 > 0 && (route as any).total_volume_m3 > 0 && (() => {
-                    const pct = Math.min(100, Math.round((route as any).total_volume_m3 / (route as any).capacity_m3 * 100));
-                    const over = (route as any).total_volume_m3 > (route as any).capacity_m3;
+                  {(route as any).capacity_m3 > 0 && (() => {
+                    const pct = Math.min(100, Math.round(((route as any).total_volume_m3 ?? 0) / (route as any).capacity_m3 * 100));
+                    const over = ((route as any).total_volume_m3 ?? 0) > (route as any).capacity_m3;
                     return (
                       <div className="mt-1 space-y-1">
                         <div className="flex justify-between text-xs">
