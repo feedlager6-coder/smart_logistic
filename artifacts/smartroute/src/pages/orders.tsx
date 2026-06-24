@@ -1294,47 +1294,56 @@ export function OrdersPage() {
               <ScrollArea className="h-72">
                 <div className="overflow-x-auto min-w-full">
                   <table className="text-xs whitespace-nowrap">
-                    <thead className="sticky top-0 bg-muted/80 border-b">
-                      <tr>
-                        <th className="text-left px-3 py-2 font-medium text-muted-foreground w-8">#</th>
-                        <th className="text-left px-3 py-2 font-medium text-muted-foreground min-w-[130px]">Сопоставление</th>
-                        <th className="text-left px-3 py-2 font-medium text-muted-foreground min-w-[160px]">Точка</th>
-                        <th className="text-left px-3 py-2 font-medium text-muted-foreground min-w-[160px]">Адрес</th>
-                        <th className="text-left px-3 py-2 font-medium text-muted-foreground min-w-[200px]">Товары</th>
-                        <th className="text-right px-3 py-2 font-medium text-muted-foreground">Кол-во</th>
-                        <th className="text-right px-3 py-2 font-medium text-muted-foreground">Вес, кг</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {preview.points.slice(0, 100).map((p, i) => (
-                        <tr key={i} className={`border-b ${p.matched_store_id ? "bg-emerald-50/60" : ""}`}>
-                          <td className="px-3 py-1.5 text-muted-foreground">{i + 1}</td>
-                          <td className="px-3 py-1.5">
-                            {p.matched_store_id ? (
-                              <span className="inline-flex items-center gap-1 text-emerald-700">
-                                <CheckCircle className="w-3 h-3 shrink-0" />
-                                <span className="truncate max-w-[120px]">{p.matched_store_name}</span>
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 text-muted-foreground">
-                                <XCircle className="w-3 h-3 shrink-0" />
-                                не найдено
-                              </span>
-                            )}
-                          </td>
-                          <td className="px-3 py-1.5 max-w-[220px] truncate font-medium">{p.name}</td>
-                          <td className="px-3 py-1.5 max-w-[220px] truncate text-muted-foreground">{p.address || "—"}</td>
-                          <td className="px-3 py-1.5 max-w-[280px] truncate text-muted-foreground">
-                            {p.products || "—"}
-                            {p.order_lines > 1 && (
-                              <span className="ml-1 text-[10px] text-muted-foreground/70">({p.order_lines} строк)</span>
-                            )}
-                          </td>
-                          <td className="px-3 py-1.5 text-right text-muted-foreground">{p.quantity > 0 ? fmt(p.quantity, 0) : "—"}</td>
-                          <td className="px-3 py-1.5 text-right text-muted-foreground">{p.weight_kg > 0 ? fmt(p.weight_kg) : "—"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
+                    {(() => {
+                      const hasCity = preview.points.some(p => p.city);
+                      return (
+                        <>
+                          <thead className="sticky top-0 bg-muted/80 border-b">
+                            <tr>
+                              <th className="text-left px-3 py-2 font-medium text-muted-foreground w-8">#</th>
+                              <th className="text-left px-3 py-2 font-medium text-muted-foreground min-w-[130px]">Сопоставление</th>
+                              <th className="text-left px-3 py-2 font-medium text-muted-foreground min-w-[160px]">Точка</th>
+                              {hasCity && <th className="text-left px-3 py-2 font-medium text-muted-foreground min-w-[100px]">Город</th>}
+                              <th className="text-left px-3 py-2 font-medium text-muted-foreground min-w-[160px]">Адрес</th>
+                              <th className="text-left px-3 py-2 font-medium text-muted-foreground min-w-[200px]">Товары</th>
+                              <th className="text-right px-3 py-2 font-medium text-muted-foreground">Кол-во</th>
+                              <th className="text-right px-3 py-2 font-medium text-muted-foreground">Вес, кг</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {preview.points.slice(0, 100).map((p, i) => (
+                              <tr key={i} className={`border-b ${p.matched_store_id ? "bg-emerald-50/60" : ""}`}>
+                                <td className="px-3 py-1.5 text-muted-foreground">{i + 1}</td>
+                                <td className="px-3 py-1.5">
+                                  {p.matched_store_id ? (
+                                    <span className="inline-flex items-center gap-1 text-emerald-700">
+                                      <CheckCircle className="w-3 h-3 shrink-0" />
+                                      <span className="truncate max-w-[120px]">{p.matched_store_name}</span>
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 text-muted-foreground">
+                                      <XCircle className="w-3 h-3 shrink-0" />
+                                      не найдено
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="px-3 py-1.5 max-w-[220px] truncate font-medium">{p.name}</td>
+                                {hasCity && <td className="px-3 py-1.5 max-w-[120px] truncate text-muted-foreground">{p.city || "—"}</td>}
+                                <td className="px-3 py-1.5 max-w-[220px] truncate text-muted-foreground">{p.address || "—"}</td>
+                                <td className="px-3 py-1.5 max-w-[280px] truncate text-muted-foreground">
+                                  {p.products || "—"}
+                                  {p.order_lines > 1 && (
+                                    <span className="ml-1 text-[10px] text-muted-foreground/70">({p.order_lines} строк)</span>
+                                  )}
+                                </td>
+                                <td className="px-3 py-1.5 text-right text-muted-foreground">{p.quantity > 0 ? fmt(p.quantity, 0) : "—"}</td>
+                                <td className="px-3 py-1.5 text-right text-muted-foreground">{p.weight_kg > 0 ? fmt(p.weight_kg) : "—"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </>
+                      );
+                    })()}
                   </table>
                 </div>
               </ScrollArea>
