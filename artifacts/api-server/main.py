@@ -5188,6 +5188,159 @@ def delete_orders(request: Request, date: Optional[str] = None):
     return {"deleted": deleted, "delivery_date": target_date}
 
 
+class ManualOrderRequest(BaseModel):
+    store_id: int
+    delivery_date: str  # "YYYY-MM-DD"
+    weight_kg: float = 0.0
+    volume_m3: float = 0.0
+    amount_rub: float = 0.0
+    notes: str = ""
+    order_number: str = ""
+
+
+class ManualOrderUpdate(BaseModel):
+    weight_kg: Optional[float] = None
+    volume_m3: Optional[float] = None
+    amount_rub: Optional[float] = None
+    notes: Optional[str] = None
+    order_number: Optional[str] = None
+
+
+@app.post("/api/orders/manual", status_code=201)
+def create_manual_order(request: Request, body: ManualOrderRequest):
+    """Create a single daily order row manually (no Excel). Returns the created order."""
+    uid = get_user_id(request)
+
+    # Validate numerics
+    if body.weight_kg < 0:
+        raise HTTPException(status_code=422, detail="Вес не может быть отрицательным")
+    if body.volume_m3 < 0:
+        raise HTTPException(status_code=422, detail="Объём не может быть отрицательным")
+    if body.amount_rub < 0:
+        raise HTTPException(status_code=422, detail="Сумма не может быть отрицательной")
+
+    # Validate date
+    try:
+        datetime.strptime(body.delivery_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Некорректный формат даты (ожидается YYYY-MM-DD)")
+
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    # Verify store belongs to this user
+    cur.execute("SELECT id, name FROM stores WHERE id = %s AND owner_id = %s", (body.store_id, uid))
+    store = cur.fetchone()
+    if not store:
+        cur.close(); conn.close()
+        raise HTTPException(status_code=404, detail="Магазин не найден")
+
+    # Duplicate check: same store_id + same date
+    cur.execute(
+        "SELECT id FROM daily_orders WHERE owner_id = %s AND store_id = %s AND delivery_date = %s",
+        (uid, body.store_id, body.delivery_date)
+    )
+    if cur.fetchone():
+        cur.close(); conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail=f"Магазин «{store['name']}» уже добавлен на {body.delivery_date}"
+        )
+
+    cur.execute(
+        """INSERT INTO daily_orders
+               (owner_id, store_id, store_name_raw, order_number,
+                weight_kg, volume_m3, amount_rub, notes, delivery_date)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+           RETURNING id, store_id, store_name_raw, order_number,
+                     weight_kg, volume_m3, amount_rub, notes,
+                     delivery_date::text, created_at::text""",
+        (uid, body.store_id, store["name"], body.order_number,
+         max(0.0, body.weight_kg), max(0.0, body.volume_m3),
+         max(0.0, body.amount_rub), body.notes, body.delivery_date)
+    )
+    row = dict(cur.fetchone())
+    conn.commit()
+    cur.close()
+    conn.close()
+    return row
+
+
+@app.put("/api/orders/{order_id}")
+def update_manual_order(request: Request, order_id: int, body: ManualOrderUpdate):
+    """Update weight/volume/amount/notes/order_number of a daily order row."""
+    uid = get_user_id(request)
+
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    cur.execute(
+        "SELECT id FROM daily_orders WHERE id = %s AND owner_id = %s",
+        (order_id, uid)
+    )
+    if not cur.fetchone():
+        cur.close(); conn.close()
+        raise HTTPException(status_code=404, detail="Заявка не найдена")
+
+    # Build dynamic SET clause from non-None fields
+    fields, values = [], []
+    if body.weight_kg is not None:
+        if body.weight_kg < 0:
+            cur.close(); conn.close()
+            raise HTTPException(status_code=422, detail="Вес не может быть отрицательным")
+        fields.append("weight_kg = %s"); values.append(max(0.0, body.weight_kg))
+    if body.volume_m3 is not None:
+        if body.volume_m3 < 0:
+            cur.close(); conn.close()
+            raise HTTPException(status_code=422, detail="Объём не может быть отрицательным")
+        fields.append("volume_m3 = %s"); values.append(max(0.0, body.volume_m3))
+    if body.amount_rub is not None:
+        if body.amount_rub < 0:
+            cur.close(); conn.close()
+            raise HTTPException(status_code=422, detail="Сумма не может быть отрицательной")
+        fields.append("amount_rub = %s"); values.append(max(0.0, body.amount_rub))
+    if body.notes is not None:
+        fields.append("notes = %s"); values.append(body.notes)
+    if body.order_number is not None:
+        fields.append("order_number = %s"); values.append(body.order_number)
+
+    if not fields:
+        cur.close(); conn.close()
+        raise HTTPException(status_code=422, detail="Нет полей для обновления")
+
+    values.append(order_id)
+    cur.execute(
+        f"UPDATE daily_orders SET {', '.join(fields)} WHERE id = %s"
+        " RETURNING id, store_id, store_name_raw, order_number,"
+        " weight_kg, volume_m3, amount_rub, notes, delivery_date::text",
+        values
+    )
+    row = dict(cur.fetchone())
+    conn.commit()
+    cur.close()
+    conn.close()
+    return row
+
+
+@app.delete("/api/orders/{order_id}", status_code=204)
+def delete_manual_order(request: Request, order_id: int):
+    """Delete a single daily order row by id."""
+    uid = get_user_id(request)
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM daily_orders WHERE id = %s AND owner_id = %s",
+        (order_id, uid)
+    )
+    deleted = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="Заявка не найдена")
+
+
 @app.post("/api/orders/rematch")
 def rematch_orders(request: Request, date: Optional[str] = None):
     """
