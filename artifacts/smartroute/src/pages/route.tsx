@@ -316,6 +316,7 @@ export function RoutePage() {
         use_unload_time: useUnloadTime,
         max_stops_per_vehicle: maxStopsPerVehicle ? parseInt(maxStopsPerVehicle) : null,
         optimize_by: optimizeBy,
+        delivery_date: todayDate,
       } as any
     }, {
       onSuccess: (result: any) => {

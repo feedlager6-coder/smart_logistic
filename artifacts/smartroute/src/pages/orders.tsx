@@ -283,11 +283,11 @@ export function OrdersPage() {
             );
             setPendingUnmatched(prev => prev.filter(p => !createdKeys.has(keyOf(p.name, p.address ?? ""))));
           }
-          // Re-run rematch after job completes — MUST await before invalidating cache
+          // Re-run rematch after job completes — MUST await before refetching cache
           // so daily_orders refetch sees the updated store_id values in DB.
           // Pass the selected date so rematch targets the right delivery day.
           try { await fetch(`/api/orders/rematch?date=${date}`, { method: "POST" }); } catch {}
-          await qc.invalidateQueries({ queryKey: ["daily_orders", date] });
+          await qc.refetchQueries({ queryKey: ["daily_orders", date] });
           qc.invalidateQueries({ queryKey: ["stores"] });
           setBulkJobId(null);
         }
@@ -443,6 +443,7 @@ export function OrdersPage() {
           volume_m3: Math.max(0, parseFloat(row.volume_m3) || 0),
           amount_rub: Math.max(0, parseFloat(row.amount_rub) || 0),
           notes: row.notes,
+          products: row.products,
         }),
       });
       if (!res.ok) {
@@ -1128,15 +1129,14 @@ export function OrdersPage() {
                             )}
                           </TableCell>
                           <TableCell className="align-top">
-                            {r.products ? (
-                              <div className="text-xs text-muted-foreground whitespace-normal max-w-[220px]">
-                                {r.products}
-                                {r.quantity > 0 && (
-                                  <span className="block text-[11px] text-muted-foreground/70 mt-0.5">всего {fmt(r.quantity, 0)} шт.</span>
-                                )}
-                              </div>
-                            ) : (
-                              <span className="text-xs text-muted-foreground/50">—</span>
+                            <Input
+                              value={r.products}
+                              onChange={(e) => updateField(r.id, "products", e.target.value)}
+                              placeholder="Товары (необязательно)"
+                              className="text-xs min-w-[160px]"
+                            />
+                            {r.quantity > 0 && (
+                              <span className="block text-[11px] text-muted-foreground/70 mt-1">всего {fmt(r.quantity, 0)} шт.</span>
                             )}
                           </TableCell>
                           <TableCell>

@@ -513,7 +513,18 @@ export function ResultPage() {
                     <td style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'center', fontWeight: 'bold', color: '#1e3a5f' }}>{stop.order}</td>
                     <td style={{ border: '1px solid #bbb', padding: '5px 6px', fontWeight: '600' }}>{stop.store_name}</td>
                     <td style={{ border: '1px solid #bbb', padding: '5px 6px', color: '#444' }}>{stop.address}</td>
-                    <td style={{ border: '1px solid #bbb', padding: '5px 6px' }}>&nbsp;</td>
+                    <td style={{ border: '1px solid #bbb', padding: '4px 5px', fontSize: '10px', lineHeight: '1.35', verticalAlign: 'top' }}>
+                      {(stop as any).products ? (
+                        <>
+                          <span style={{ display: 'block', wordBreak: 'break-word' }}>{(stop as any).products}</span>
+                          {((stop as any).quantity ?? 0) > 0 && (
+                            <span style={{ display: 'block', color: '#666', marginTop: '1px' }}>
+                              итого {Math.round((stop as any).quantity)} шт.
+                            </span>
+                          )}
+                        </>
+                      ) : <>&nbsp;</>}
+                    </td>
                     <td style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'center' }}>{stop.arrive_by ?? '—'}</td>
                     <td style={{ border: '1px solid #bbb', padding: '5px 6px' }}>&nbsp;</td>
                   </tr>

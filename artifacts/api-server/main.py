@@ -2808,6 +2808,7 @@ class RouteRequest(BaseModel):
     use_unload_time: Optional[bool] = False
     max_stops_per_vehicle: Optional[int] = None
     optimize_by: str = "distance"  # "distance" | "time" — backward-compat default
+    delivery_date: Optional[str] = None  # "YYYY-MM-DD" — used to enrich stops with products/quantity
 
 
 class CompanySettingsInput(BaseModel):
@@ -5473,6 +5474,7 @@ class ManualOrderRequest(BaseModel):
     amount_rub: float = 0.0
     notes: str = ""
     order_number: str = ""
+    products: str = ""
 
 
 class ManualOrderUpdate(BaseModel):
@@ -5481,6 +5483,7 @@ class ManualOrderUpdate(BaseModel):
     amount_rub: Optional[float] = None
     notes: Optional[str] = None
     order_number: Optional[str] = None
+    products: Optional[str] = None
 
 
 @app.post("/api/orders/manual", status_code=201)
@@ -5527,14 +5530,14 @@ def create_manual_order(request: Request, body: ManualOrderRequest):
     cur.execute(
         """INSERT INTO daily_orders
                (owner_id, store_id, store_name_raw, order_number,
-                weight_kg, volume_m3, amount_rub, notes, delivery_date)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                weight_kg, volume_m3, amount_rub, notes, products, delivery_date)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
            RETURNING id, store_id, store_name_raw, order_number,
-                     weight_kg, volume_m3, amount_rub, notes,
+                     weight_kg, volume_m3, amount_rub, notes, products,
                      delivery_date::text, created_at::text""",
         (uid, body.store_id, store["name"], body.order_number,
          max(0.0, body.weight_kg), max(0.0, body.volume_m3),
-         max(0.0, body.amount_rub), body.notes, body.delivery_date)
+         max(0.0, body.amount_rub), body.notes, body.products or "", body.delivery_date)
     )
     row = dict(cur.fetchone())
     conn.commit()
@@ -5580,6 +5583,8 @@ def update_manual_order(request: Request, order_id: int, body: ManualOrderUpdate
         fields.append("notes = %s"); values.append(body.notes)
     if body.order_number is not None:
         fields.append("order_number = %s"); values.append(body.order_number)
+    if body.products is not None:
+        fields.append("products = %s"); values.append(body.products)
 
     if not fields:
         cur.close(); conn.close()
@@ -5589,7 +5594,7 @@ def update_manual_order(request: Request, order_id: int, body: ManualOrderUpdate
     cur.execute(
         f"UPDATE daily_orders SET {', '.join(fields)} WHERE id = %s"
         " RETURNING id, store_id, store_name_raw, order_number,"
-        " weight_kg, volume_m3, amount_rub, notes, delivery_date::text",
+        " weight_kg, volume_m3, amount_rub, notes, products, delivery_date::text",
         values
     )
     row = dict(cur.fetchone())
@@ -5806,9 +5811,9 @@ def build_route(request: Request, body: RouteRequest):
     if capacities_m3 is not None and not _any_volume_in_orders:
         # Vehicle has m³ limit set but all orders have volume_m3 = 0
         route_warnings.append(
-            "В заявках отсутствуют данные по объёму. "
-            "Ограничения по объёму кузова (м³) не используются, "
-            "так как во всех заявках на сегодня volume_m3 = 0."
+            "Данные об объёме не заполнены в заявках — "
+            "ограничения по вместимости кузова (м³) не применяются. "
+            "Добавьте объём в заявки на доставку, чтобы система контролировала загрузку кузова."
         )
 
     # ── Time windows (TSPTW) ─────────────────────────────────────────────────
@@ -6276,6 +6281,29 @@ def build_route(request: Request, body: RouteRequest):
         depot_lon,
         settings=_cost_settings,
     )
+
+    # Enrich stops with products/quantity from daily_orders if delivery_date provided
+    if body.delivery_date:
+        try:
+            _all_store_ids = [s["store_id"] for r in routes for s in r["stores"]]
+            if _all_store_ids:
+                conn_enrich = get_db()
+                cur_enrich = conn_enrich.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cur_enrich.execute(
+                    "SELECT store_id, products, quantity FROM daily_orders"
+                    " WHERE owner_id = %s AND delivery_date = %s AND store_id = ANY(%s)",
+                    (uid, body.delivery_date, _all_store_ids)
+                )
+                _orders_by_store = {r["store_id"]: r for r in cur_enrich.fetchall()}
+                cur_enrich.close(); conn_enrich.close()
+                for route in routes:
+                    for stop in route["stores"]:
+                        od = _orders_by_store.get(stop["store_id"])
+                        if od:
+                            stop["products"] = od.get("products") or ""
+                            stop["quantity"] = float(od.get("quantity") or 0)
+        except Exception as _enrich_err:
+            logger.warning(f"Failed to enrich stops with products: {_enrich_err}")
 
     result = {
         "routes": routes,
