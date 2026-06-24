@@ -87,7 +87,7 @@ export function RoutePage() {
   // Today's orders (заявки) — for banner showing weight data, auto-select, per-store weights.
   // When navigating from the manual orders builder, a ?date= param can target a specific day.
   const todayDate = dateParam || new Date().toISOString().slice(0, 10);
-  const { data: todayOrders } = useQuery<{
+  const { data: todayOrders, isFetching: ordersFetching } = useQuery<{
     total_count: number;
     total_weight_kg: number;
     total_volume_m3: number;
@@ -409,7 +409,7 @@ export function RoutePage() {
               </p>
             </div>
           )}
-          {totalOrderKg === 0 && (
+          {totalOrderKg === 0 && !ordersFetching && (
             <div className="flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5">
               <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
               <p className="text-sm text-amber-800">
