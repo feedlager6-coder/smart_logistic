@@ -322,8 +322,18 @@ export function RoutePage() {
           setLocation("/result");
         }
       },
-      onError: () => {
-        toast({ title: "Ошибка", description: "Не удалось построить маршрут", variant: "destructive" });
+      onError: (err: unknown) => {
+        // Extract FastAPI detail message from 422 / other HTTP errors
+        let description = "Не удалось построить маршрут";
+        if (err && typeof err === "object") {
+          const apiErr = err as { data?: { detail?: string }; message?: string; status?: number };
+          if (apiErr.data?.detail) {
+            description = apiErr.data.detail;
+          } else if (apiErr.message && !/^HTTP \d/.test(apiErr.message)) {
+            description = apiErr.message;
+          }
+        }
+        toast({ title: "Ошибка построения маршрута", description, variant: "destructive" });
       }
     });
   };

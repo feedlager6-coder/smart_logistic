@@ -892,28 +892,67 @@ def _cluster_by_weight_sweep(store_indices: list, all_coords: list, num_vehicles
         if not placed:
             overflow.append(node)
 
-    # Distribute overflow to least-loaded vehicle by worst-dimension utilisation ratio
-    for node in overflow:
+    # Distribute overflow: try First-Fit Decreasing (capacity-aware) before
+    # falling back to least-loaded.  Sort descending by worst-dimension demand so
+    # the biggest nodes are placed first — this maximises the chance of finding a
+    # valid bin without exceeding either limit.
+    def _demand_size(n):
+        d_kg = (demands[n] if n < len(demands) else 1)
+        d_m3 = (demands_m3[n] if demands_m3 and n < len(demands_m3) else 0.0)
+        kg_ratio = d_kg / max(get_cap_kg(0), 1)
+        cap_m3_0 = get_cap_m3(0)
+        m3_ratio = d_m3 / max(cap_m3_0 or 0.001, 0.001)
+        return max(kg_ratio, m3_ratio)
+
+    overflow_sorted = sorted(overflow, key=_demand_size, reverse=True)
+
+    true_overflow_count = 0
+    for node in overflow_sorted:
         demand_kg = demands[node] if node < len(demands) else 1
         demand_m3 = (demands_m3[node] if demands_m3 and node < len(demands_m3) else 0.0)
 
-        def _util(i):
-            kg_ratio = vehicle_loads_kg[i] / max(get_cap_kg(i), 1)
-            _cap_m3 = get_cap_m3(i)
-            m3_ratio = (vehicle_loads_m3[i] / max(_cap_m3, 0.001) if _cap_m3 else 0.0)
-            return max(kg_ratio, m3_ratio)
+        # Pass 1: find any vehicle where BOTH kg and m³ fit
+        best_fit = -1
+        best_fit_util = float('inf')
+        for i in range(num_vehicles):
+            cap_kg_i = get_cap_kg(i)
+            cap_m3_i = get_cap_m3(i)
+            kg_ok = vehicle_loads_kg[i] + demand_kg <= cap_kg_i
+            m3_ok = cap_m3_i is None or vehicle_loads_m3[i] + demand_m3 <= cap_m3_i
+            if kg_ok and m3_ok:
+                util = max(vehicle_loads_kg[i] / max(cap_kg_i, 1),
+                           (vehicle_loads_m3[i] / max(cap_m3_i, 0.001) if cap_m3_i else 0.0))
+                if util < best_fit_util:
+                    best_fit_util = util
+                    best_fit = i
 
-        best_v = min(range(num_vehicles), key=_util)
-        clusters[best_v].append(node)
-        vehicle_loads_kg[best_v] += demand_kg
-        vehicle_loads_m3[best_v] += demand_m3
+        if best_fit == -1:
+            # Pass 2: no vehicle has capacity — genuine infeasibility;
+            # place in least-loaded for graceful degradation (warning will fire)
+            def _util(i):
+                kg_ratio = vehicle_loads_kg[i] / max(get_cap_kg(i), 1)
+                _cap_m3 = get_cap_m3(i)
+                m3_ratio = (vehicle_loads_m3[i] / max(_cap_m3, 0.001) if _cap_m3 else 0.0)
+                return max(kg_ratio, m3_ratio)
+            best_fit = min(range(num_vehicles), key=_util)
+            true_overflow_count += 1
 
-    if overflow:
-        logger.warning(
-            "_cluster_by_weight_sweep: %d stores overflowed total capacity "
-            "— placed in least-loaded vehicles (graceful degradation)",
-            len(overflow)
-        )
+        clusters[best_fit].append(node)
+        vehicle_loads_kg[best_fit] += demand_kg
+        vehicle_loads_m3[best_fit] += demand_m3
+
+    if overflow_sorted:
+        if true_overflow_count:
+            logger.warning(
+                "_cluster_by_weight_sweep: %d/%d overflow stores had no valid bin "
+                "— placed in least-loaded (genuine infeasibility)",
+                true_overflow_count, len(overflow_sorted)
+            )
+        else:
+            logger.info(
+                "_cluster_by_weight_sweep: %d overflow stores resolved via FFD repack",
+                len(overflow_sorted)
+            )
 
     logger.info(
         "_cluster_by_weight_sweep: %d stores → %d clusters, "
@@ -5731,6 +5770,23 @@ def build_route(request: Request, body: RouteRequest):
             "capacity_kg": _vehicle_cap_kg,
             "capacity_m3": _vehicle_cap_m3,
         })
+
+    # ── Diagnostic: per-route weight/volume utilisation ──────────────────────
+    for _ri, _r in enumerate(routes):
+        _cap_kg  = _r["capacity_kg"]
+        _cap_m3  = _r["capacity_m3"]
+        _load_kg = _r["total_weight_kg"]
+        _load_m3 = _r["total_volume_m3"]
+        logger.info(
+            "Route %d (%s): Weight: %.0f / %s kg | Volume: %.2f / %s m³ | Stops: %d",
+            _ri + 1,
+            _r["vehicle_name"],
+            _load_kg,
+            str(_cap_kg) if _cap_kg else "∞",
+            _load_m3,
+            f"{_cap_m3:.2f}" if _cap_m3 else "∞",
+            len(_r["stores"]),
+        )
 
     # ── Capacity overflow warning ─────────────────────────────────────────────
     # Generated AFTER routes are built so we can report actual per-vehicle loads.

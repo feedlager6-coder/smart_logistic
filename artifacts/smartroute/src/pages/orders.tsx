@@ -525,7 +525,10 @@ export function OrdersPage() {
         </div>
         {hasOrders && phase === "idle" && (
           <Button asChild className="gap-2 shrink-0">
-            <Link href="/route?from=orders">
+            <Link
+              href="/route?from=orders"
+              onClick={() => sessionStorage.removeItem(TODAY_AUTOSELECT_KEY)}
+            >
               <ArrowRight className="w-4 h-4" />
               К маршруту
             </Link>
