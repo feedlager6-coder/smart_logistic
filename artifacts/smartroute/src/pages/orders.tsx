@@ -34,10 +34,36 @@ interface PreviewRow {
   matched_store_name: string | null;
 }
 
+// One aggregated delivery point (one per name+address). Multi-row 1C files
+// collapse into these on the server.
+interface PreviewPoint {
+  name: string;
+  address: string;
+  matched_store_id: number | null;
+  matched_store_name: string | null;
+  weight_kg: number;
+  volume_m3: number;
+  amount_rub: number;
+  quantity: number;
+  products: string;
+  order_number: string;
+  notes: string;
+  city: string;
+  yandex_url: string;
+  time_from: string;
+  time_to: string;
+  unload_minutes: string;
+  order_lines: number;
+}
+
 interface PreviewResult {
   headers: string[];
   detected_mapping: Record<string, string | null>;
   rows: PreviewRow[];
+  points: PreviewPoint[];
+  total_points: number;
+  matched_points: number;
+  unmatched_points: number;
   total_rows: number;
   matched_stores: number;
   unmatched_stores: number;
@@ -81,12 +107,15 @@ interface OrderRecord {
   id: number;
   store_id: number | null;
   store_name_raw: string;
+  address_raw: string;
   store_name_db: string | null;
   store_address: string | null;
   order_number: string;
   weight_kg: number;
   volume_m3: number;
   amount_rub: number;
+  quantity: number;
+  products: string;
   notes: string;
   delivery_date: string;
 }
@@ -111,6 +140,8 @@ interface EditableRow {
   weight_kg: string;
   volume_m3: string;
   amount_rub: string;
+  quantity: number;       // display-only: total units delivered to this point
+  products: string;       // display-only: "Молоко×4, Сахар×16"
   notes: string;
 }
 
@@ -128,12 +159,14 @@ interface UnmatchedStoreData {
 // Fields the user can map columns to
 const FIELD_LABELS: Record<string, string> = {
   store_name:     "Название точки *",
+  address:        "Адрес",
+  product:        "Товар",
+  quantity:       "Количество",
   order_number:   "Номер заявки",
   weight_kg:      "Вес (кг)",
   volume_m3:      "Объём (м³)",
   amount_rub:     "Сумма (₽)",
   zone:           "Зона / Водитель",
-  address:        "Адрес",
   yandex_url:     "Ссылка Яндекс",
   time_from:      "Время с",
   time_to:        "Время до",
@@ -141,6 +174,9 @@ const FIELD_LABELS: Record<string, string> = {
   city:           "Город",
   notes:          "Примечание",
 };
+
+// Only the store name is required; everything else is used if present.
+const REQUIRED_FIELDS = new Set(["store_name"]);
 
 const TODAY = new Date().toISOString().slice(0, 10);
 
@@ -203,9 +239,17 @@ export function OrdersPage() {
     else localStorage.removeItem(BULK_JOB_KEY);
   };
   const [bulkProgress, setBulkProgress] = useState<{ total: number; created: number; failed: number; done: boolean } | null>(null);
-  const [bulkResult, setBulkResult] = useState<{ name: string; status: "created" | "failed"; reason?: string; geocode_status?: string }[] | null>(null);
+  const [bulkResult, setBulkResult] = useState<{ name: string; address?: string; status: "created" | "failed"; reason?: string; geocode_status?: string }[] | null>(null);
   const [showBulkResult, setShowBulkResult] = useState(false);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const currentFileRef = useRef<File | null>(null);
+  const previewDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const previewSeqRef = useRef(0);
+  const [recomputing, setRecomputing] = useState(false);
+  // True between a mapping change and a successful recompute. While stale, the
+  // displayed preview.points may not reflect the chosen columns, so import is
+  // blocked to avoid importing data from an outdated mapping.
+  const [previewStale, setPreviewStale] = useState(false);
 
   const startPolling = useCallback((jobId: string) => {
     if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
@@ -227,9 +271,17 @@ export function OrdersPage() {
             const result = await rRes.json();
             setBulkResult(result.results ?? []);
             setShowBulkResult(true);
-            // Remove completed stores from pending
-            const createdNames = new Set((result.results ?? []).filter((r: any) => r.status === "created").map((r: any) => r.name));
-            setPendingUnmatched(prev => prev.filter(p => !createdNames.has(p.name)));
+            // Remove completed stores from pending. Key by (name+address) so
+            // two points sharing a name but at different addresses are tracked
+            // independently (1С files have many same-name/diff-address points).
+            const keyOf = (n: string, a: string) =>
+              `${(n ?? "").trim().toLowerCase()}||${(a ?? "").trim().toLowerCase()}`;
+            const createdKeys = new Set(
+              (result.results ?? [])
+                .filter((r: any) => r.status === "created")
+                .map((r: any) => keyOf(r.name, r.address ?? ""))
+            );
+            setPendingUnmatched(prev => prev.filter(p => !createdKeys.has(keyOf(p.name, p.address ?? ""))));
           }
           // Re-run rematch after job completes — MUST await before invalidating cache
           // so daily_orders refetch sees the updated store_id values in DB.
@@ -338,6 +390,8 @@ export function OrdersPage() {
           weight_kg: o.weight_kg ? String(o.weight_kg) : "",
           volume_m3: o.volume_m3 ? String(o.volume_m3) : "",
           amount_rub: o.amount_rub ? String(o.amount_rub) : "",
+          quantity: o.quantity ?? 0,
+          products: o.products ?? "",
           notes: o.notes ?? "",
         };
       });
@@ -516,6 +570,69 @@ export function OrdersPage() {
     }
   }, [toast]);
 
+  const runPreview = useCallback(async (
+    file: File,
+    mappingOverride: Record<string, string | null> | null,
+    silent: boolean,
+  ) => {
+    const seq = ++previewSeqRef.current;
+    if (silent) {
+      setRecomputing(true);
+    } else {
+      // A fresh full parse (new file) supersedes any pending/in-flight silent
+      // recompute. Cancel its debounce and clear its flags so they can't stick
+      // (the in-flight silent request is already neutralized by the seq gate).
+      if (previewDebounceRef.current) clearTimeout(previewDebounceRef.current);
+      setRecomputing(false);
+      setPreviewStale(false);
+      setPhase("loading");
+    }
+
+    const fd = new FormData();
+    fd.append("file", file);
+    if (mappingOverride) fd.append("mapping", JSON.stringify(mappingOverride));
+
+    try {
+      const res = await fetch("/api/orders/preview", { method: "POST", body: fd });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail ?? "Ошибка обработки файла");
+      }
+      const data: PreviewResult = await res.json();
+      // Ignore out-of-order responses: only the latest request may apply state.
+      if (seq !== previewSeqRef.current) return;
+      setPreview(data);
+      // On the first parse, adopt the server's auto-detected mapping. On a
+      // silent re-run the user's mapping is the source of truth (we already
+      // sent it as the override), so we must NOT overwrite their choices.
+      if (!silent) setMapping({ ...data.detected_mapping });
+      setPreviewStale(false);
+      setPhase("preview");
+    } catch (e: unknown) {
+      if (seq !== previewSeqRef.current) return;
+      const msg = e instanceof Error ? e.message : "Неизвестная ошибка";
+      toast({ title: "Ошибка загрузки", description: msg, variant: "destructive" });
+      // On a silent recompute failure leave previewStale=true so import stays
+      // blocked until a successful recompute reflects the chosen columns.
+      if (!silent) setPhase("idle");
+    } finally {
+      if (seq === previewSeqRef.current && silent) setRecomputing(false);
+    }
+  }, [toast]);
+
+  // Re-run preview (debounced) after the dispatcher corrects a column mapping,
+  // so aggregation/matching reflects the chosen columns.
+  const schedulePreviewRefresh = useCallback((nextMapping: Record<string, string | null>) => {
+    if (!currentFileRef.current) return;
+    // Mark the displayed preview as stale right away (covers the debounce
+    // window too) so import can't fire against an outdated mapping.
+    setPreviewStale(true);
+    if (previewDebounceRef.current) clearTimeout(previewDebounceRef.current);
+    previewDebounceRef.current = setTimeout(() => {
+      if (currentFileRef.current) runPreview(currentFileRef.current, nextMapping, true);
+    }, 500);
+  }, [runPreview]);
+
   const handleFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -531,31 +648,21 @@ export function OrdersPage() {
       return;
     }
 
-    setPhase("loading");
-    const fd = new FormData();
-    fd.append("file", file);
-
-    try {
-      const res = await fetch("/api/orders/preview", { method: "POST", body: fd });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail ?? "Ошибка обработки файла");
-      }
-      const data: PreviewResult = await res.json();
-      setPreview(data);
-      setMapping({ ...data.detected_mapping });
-      setPhase("preview");
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "Неизвестная ошибка";
-      toast({ title: "Ошибка загрузки", description: msg, variant: "destructive" });
-      setPhase("idle");
-    }
-  }, [toast]);
+    currentFileRef.current = file;
+    await runPreview(file, null, false);
+  }, [toast, runPreview]);
 
   // ── Confirm import ─────────────────────────────────────────────────────────
 
   const handleImport = async () => {
     if (!preview) return;
+    // Block import while the preview is being recomputed for a changed mapping
+    // (or that recompute failed) — otherwise we'd import points built from an
+    // outdated column mapping.
+    if (recomputing || previewStale) {
+      toast({ title: "Идёт пересчёт", description: "Подождите, пока точки пересчитаются по выбранным колонкам", variant: "destructive" });
+      return;
+    }
     const nameCol = mapping.store_name;
     if (!nameCol) {
       toast({ title: "Укажите колонку с названием точки", variant: "destructive" });
@@ -564,50 +671,46 @@ export function OrdersPage() {
 
     setPhase("saving");
 
-    // Extract unmatched store data BEFORE we clear preview
-    // This lets us offer bulk-create and enhanced prefill after import
-    const addrCol     = mapping.address;
-    const yandexCol   = mapping.yandex_url;
-    const timeFromCol = mapping.time_from;
-    const timeToCol   = mapping.time_to;
-    const unloadCol   = mapping.unload_minutes;
-    const cityCol     = mapping.city;
+    // The server has already aggregated the file into delivery points
+    // (one per name+address). We import those points directly — one
+    // daily_order per point, NOT per Excel row.
+    const points = preview.points ?? [];
 
+    // Extract unmatched point data BEFORE we clear preview. Keyed by
+    // (name+address) so the same name at two addresses stays two entries.
     const unmatchedMap = new Map<string, UnmatchedStoreData>();
-    for (const row of preview.rows) {
-      if (row.matched_store_id !== null) continue;
-      const name = nameCol ? (row.cells[nameCol] ?? "").trim() : "";
-      if (!name || unmatchedMap.has(name)) continue;
-      unmatchedMap.set(name, {
+    for (const p of points) {
+      if (p.matched_store_id !== null) continue;
+      const name = (p.name ?? "").trim();
+      if (!name) continue;
+      const key = `${name.toLowerCase()}||${(p.address ?? "").trim().toLowerCase()}`;
+      if (unmatchedMap.has(key)) continue;
+      unmatchedMap.set(key, {
         name,
-        address:        addrCol     ? (row.cells[addrCol] ?? "").trim()     : "",
-        yandex_url:     yandexCol   ? (row.cells[yandexCol] ?? "").trim()   : "",
-        time_from:      timeFromCol ? (row.cells[timeFromCol] ?? "").trim()  : "",
-        time_to:        timeToCol   ? (row.cells[timeToCol] ?? "").trim()    : "",
-        unload_minutes: unloadCol   ? (row.cells[unloadCol] ?? "").trim()    : "",
-        city:           cityCol     ? (row.cells[cityCol] ?? "").trim()      : "",
+        address:        (p.address ?? "").trim(),
+        yandex_url:     (p.yandex_url ?? "").trim(),
+        time_from:      (p.time_from ?? "").trim(),
+        time_to:        (p.time_to ?? "").trim(),
+        unload_minutes: (p.unload_minutes ?? "").trim(),
+        city:           (p.city ?? "").trim(),
       });
     }
 
-    const rows = preview.rows
-      .map((row) => {
-        const storeName = nameCol ? (row.cells[nameCol] ?? "").trim() : "";
+    const rows = points
+      .map((p) => {
+        const storeName = (p.name ?? "").trim();
         if (!storeName) return null;
-        const getCell = (field: string) => {
-          const col = mapping[field];
-          return col ? (row.cells[col] ?? "") : "";
-        };
-        const parseNum = (s: string) =>
-          parseFloat(s.replace(",", ".").replace(/\s/g, "").replace(/\u00a0/g, "")) || 0;
-
         return {
-          store_id: row.matched_store_id ?? null,
+          store_id: p.matched_store_id ?? null,
           store_name_raw: storeName,
-          order_number: getCell("order_number"),
-          weight_kg: parseNum(getCell("weight_kg")),
-          volume_m3: parseNum(getCell("volume_m3")),
-          amount_rub: parseNum(getCell("amount_rub")),
-          notes: getCell("notes"),
+          address_raw: (p.address ?? "").trim(),
+          order_number: p.order_number ?? "",
+          weight_kg: p.weight_kg ?? 0,
+          volume_m3: p.volume_m3 ?? 0,
+          amount_rub: p.amount_rub ?? 0,
+          quantity: p.quantity ?? 0,
+          products: p.products ?? "",
+          notes: p.notes ?? "",
         };
       })
       .filter(Boolean);
@@ -999,6 +1102,7 @@ export function OrdersPage() {
                     <TableHeader>
                       <TableRow>
                         <TableHead className="min-w-[220px]">Магазин</TableHead>
+                        <TableHead className="min-w-[180px]">Товары</TableHead>
                         <TableHead className="w-[130px]">Вес, кг</TableHead>
                         <TableHead className="w-[130px]">Объём, м³</TableHead>
                         <TableHead className="w-[140px]">Сумма, ₽</TableHead>
@@ -1020,6 +1124,18 @@ export function OrdersPage() {
                               <Badge variant="outline" className="mt-1 text-amber-600 border-amber-300">
                                 нет магазина
                               </Badge>
+                            )}
+                          </TableCell>
+                          <TableCell className="align-top">
+                            {r.products ? (
+                              <div className="text-xs text-muted-foreground whitespace-normal max-w-[220px]">
+                                {r.products}
+                                {r.quantity > 0 && (
+                                  <span className="block text-[11px] text-muted-foreground/70 mt-0.5">всего {fmt(r.quantity, 0)} шт.</span>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-xs text-muted-foreground/50">—</span>
                             )}
                           </TableCell>
                           <TableCell>
@@ -1087,23 +1203,24 @@ export function OrdersPage() {
       {/* ── Preview / Column mapping ── */}
       {phase === "preview" && preview && (
         <div className="space-y-4">
-          {/* Stats */}
+          {/* Stats — based on aggregated delivery points (one per name+address) */}
           <div className="grid grid-cols-3 gap-3">
             <Card className="text-center">
               <CardContent className="pt-4 pb-3">
-                <p className="text-2xl font-bold">{preview.total_rows}</p>
-                <p className="text-xs text-muted-foreground">строк в файле</p>
+                <p className="text-2xl font-bold">{preview.total_points}</p>
+                <p className="text-xs text-muted-foreground">точек доставки</p>
+                <p className="text-[10px] text-muted-foreground/70">из {preview.total_rows} строк файла</p>
               </CardContent>
             </Card>
             <Card className="text-center border-emerald-200">
               <CardContent className="pt-4 pb-3">
-                <p className="text-2xl font-bold text-emerald-600">{preview.matched_stores}</p>
-                <p className="text-xs text-muted-foreground">точек найдено</p>
+                <p className="text-2xl font-bold text-emerald-600">{preview.matched_points}</p>
+                <p className="text-xs text-muted-foreground">сопоставлено</p>
               </CardContent>
             </Card>
             <Card className="text-center border-amber-200">
               <CardContent className="pt-4 pb-3">
-                <p className="text-2xl font-bold text-amber-600">{preview.unmatched_stores}</p>
+                <p className="text-2xl font-bold text-amber-600">{preview.unmatched_points}</p>
                 <p className="text-xs text-muted-foreground">не сопоставлено</p>
               </CardContent>
             </Card>
@@ -1119,11 +1236,11 @@ export function OrdersPage() {
             </Alert>
           )}
 
-          {preview.unmatched_stores > 0 && preview.db_stores_count > 0 && (
+          {preview.unmatched_points > 0 && preview.db_stores_count > 0 && (
             <Alert className="border-amber-200 bg-amber-50">
               <AlertTriangle className="w-4 h-4 text-amber-600" />
               <AlertDescription className="text-amber-800">
-                {preview.unmatched_stores} точек не найдены в базе магазинов — они будут сохранены без привязки к магазину и не войдут в маршрут. После импорта можно добавить их массово одной кнопкой.
+                {preview.unmatched_points} точек не найдены в базе магазинов — они будут сохранены без привязки к магазину и не войдут в маршрут. После импорта можно добавить их массово одной кнопкой.
               </AlertDescription>
             </Alert>
           )}
@@ -1131,7 +1248,10 @@ export function OrdersPage() {
           {/* Column mapping */}
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Маппинг колонок</CardTitle>
+              <CardTitle className="text-base flex items-center gap-2">
+                Маппинг колонок
+                {recomputing && <span className="text-xs font-normal text-muted-foreground">Пересчёт…</span>}
+              </CardTitle>
               <CardDescription>Укажите какой столбец вашего файла соответствует каждому полю. Звёздочкой отмечено обязательное поле.</CardDescription>
             </CardHeader>
             <CardContent>
@@ -1141,7 +1261,11 @@ export function OrdersPage() {
                     <label className="text-xs font-medium text-muted-foreground">{label}</label>
                     <Select
                       value={mapping[field] ?? "__none__"}
-                      onValueChange={(v) => setMapping(m => ({ ...m, [field]: v === "__none__" ? null : v }))}
+                      onValueChange={(v) => setMapping(m => {
+                        const next = { ...m, [field]: v === "__none__" ? null : v };
+                        schedulePreviewRefresh(next);
+                        return next;
+                      })}
                     >
                       <SelectTrigger className="h-8 text-sm">
                         <SelectValue placeholder="Не указано" />
@@ -1159,11 +1283,11 @@ export function OrdersPage() {
             </CardContent>
           </Card>
 
-          {/* Preview table — ALL columns with horizontal scroll */}
+          {/* Preview table — aggregated delivery points (what will be imported) */}
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-base">Предпросмотр данных</CardTitle>
-              <CardDescription>Первые строки файла · Зелёные строки — точки сопоставлены с базой · Прокрутите вправо для всех колонок</CardDescription>
+              <CardTitle className="text-base">Точки доставки ({preview.total_points})</CardTitle>
+              <CardDescription>Строки файла объединены в точки по названию + адресу · Зелёные строки сопоставлены с базой · «Товары» и «Кол-во» — справочно, в расчёт маршрута не идут</CardDescription>
             </CardHeader>
             <CardContent className="p-0">
               <ScrollArea className="h-72">
@@ -1173,20 +1297,22 @@ export function OrdersPage() {
                       <tr>
                         <th className="text-left px-3 py-2 font-medium text-muted-foreground w-8">#</th>
                         <th className="text-left px-3 py-2 font-medium text-muted-foreground min-w-[130px]">Сопоставление</th>
-                        {preview.headers.map(h => (
-                          <th key={h} className="text-left px-3 py-2 font-medium text-muted-foreground min-w-[110px] max-w-[200px]">{h}</th>
-                        ))}
+                        <th className="text-left px-3 py-2 font-medium text-muted-foreground min-w-[160px]">Точка</th>
+                        <th className="text-left px-3 py-2 font-medium text-muted-foreground min-w-[160px]">Адрес</th>
+                        <th className="text-left px-3 py-2 font-medium text-muted-foreground min-w-[200px]">Товары</th>
+                        <th className="text-right px-3 py-2 font-medium text-muted-foreground">Кол-во</th>
+                        <th className="text-right px-3 py-2 font-medium text-muted-foreground">Вес, кг</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {preview.rows.slice(0, 50).map((row, i) => (
-                        <tr key={i} className={`border-b ${row.matched_store_id ? "bg-emerald-50/60" : ""}`}>
+                      {preview.points.slice(0, 100).map((p, i) => (
+                        <tr key={i} className={`border-b ${p.matched_store_id ? "bg-emerald-50/60" : ""}`}>
                           <td className="px-3 py-1.5 text-muted-foreground">{i + 1}</td>
                           <td className="px-3 py-1.5">
-                            {row.matched_store_id ? (
+                            {p.matched_store_id ? (
                               <span className="inline-flex items-center gap-1 text-emerald-700">
                                 <CheckCircle className="w-3 h-3 shrink-0" />
-                                <span className="truncate max-w-[120px]">{row.matched_store_name}</span>
+                                <span className="truncate max-w-[120px]">{p.matched_store_name}</span>
                               </span>
                             ) : (
                               <span className="inline-flex items-center gap-1 text-muted-foreground">
@@ -1195,11 +1321,16 @@ export function OrdersPage() {
                               </span>
                             )}
                           </td>
-                          {preview.headers.map(h => (
-                            <td key={h} className="px-3 py-1.5 max-w-[200px] truncate text-muted-foreground">
-                              {row.cells[h] ?? ""}
-                            </td>
-                          ))}
+                          <td className="px-3 py-1.5 max-w-[220px] truncate font-medium">{p.name}</td>
+                          <td className="px-3 py-1.5 max-w-[220px] truncate text-muted-foreground">{p.address || "—"}</td>
+                          <td className="px-3 py-1.5 max-w-[280px] truncate text-muted-foreground">
+                            {p.products || "—"}
+                            {p.order_lines > 1 && (
+                              <span className="ml-1 text-[10px] text-muted-foreground/70">({p.order_lines} строк)</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-1.5 text-right text-muted-foreground">{p.quantity > 0 ? fmt(p.quantity, 0) : "—"}</td>
+                          <td className="px-3 py-1.5 text-right text-muted-foreground">{p.weight_kg > 0 ? fmt(p.weight_kg) : "—"}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -1214,11 +1345,11 @@ export function OrdersPage() {
             <Button variant="outline" onClick={() => { setPhase("idle"); setPreview(null); }}>
               Отмена
             </Button>
-            <Button onClick={handleImport} disabled={!mapping.store_name} className="gap-2">
+            <Button onClick={handleImport} disabled={!mapping.store_name || recomputing || previewStale} className="gap-2">
               <Package className="w-4 h-4" />
-              {preview.unmatched_stores > 0
-                ? `Загрузить ${preview.total_rows} строк (${preview.matched_stores} сопоставлено, ${preview.unmatched_stores} без привязки)`
-                : `Загрузить ${preview.total_rows} заявок`}
+              {preview.unmatched_points > 0
+                ? `Загрузить ${preview.total_points} точек (${preview.matched_points} сопоставлено, ${preview.unmatched_points} без привязки)`
+                : `Загрузить ${preview.total_points} точек`}
             </Button>
           </div>
         </div>
@@ -1240,13 +1371,16 @@ export function OrdersPage() {
         const unmatchedOrders = savedOrders.orders.filter(o => !o.store_id);
         if (unmatchedOrders.length === 0) return null;
 
-        // Unique names from DB orders
+        // Unique delivery points from DB orders, keyed by name + address
+        // (the same name at two addresses stays two separate points).
+        const pointKey = (name: string, addr: string) =>
+          `${(name ?? "").trim().toLowerCase()}||${(addr ?? "").trim().toLowerCase()}`;
         const uniqueByName = Array.from(
-          new Map(unmatchedOrders.map(o => [o.store_name_raw, o])).values()
+          new Map(unmatchedOrders.map(o => [pointKey(o.store_name_raw, o.address_raw), o])).values()
         );
 
-        // Build a lookup: name → pending extra data (from Excel, available after fresh import)
-        const pendingLookup = new Map(pendingUnmatched.map(p => [p.name, p]));
+        // Build a lookup: (name+address) → pending extra data (from Excel, available after fresh import)
+        const pendingLookup = new Map(pendingUnmatched.map(p => [pointKey(p.name, p.address), p]));
 
         return (
           <Card className="border-amber-200 bg-amber-50/60">
@@ -1299,7 +1433,7 @@ export function OrdersPage() {
             <CardContent>
               <div className="space-y-2">
                 {uniqueByName.map(o => {
-                  const extra = pendingLookup.get(o.store_name_raw);
+                  const extra = pendingLookup.get(pointKey(o.store_name_raw, o.address_raw));
                   // Build enriched store object for prefill (use pending data if available)
                   const storeForPrefill: UnmatchedStoreData = extra ?? {
                     name: o.store_name_raw,
@@ -1312,21 +1446,28 @@ export function OrdersPage() {
                   };
                   const prefillUrl = buildPrefillUrl(storeForPrefill);
 
+                  const displayAddress = o.address_raw || extra?.address || "";
                   return (
-                    <div key={o.store_name_raw} className="flex items-center justify-between gap-3 bg-white/70 rounded-md px-3 py-2 border border-amber-100">
+                    <div key={pointKey(o.store_name_raw, o.address_raw)} className="flex items-center justify-between gap-3 bg-white/70 rounded-md px-3 py-2 border border-amber-100">
                       <div className="min-w-0">
                         <p className="font-medium text-sm truncate">{o.store_name_raw}</p>
                         <div className="flex flex-wrap gap-2 mt-0.5">
                           {o.weight_kg > 0 && (
-                            <span className="text-xs text-muted-foreground">{fmt(o.weight_kg)} кг · {unmatchedOrders.filter(u => u.store_name_raw === o.store_name_raw).length} заявок</span>
+                            <span className="text-xs text-muted-foreground">{fmt(o.weight_kg)} кг</span>
                           )}
-                          {extra?.address && (
-                            <span className="text-xs text-muted-foreground truncate max-w-[200px]">{extra.address}</span>
+                          {o.quantity > 0 && (
+                            <span className="text-xs text-muted-foreground">{fmt(o.quantity, 0)} шт.</span>
+                          )}
+                          {displayAddress && (
+                            <span className="text-xs text-muted-foreground truncate max-w-[200px]">{displayAddress}</span>
                           )}
                           {extra?.yandex_url && (
                             <span className="text-xs text-blue-600">со ссылкой Яндекс</span>
                           )}
                         </div>
+                        {o.products && (
+                          <p className="text-xs text-muted-foreground/80 truncate mt-0.5">{o.products}</p>
+                        )}
                       </div>
                       <Button asChild variant="outline" size="sm" className="shrink-0 border-amber-300 hover:bg-amber-100 text-amber-900">
                         <a href={prefillUrl}>

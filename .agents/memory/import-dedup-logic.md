@@ -45,3 +45,29 @@ Import row lookup now tries BOTH:
 2. `(normalize(name), normalize(city+raw_addr))` — as stored in DB after city prepending
 
 Without this, stores with separate city column were never deduped against DB.
+
+## Daily-orders (/api/orders/*) is a SEPARATE import path from /api/stores/import
+
+Invariants (don't regress):
+- Orders match & dedup by **(name+address)**, never name-only. Same name at different
+  addresses are distinct delivery points (the canonical 1С test file must yield 50
+  points, not 25 — name-only dedup collapses them).
+- A multi-row 1С file (one product per row) aggregates into ONE point per
+  (norm name, norm addr): sums qty/weight/volume/amount + a "products" summary string.
+- `Количество`/products are **display-only**. VRP demand per point stays 1 unit; product
+  quantity is never cargo load.
+
+### Debounced mapping-override recompute (UI race invariants)
+When the user re-maps a column, the preview is recomputed silently against the same
+uploaded file. Two guards are mandatory or you get data-integrity bugs:
+- **Out-of-order responses:** gate every state write behind a per-request sequence id;
+  only the latest request may apply its result.
+- **Stale import:** any mapping change must immediately mark the preview stale and block
+  import until a *successful* recompute clears it — otherwise you import points built
+  from an outdated mapping. A new full file-upload must force-clear the recompute flags
+  (they can otherwise stick and permanently disable import).
+
+### Bulk-create result keying
+Pending-unmatched cleanup must key by (name+address), not name-only, because 1С files
+contain many same-name/different-address points; the bulk-create result therefore echoes
+`address` for each row.

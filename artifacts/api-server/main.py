@@ -1894,6 +1894,12 @@ def init_db():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_daily_orders_owner_date ON daily_orders(owner_id, delivery_date)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_daily_orders_store ON daily_orders(store_id)")
+    # Extended order fields (1C-style multi-row imports): raw address keeps the
+    # delivery point identity even when unmatched; quantity + products are the
+    # aggregated cargo breakdown shown to the driver (display-only).
+    cur.execute("ALTER TABLE daily_orders ADD COLUMN IF NOT EXISTS address_raw TEXT DEFAULT ''")
+    cur.execute("ALTER TABLE daily_orders ADD COLUMN IF NOT EXISTS quantity DOUBLE PRECISION DEFAULT 0")
+    cur.execute("ALTER TABLE daily_orders ADD COLUMN IF NOT EXISTS products TEXT DEFAULT ''")
     conn.commit()
     cur.close()
     conn.close()
@@ -4465,6 +4471,7 @@ def _bulk_create_stores_sync(stores: list[dict], job: dict, uid: int):
             job["created"] += 1
             job["results"].append({
                 "name": name,
+                "address": address or "",
                 "status": "created",
                 "store_id": new_id,
                 "geocode_status": geocode_status,
@@ -4483,7 +4490,7 @@ def _bulk_create_stores_sync(stores: list[dict], job: dict, uid: int):
                 pass
             reason = str(exc)[:200]
             job["failed"] += 1
-            job["results"].append({"name": name, "status": "failed", "reason": reason})
+            job["results"].append({"name": name, "address": address or "", "status": "failed", "reason": reason})
 
     job["done"] = True
 
@@ -4670,6 +4677,8 @@ _ORDER_COLUMN_PATTERNS: dict = {
     "store_name": ["торговая точка", "наименование контрагента", "название точки", "название магазина",
                    "магазин", "контрагент", "точка доставки", "название", "точка", "клиент", "наименование", "name"],
     "address":    ["адрес доставки", "адрес точки", "адрес", "address"],
+    "product":    ["наименование товара", "номенклатура", "товар", "продукт", "product", "позиция"],
+    "quantity":   ["количество", "кол-во", "колво", "кол во", "quantity", "qty", "штук", "шт"],
     "yandex_url": ["ссылка яндекс", "яндекс карты", "яндекс", "yandex", "ссылка на карту", "ссылка"],
     "weight_kg":  ["вес, кг", "вес (кг)", "вес,кг", "вес кг", "вес", "weight", "масса, кг",
                    "масса кг", "масса", "кг", "kg"],
@@ -4742,37 +4751,59 @@ def _significant_words(name: str) -> frozenset:
     )
 
 
-def _match_store_to_db(raw_name: str, db_stores: list[dict]) -> Optional[dict]:
+def _match_store_to_db(raw_name: str, raw_address: str, db_stores: list[dict]) -> Optional[dict]:
     """Return the best matching store dict or None.
 
-    Algorithm (two safe passes):
+    A delivery point is identified by (name + address). The SAME chain name at a
+    DIFFERENT address is a DIFFERENT delivery point and must NOT be merged — this
+    is the core correctness rule for routing (each branch is its own stop).
 
-    Pass 1 — Exact normalized name match.
-        Safe: identical after lowercase + strip punctuation → definite match.
+    Passes:
 
-    Pass 2 — Jaccard similarity ≥ 0.85 on *significant* words only.
-        Significant = not a stop-word + length ≥ 3.
-        • Both sides must have ≥ 1 significant word.
-        • At least 1 word must be shared.
-        • If multiple stores score equally, return None (ambiguous → safer).
+    Pass 1 — Exact (name + address).
+        Strongest signal. Always wins.
 
-    Deliberately REMOVED:
-        • Substring match (Pass 2 of old algo): "центр" matched
-          "Мебельный Центр" AND "Продукты Центр" — false positive.
-        • Word-overlap ≥ 50% (Pass 3 of old algo): "Супермаркет 24"
-          matched "Супермаркет Каспийск" — false positive.
+    Pass 2 — Exact name, address resolved.
+        • No address in the file → match a same-name store only when it is the
+          single same-name candidate (otherwise ambiguous → None).
+        • Address in the file → match only a same-name store whose address is
+          empty (catalog without address yet) or equal. Same name + different,
+          non-empty address ⇒ NOT a match (different branch).
+
+    Pass 3 — Jaccard ≥ 0.85 on significant words, with an address guard.
+        Fuzzy name only when there is NO exact name match. If both file and
+        candidate have a (non-empty) address and they differ, the candidate is
+        rejected — prevents fuzzy-merging two branches of the same chain.
+
+    Deliberately REMOVED (historic false positives): substring match and
+    word-overlap ≥ 50%.
     """
     if not raw_name or not db_stores:
         return None
 
     norm = _normalize_name(raw_name)
+    norm_addr = _normalize_for_dedup(raw_address) if raw_address else ""
 
-    # ── Pass 1: exact normalized name ────────────────────────────────────────
-    for s in db_stores:
-        if _normalize_name(s["name"]) == norm:
-            return s
+    # ── Pass 1: exact name + address ─────────────────────────────────────────
+    if norm_addr:
+        for s in db_stores:
+            if (_normalize_name(s["name"]) == norm
+                    and _normalize_for_dedup(s.get("address") or "") == norm_addr):
+                return s
 
-    # ── Pass 2: Jaccard ≥ 0.85 on significant words ─────────────────────────
+    # ── Pass 2: exact name, resolve by address ──────────────────────────────
+    name_matches = [s for s in db_stores if _normalize_name(s["name"]) == norm]
+    if name_matches:
+        if not norm_addr:
+            # No address to disambiguate: only safe if a single same-name store.
+            return name_matches[0] if len(name_matches) == 1 else None
+        # Address present but no exact (name+address) hit above. Accept a
+        # same-name store that has no address yet; otherwise treat as a new branch.
+        addr_less = [s for s in name_matches
+                     if not _normalize_for_dedup(s.get("address") or "")]
+        return addr_less[0] if addr_less else None
+
+    # ── Pass 3: Jaccard ≥ 0.85 on significant words (address-guarded) ────────
     raw_sig = _significant_words(raw_name)
     if not raw_sig:
         # Only stop-words in the name → fuzzy matching too unreliable
@@ -4787,8 +4818,13 @@ def _match_store_to_db(raw_name: str, db_stores: list[dict]) -> Optional[dict]:
         if shared == 0:
             continue
         jaccard = shared / len(raw_sig | db_sig)
-        if jaccard >= 0.85:
-            candidates.append((jaccard, s))
+        if jaccard < 0.85:
+            continue
+        # Address guard: both sides have a (different) address → different point.
+        s_addr = _normalize_for_dedup(s.get("address") or "")
+        if norm_addr and s_addr and norm_addr != s_addr:
+            continue
+        candidates.append((jaccard, s))
 
     if not candidates:
         return None
@@ -4878,10 +4914,13 @@ def download_orders_template():
 class OrderImportRow(BaseModel):
     store_id: Optional[int] = None
     store_name_raw: str
+    address_raw: str = ""
     order_number: str = ""
     weight_kg: float = 0.0
     volume_m3: float = 0.0
     amount_rub: float = 0.0
+    quantity: float = 0.0
+    products: str = ""
     notes: str = ""
 
 
@@ -4893,7 +4932,7 @@ class OrderImportRequest(BaseModel):
 
 
 @app.post("/api/orders/preview")
-async def orders_preview(request: Request, file: UploadFile = File(...)):
+async def orders_preview(request: Request, file: UploadFile = File(...), mapping: Optional[str] = Form(None)):
     """
     Parse an Excel file and return:
     - detected column headers
@@ -4938,6 +4977,22 @@ async def orders_preview(request: Request, file: UploadFile = File(...)):
 
     detected_mapping = _detect_column_mapping(headers)
 
+    # Apply user mapping override (sent when the dispatcher corrects an
+    # auto-detected column). Only known fields + headers that exist are honored.
+    if mapping:
+        try:
+            override = json.loads(mapping)
+        except (ValueError, TypeError):
+            override = None
+        if isinstance(override, dict):
+            for field, col in override.items():
+                if field not in detected_mapping:
+                    continue
+                if col is None or col == "":
+                    detected_mapping[field] = None
+                elif col in headers:
+                    detected_mapping[field] = col
+
     # Fetch owner's stores for matching
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -4946,44 +5001,146 @@ async def orders_preview(request: Request, file: UploadFile = File(...)):
     cur.close()
     conn.close()
 
-    # Parse data rows (up to 500 for preview; import can handle more)
+    # Resolve the column index for each detected field once.
+    def _col_idx(field: str) -> Optional[int]:
+        h = detected_mapping.get(field)
+        return headers.index(h) if h and h in headers else None
+
+    idx = {f: _col_idx(f) for f in (
+        "store_name", "address", "product", "quantity", "weight_kg",
+        "volume_m3", "amount_rub", "order_number", "notes", "city",
+        "yandex_url", "time_from", "time_to", "unload_minutes",
+    )}
+
+    def _cell(cells: list, field: str) -> str:
+        i = idx.get(field)
+        if i is None or i >= len(cells):
+            return ""
+        v = cells[i]
+        return str(v).strip() if v is not None else ""
+
+    # Parse ALL data rows and AGGREGATE by (name + address): a 1C-style file has
+    # one product per row, so several rows describe ONE delivery point. Each
+    # unique (name+address) collapses into a single point with summed
+    # weight/volume/amount/quantity and a concatenated product list.
+    MAX_DATA_ROWS = 5000
     data_rows = rows_raw[header_row_idx + 1:]
-    preview_rows = []
-    name_col = detected_mapping.get("store_name")
-    name_col_idx = headers.index(name_col) if name_col and name_col in headers else None
+    points: dict[tuple, dict] = {}
+    order_seq: list[tuple] = []
+    sample_rows: list[tuple] = []   # (cells, key) for the raw preview table
+    total_data_rows = 0
 
-    for row in data_rows[:500]:
+    for row in data_rows[:MAX_DATA_ROWS]:
         cells = list(row) + [None] * max(0, len(headers) - len(row))
-        row_dict = {headers[i]: cells[i] for i in range(len(headers))}
+        name = _cell(cells, "store_name")
+        if not name or name.lower() in ("none", "nan"):
+            continue
+        total_data_rows += 1
+        address = _cell(cells, "address")
+        key = (_normalize_for_dedup(name), _normalize_for_dedup(address))
 
-        # Try to match store
-        matched_store = None
-        if name_col_idx is not None and name_col_idx < len(cells):
-            raw = str(cells[name_col_idx]).strip() if cells[name_col_idx] is not None else ""
-            if raw and raw.lower() not in ("none", "nan", ""):
-                matched_store = _match_store_to_db(raw, db_stores)
+        pt = points.get(key)
+        if pt is None:
+            pt = {
+                "name": name, "address": address,
+                "weight_kg": 0.0, "volume_m3": 0.0, "amount_rub": 0.0,
+                "quantity": 0.0, "_products": [],
+                "order_number": "", "notes": "", "city": "",
+                "yandex_url": "", "time_from": "", "time_to": "",
+                "unload_minutes": "", "order_lines": 0,
+            }
+            points[key] = pt
+            order_seq.append(key)
 
-        preview_rows.append({
-            "cells": {k: (str(v) if v is not None else "") for k, v in row_dict.items()},
-            "matched_store_id": matched_store["id"] if matched_store else None,
-            "matched_store_name": matched_store["name"] if matched_store else None,
+        pt["weight_kg"] += _safe_float(_cell(cells, "weight_kg"))
+        pt["volume_m3"] += _safe_float(_cell(cells, "volume_m3"))
+        pt["amount_rub"] += _safe_float(_cell(cells, "amount_rub"))
+        qv = _safe_float(_cell(cells, "quantity"))
+        pt["quantity"] += qv
+        prod = _cell(cells, "product")
+        if prod:
+            pt["_products"].append((prod, qv))
+        for field in ("order_number", "notes", "city", "yandex_url",
+                      "time_from", "time_to", "unload_minutes"):
+            if not pt[field]:
+                v = _cell(cells, field)
+                if v:
+                    pt[field] = v
+        pt["order_lines"] += 1
+
+        if len(sample_rows) < 50:
+            sample_rows.append((cells, key))
+
+    def _products_str(items: list) -> str:
+        """'Молоко×4, Сахар×16' — merge duplicate products, keep first-seen order."""
+        order, totals = [], {}
+        for prod, q in items:
+            if prod not in totals:
+                totals[prod] = 0.0
+                order.append(prod)
+            totals[prod] += q
+        out = []
+        for prod in order:
+            q = totals[prod]
+            if q and q > 0:
+                qstr = str(int(q)) if float(q).is_integer() else f"{q:g}"
+                out.append(f"{prod}×{qstr}")
+            else:
+                out.append(prod)
+        return ", ".join(out)[:500]
+
+    # Match each aggregated point against the catalog (name + address aware).
+    points_out: list[dict] = []
+    match_by_key: dict[tuple, tuple] = {}
+    matched_points = 0
+    for key in order_seq:
+        pt = points[key]
+        m = _match_store_to_db(pt["name"], pt["address"], db_stores)
+        mid = m["id"] if m else None
+        mname = m["name"] if m else None
+        if mid is not None:
+            matched_points += 1
+        match_by_key[key] = (mid, mname)
+        points_out.append({
+            "name": pt["name"], "address": pt["address"],
+            "matched_store_id": mid, "matched_store_name": mname,
+            "weight_kg": round(pt["weight_kg"], 3),
+            "volume_m3": round(pt["volume_m3"], 4),
+            "amount_rub": round(pt["amount_rub"], 2),
+            "quantity": round(pt["quantity"], 3),
+            "products": _products_str(pt["_products"]),
+            "order_number": pt["order_number"][:100],
+            "notes": pt["notes"][:500],
+            "city": pt["city"], "yandex_url": pt["yandex_url"],
+            "time_from": pt["time_from"], "time_to": pt["time_to"],
+            "unload_minutes": pt["unload_minutes"],
+            "order_lines": pt["order_lines"],
         })
 
-    # Filter out rows where the store name cell is empty
-    preview_rows = [r for r in preview_rows
-                    if name_col is None
-                    or r["cells"].get(name_col, "").strip() not in ("", "None", "nan")]
+    # Raw sample rows for the preview table, highlighted by their point's match.
+    preview_rows = []
+    for cells, key in sample_rows:
+        row_dict = {headers[i]: cells[i] for i in range(len(headers))}
+        mid, mname = match_by_key.get(key, (None, None))
+        preview_rows.append({
+            "cells": {k: (str(v) if v is not None else "") for k, v in row_dict.items()},
+            "matched_store_id": mid,
+            "matched_store_name": mname,
+        })
 
-    matched_count = sum(1 for r in preview_rows if r["matched_store_id"] is not None)
-    total_count = len(preview_rows)
-
+    total_points = len(points_out)
     return {
         "headers": headers,
         "detected_mapping": detected_mapping,
-        "rows": preview_rows[:200],  # cap response size
-        "total_rows": total_count,
-        "matched_stores": matched_count,
-        "unmatched_stores": total_count - matched_count,
+        "rows": preview_rows,            # raw sample (≤50) for the preview table
+        "points": points_out,            # aggregated delivery points (one per name+address)
+        "total_points": total_points,
+        "matched_points": matched_points,
+        "unmatched_points": total_points - matched_points,
+        "total_rows": total_data_rows,   # raw data lines parsed
+        # Backward-compatible aliases — now point-based (the correct semantics).
+        "matched_stores": matched_points,
+        "unmatched_stores": total_points - matched_points,
         "db_stores_count": len(db_stores),
     }
 
@@ -5008,8 +5165,11 @@ def orders_import(request: Request, body: OrderImportRequest):
         row.weight_kg = max(0.0, row.weight_kg)
         row.volume_m3 = max(0.0, row.volume_m3)
         row.amount_rub = max(0.0, row.amount_rub)
+        row.quantity = max(0.0, row.quantity)
         row.store_name_raw = (row.store_name_raw or "").strip()[:200]
+        row.address_raw = (row.address_raw or "").strip()[:300]
         row.order_number = (row.order_number or "").strip()[:100]
+        row.products = (row.products or "").strip()[:500]
         row.notes = (row.notes or "").strip()[:500]
 
     conn = get_db()
@@ -5034,12 +5194,13 @@ def orders_import(request: Request, body: OrderImportRequest):
 
             cur.execute(
                 """INSERT INTO daily_orders
-                   (owner_id, store_id, store_name_raw, order_number,
-                    weight_kg, volume_m3, amount_rub, notes, delivery_date)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                (uid, store_id, row.store_name_raw, row.order_number,
-                 row.weight_kg, row.volume_m3, row.amount_rub, row.notes,
-                 body.delivery_date)
+                   (owner_id, store_id, store_name_raw, address_raw, order_number,
+                    weight_kg, volume_m3, amount_rub, quantity, products, notes,
+                    delivery_date)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (uid, store_id, row.store_name_raw, row.address_raw, row.order_number,
+                 row.weight_kg, row.volume_m3, row.amount_rub, row.quantity,
+                 row.products, row.notes, body.delivery_date)
             )
 
         conn.commit()
@@ -5107,8 +5268,8 @@ def get_orders(request: Request, date: Optional[str] = None):
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        """SELECT o.id, o.store_id, o.store_name_raw, o.order_number,
-                  o.weight_kg, o.volume_m3, o.amount_rub, o.notes,
+        """SELECT o.id, o.store_id, o.store_name_raw, o.address_raw, o.order_number,
+                  o.weight_kg, o.volume_m3, o.amount_rub, o.quantity, o.products, o.notes,
                   o.delivery_date::text as delivery_date,
                   s.name as store_name_db, s.address as store_address
              FROM daily_orders o
@@ -5447,7 +5608,7 @@ def rematch_orders(request: Request, date: Optional[str] = None):
 
     # Get unmatched orders for this date
     cur.execute(
-        "SELECT id, store_name_raw FROM daily_orders WHERE owner_id = %s AND delivery_date = %s AND store_id IS NULL",
+        "SELECT id, store_name_raw, address_raw FROM daily_orders WHERE owner_id = %s AND delivery_date = %s AND store_id IS NULL",
         (uid, target_date)
     )
     unmatched = [dict(r) for r in cur.fetchall()]
@@ -5464,7 +5625,7 @@ def rematch_orders(request: Request, date: Optional[str] = None):
     matched_count = 0
     cur2 = conn.cursor()
     for order in unmatched:
-        match = _match_store_to_db(order["store_name_raw"], db_stores)
+        match = _match_store_to_db(order["store_name_raw"], order.get("address_raw") or "", db_stores)
         if match:
             cur2.execute(
                 "UPDATE daily_orders SET store_id = %s WHERE id = %s AND owner_id = %s",
