@@ -4787,9 +4787,19 @@ def _match_store_to_db(raw_name: str, raw_address: str, db_stores: list[dict]) -
     # ── Pass 1: exact name + address ─────────────────────────────────────────
     if norm_addr:
         for s in db_stores:
-            if (_normalize_name(s["name"]) == norm
-                    and _normalize_for_dedup(s.get("address") or "") == norm_addr):
+            if _normalize_name(s["name"]) != norm:
+                continue
+            db_addr = s.get("address") or ""
+            db_addr_norm = _normalize_for_dedup(db_addr)
+            if db_addr_norm == norm_addr:
                 return s
+            # City-prefix tolerance: bulk-create prepends city to the address
+            # (e.g. "Махачкала, ул. Гагарина, 24" in DB vs "ул. Гагарина, 24"
+            # in the order).  Strip the first comma-segment and retry.
+            if "," in db_addr:
+                db_addr_stripped = _normalize_for_dedup(db_addr.split(",", 1)[1])
+                if db_addr_stripped == norm_addr:
+                    return s
 
     # ── Pass 2: exact name, resolve by address ──────────────────────────────
     name_matches = [s for s in db_stores if _normalize_name(s["name"]) == norm]
@@ -4797,8 +4807,23 @@ def _match_store_to_db(raw_name: str, raw_address: str, db_stores: list[dict]) -
         if not norm_addr:
             # No address to disambiguate: only safe if a single same-name store.
             return name_matches[0] if len(name_matches) == 1 else None
-        # Address present but no exact (name+address) hit above. Accept a
-        # same-name store that has no address yet; otherwise treat as a new branch.
+        # Address present but no exact (name+address) hit above.
+        # 1. Accept a same-name store whose DB address is city-prefixed but
+        #    otherwise equals the order address (Pass 1 handles the full
+        #    comparison; here we recheck the city-stripped form for any
+        #    same-name store that didn't appear in Pass 1).
+        city_strip_matches = []
+        for s in name_matches:
+            db_addr = s.get("address") or ""
+            if not db_addr:
+                continue
+            if "," in db_addr:
+                db_addr_stripped = _normalize_for_dedup(db_addr.split(",", 1)[1])
+                if db_addr_stripped == norm_addr:
+                    city_strip_matches.append(s)
+        if city_strip_matches:
+            return city_strip_matches[0]
+        # 2. Accept a same-name store that has no address yet.
         addr_less = [s for s in name_matches
                      if not _normalize_for_dedup(s.get("address") or "")]
         return addr_less[0] if addr_less else None

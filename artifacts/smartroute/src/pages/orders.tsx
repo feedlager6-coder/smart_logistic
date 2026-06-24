@@ -285,7 +285,8 @@ export function OrdersPage() {
           }
           // Re-run rematch after job completes — MUST await before invalidating cache
           // so daily_orders refetch sees the updated store_id values in DB.
-          try { await fetch("/api/orders/rematch", { method: "POST" }); } catch {}
+          // Pass the selected date so rematch targets the right delivery day.
+          try { await fetch(`/api/orders/rematch?date=${date}`, { method: "POST" }); } catch {}
           await qc.invalidateQueries({ queryKey: ["daily_orders", date] });
           qc.invalidateQueries({ queryKey: ["stores"] });
           setBulkJobId(null);
