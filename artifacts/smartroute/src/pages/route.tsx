@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -450,38 +451,31 @@ export function RoutePage() {
               </div>
             </div>
 
-            {/* Search */}
-            <div className="relative mt-2">
-              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                placeholder="Поиск по названию или адресу..."
-                className="pl-9 h-9"
-                value={search}
-                onChange={e => setSearch(e.target.value)}
-              />
-            </div>
-
-            {/* City filter */}
-            {cities.length > 1 && (
-              <div className="flex gap-1.5 flex-wrap mt-1.5">
-                <span className="flex items-center gap-1 text-xs text-muted-foreground mr-0.5 self-center">
-                  <Filter className="w-3 h-3" />
-                </span>
-                {["all", ...cities].map(c => (
-                  <button
-                    key={c}
-                    onClick={() => setCityFilter(c)}
-                    className={`text-xs px-2.5 py-1 rounded-full border transition-colors font-medium ${
-                      cityFilter === c
-                        ? "bg-primary text-primary-foreground border-primary"
-                        : "bg-background border-border hover:bg-muted text-muted-foreground"
-                    }`}
-                  >
-                    {c === "all" ? "Все города" : c}
-                  </button>
-                ))}
+            {/* Search + city filter — one compact row */}
+            <div className="flex gap-2 mt-2">
+              <div className="relative flex-1">
+                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+                <Input
+                  placeholder="Поиск по названию или адресу..."
+                  className="pl-9 h-9"
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                />
               </div>
-            )}
+              {cities.length > 1 && (
+                <Select value={cityFilter} onValueChange={setCityFilter}>
+                  <SelectTrigger className="h-9 w-[130px] shrink-0 text-xs">
+                    <SelectValue placeholder="Город" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Все города</SelectItem>
+                    {cities.map(c => (
+                      <SelectItem key={c} value={c}>{c}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
 
             {/* Select / Deselect */}
             <div className="flex gap-2 mt-1.5">
