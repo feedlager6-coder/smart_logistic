@@ -27,6 +27,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useListStores } from "@workspace/api-client-react";
 import { Calendar } from "@/components/ui/calendar";
 import { ru } from "date-fns/locale";
+import { format } from "date-fns";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -962,34 +963,26 @@ export function OrdersPage() {
               <PopoverTrigger asChild>
                 <Button
                   variant="outline"
-                  className="w-[160px] justify-start text-left font-normal gap-2 text-sm"
+                  className="w-[148px] justify-start text-left font-normal text-sm"
                 >
-                  {new Date(date + "T00:00:00").toLocaleDateString("ru-RU", {
-                    day: "numeric", month: "long", year: "numeric",
-                  })}
+                  {format(new Date(date + "T00:00:00"), "dd.MM.yyyy")}
                 </Button>
               </PopoverTrigger>
               <PopoverContent className="w-auto p-0" align="end">
+                <style>{`.rdp-day-has-orders{position:relative}.rdp-day-has-orders::after{content:'';position:absolute;bottom:3px;left:50%;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:hsl(var(--primary))}`}</style>
                 <Calendar
                   mode="single"
                   locale={ru}
                   selected={new Date(date + "T00:00:00")}
+                  defaultMonth={new Date(date + "T00:00:00")}
                   onSelect={(d) => {
                     if (d) {
-                      setDate(d.toISOString().slice(0, 10));
+                      setDate(format(d, "yyyy-MM-dd"));
                       setCalendarOpen(false);
                     }
                   }}
                   modifiers={{ hasOrders: activeDates }}
-                  modifiersStyles={{
-                    hasOrders: {
-                      fontWeight: "700",
-                      textDecoration: "underline",
-                      textDecorationColor: "hsl(var(--primary))",
-                      textDecorationThickness: "2px",
-                      textUnderlineOffset: "3px",
-                    },
-                  }}
+                  modifiersClassNames={{ hasOrders: "rdp-day-has-orders" }}
                 />
               </PopoverContent>
             </Popover>
