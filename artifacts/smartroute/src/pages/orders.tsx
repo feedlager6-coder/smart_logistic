@@ -500,7 +500,34 @@ export function OrdersPage() {
   const handleAddSelected = async () => {
     const ids = [...selectedToAdd].filter((id) => !addedStoreIds.has(id));
     if (ids.length === 0) return;
-    setAdding(true);
+
+    // Close combobox & clear selection immediately — user gets instant feedback
+    setComboOpen(false);
+    setSelectedToAdd(new Set());
+
+    // Build placeholder rows from local store data so they appear before server responds
+    const storeMap = new Map(stores.map(s => [s.id, s]));
+    setRows(prev => {
+      const existingStoreIds = new Set(prev.map(r => r.store_id));
+      const placeholders: EditableRow[] = ids
+        .filter(id => !existingStoreIds.has(id))
+        .map(id => ({
+          id: -(id),           // negative = temporary id, replaced on server response
+          store_id: id,
+          store_name_raw: storeMap.get(id)?.name ?? `Магазин #${id}`,
+          store_name_db: storeMap.get(id)?.name ?? null,
+          store_address: storeMap.get(id)?.address ?? null,
+          order_number: "",
+          weight_kg: "",
+          volume_m3: "",
+          amount_rub: "",
+          quantity: 0,
+          products: "",
+          notes: "",
+        }));
+      return [...prev, ...placeholders];
+    });
+
     try {
       const res = await fetch("/api/orders/manual/bulk", {
         method: "POST",
@@ -509,28 +536,42 @@ export function OrdersPage() {
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
+        // Roll back placeholders on error
+        setRows(prev => prev.filter(r => r.id >= 0 || !ids.includes(-(r.id))));
         throw new Error(err.detail ?? "Ошибка добавления");
       }
-      const data: { created: { id: number }[]; skipped: { reason: string }[] } = await res.json();
+      const data: {
+        created: { id: number; store_id: number; store_name_raw: string }[];
+        skipped: { reason: string }[];
+      } = await res.json();
+
+      // Replace placeholders with real server IDs
+      setRows(prev => {
+        const realById = new Map(data.created.map(o => [o.store_id, o]));
+        return prev.map(r => {
+          if (r.id < 0) {
+            const real = realById.get(r.store_id!);
+            if (real) return { ...r, id: real.id, store_name_raw: real.store_name_raw };
+          }
+          return r;
+        });
+      });
+
+      // Background sync — no await
+      qc.invalidateQueries({ queryKey: ["daily_orders", date] });
+
       const created = data.created.length;
       const skipped = data.skipped.filter(s => s.reason === "duplicate").length;
       const failed = data.skipped.filter(s => s.reason === "not_found").length;
-      await qc.invalidateQueries({ queryKey: ["daily_orders", date] });
-      setSelectedToAdd(new Set());
-      setComboOpen(false);
       if (created > 0 || skipped > 0) {
         const parts = [];
         if (created > 0) parts.push(`Добавлено: ${created}`);
         if (skipped > 0) parts.push(`Уже было: ${skipped}`);
         if (failed > 0) parts.push(`Не найдено: ${failed}`);
         toast({ title: "Магазины добавлены", description: parts.join(", ") });
-      } else {
-        toast({ title: "Ошибка", description: "Не удалось добавить магазины", variant: "destructive" });
       }
     } catch (e: any) {
       toast({ title: "Ошибка", description: e.message, variant: "destructive" });
-    } finally {
-      setAdding(false);
     }
   };
 
