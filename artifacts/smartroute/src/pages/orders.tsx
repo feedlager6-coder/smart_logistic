@@ -25,6 +25,8 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useListStores } from "@workspace/api-client-react";
+import { Calendar } from "@/components/ui/calendar";
+import { ru } from "date-fns/locale";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -362,6 +364,24 @@ export function OrdersPage() {
 
   const hasOrders = (savedOrders?.total_count ?? 0) > 0;
 
+  // Query: dates that have at least one order (for calendar highlighting)
+  const { data: activeDatesData, refetch: refetchActiveDates } = useQuery<{ dates: string[] }>({
+    queryKey: ["orders_active_dates"],
+    queryFn: async () => {
+      const res = await fetch("/api/orders/active-dates");
+      if (!res.ok) return { dates: [] };
+      return res.json();
+    },
+    staleTime: 60_000,
+  });
+  const activeDates = useMemo(
+    () => (activeDatesData?.dates ?? []).map((d) => new Date(d + "T00:00:00")),
+    [activeDatesData]
+  );
+
+  // Calendar popover state
+  const [calendarOpen, setCalendarOpen] = useState(false);
+
   // ── Manual orders builder: store combobox + inline editable rows ─────────────
   const { data: storesData } = useListStores();
   const stores = Array.isArray(storesData) ? storesData : [];
@@ -376,8 +396,15 @@ export function OrdersPage() {
   const pendingSaves = useRef(0);
   const savedHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Sync server orders → local editable rows when the order id-set changes
-  // (add / delete / date switch / Excel import). In-flight local edits are preserved by id.
+  // Bug fix: clear rows immediately when date changes so stale rows from the
+  // previous date never show on the new one (even if new date has 0 orders and
+  // serverIds stays "" — an unchanged dep — the second effect never re-fires).
+  useEffect(() => {
+    setRows([]);
+  }, [date]);
+
+  // Sync server orders → local editable rows when the order id-set changes.
+  // In-flight local edits for the SAME date are preserved by id.
   const serverIds = (savedOrders?.orders ?? []).map((o) => o.id).join(",");
   useEffect(() => {
     if (!savedOrders) return;
@@ -403,7 +430,7 @@ export function OrdersPage() {
       });
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [serverIds, date]);
+  }, [serverIds]);
 
   useEffect(() => {
     return () => {
@@ -456,6 +483,7 @@ export function OrdersPage() {
         throw new Error(data.detail || "Не удалось сохранить");
       }
       qc.invalidateQueries({ queryKey: ["daily_orders", date] });
+      refetchActiveDates();
     } catch (e: any) {
       toast({ title: "Ошибка сохранения", description: e.message, variant: "destructive" });
     } finally {
@@ -559,6 +587,7 @@ export function OrdersPage() {
 
       // Background sync — no await
       qc.invalidateQueries({ queryKey: ["daily_orders", date] });
+      refetchActiveDates();
 
       const created = data.created.length;
       const skipped = data.skipped.filter(s => s.reason === "duplicate").length;
@@ -585,6 +614,7 @@ export function OrdersPage() {
       toast({ title: "Ошибка", description: e.message, variant: "destructive" });
     } finally {
       qc.invalidateQueries({ queryKey: ["daily_orders", date] });
+      refetchActiveDates();
     }
   };
 
@@ -792,6 +822,7 @@ export function OrdersPage() {
 
       await qc.invalidateQueries({ queryKey: ["daily_orders", date] });
       await qc.invalidateQueries({ queryKey: ["import_history"] });
+      refetchActiveDates();
       toast({
         title: "Заявки загружены",
         description: `${result.saved_count} точек · ${result.matched_count ?? "?"} сопоставлено · ${result.unmatched_count ?? "?"} нет`,
@@ -812,6 +843,7 @@ export function OrdersPage() {
       const res = await fetch(`/api/orders?date=${date}`, { method: "DELETE" });
       if (!res.ok) throw new Error();
       await qc.invalidateQueries({ queryKey: ["daily_orders", date] });
+      refetchActiveDates();
       // Also clear pending unmatched and any running bulk job
       setPendingUnmatched([]);
       setBulkJobId(null);
@@ -926,14 +958,41 @@ export function OrdersPage() {
         <div className="flex items-center gap-3 shrink-0">
           <div className="flex items-center gap-2">
             <CalendarDays className="w-4 h-4 text-muted-foreground" />
-            <label className="text-sm text-muted-foreground" htmlFor="order-date">Дата</label>
-            <Input
-              id="order-date"
-              type="date"
-              value={date}
-              onChange={(e) => setDate(e.target.value || TODAY)}
-              className="w-[160px]"
-            />
+            <Popover open={calendarOpen} onOpenChange={setCalendarOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="outline"
+                  className="w-[160px] justify-start text-left font-normal gap-2 text-sm"
+                >
+                  {new Date(date + "T00:00:00").toLocaleDateString("ru-RU", {
+                    day: "numeric", month: "long", year: "numeric",
+                  })}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-auto p-0" align="end">
+                <Calendar
+                  mode="single"
+                  locale={ru}
+                  selected={new Date(date + "T00:00:00")}
+                  onSelect={(d) => {
+                    if (d) {
+                      setDate(d.toISOString().slice(0, 10));
+                      setCalendarOpen(false);
+                    }
+                  }}
+                  modifiers={{ hasOrders: activeDates }}
+                  modifiersStyles={{
+                    hasOrders: {
+                      fontWeight: "700",
+                      textDecoration: "underline",
+                      textDecorationColor: "hsl(var(--primary))",
+                      textDecorationThickness: "2px",
+                      textUnderlineOffset: "3px",
+                    },
+                  }}
+                />
+              </PopoverContent>
+            </Popover>
           </div>
           {hasOrders && phase === "idle" && (
             <Button asChild className="gap-2">

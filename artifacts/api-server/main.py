@@ -5330,6 +5330,25 @@ def get_orders(request: Request, date: Optional[str] = None):
     }
 
 
+@app.get("/api/orders/active-dates")
+def get_orders_active_dates(request: Request):
+    """Return list of dates (YYYY-MM-DD) that have at least one order for the current user."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT DISTINCT delivery_date::text
+             FROM daily_orders
+            WHERE owner_id = %s
+            ORDER BY delivery_date""",
+        (uid,)
+    )
+    dates = [row[0] for row in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return {"dates": dates}
+
+
 @app.get("/api/orders/import-history")
 def get_import_history(request: Request, limit: int = Query(50, ge=1, le=200)):
     """Return the last N import history records for the current user."""
