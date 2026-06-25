@@ -9,7 +9,6 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Search, Loader2, MapPin, Truck, Route as RouteIcon, Plus, X, Copy, Save, AlertCircle, Warehouse, ExternalLink, Link, Filter, Package, Weight, AlertTriangle, ChevronDown, ChevronUp, Minus } from "lucide-react";
 import {
   AlertDialog,
@@ -424,14 +423,12 @@ export function RoutePage() {
       )}
 
       {/* ── Main grid: stores (left, wide) + config panel (right) ── */}
-      {/* lg:grid-rows-1 → single row gets 1fr of the flex-1 height, so cards fill
-          exactly the remaining viewport without magic calc() numbers */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 flex-1 min-h-0 lg:grid-rows-1">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 flex-1 min-h-0">
 
         {/* ═══════════════════════════════════════════
             LEFT: Store picker — takes 7/12 columns
             ═══════════════════════════════════════════ */}
-        <Card className="lg:col-span-7 flex flex-col h-[60vh] lg:h-auto">
+        <Card className="lg:col-span-7 flex flex-col h-[56vh] lg:h-[calc(100vh-230px)]">
           <CardHeader className="pb-3 shrink-0">
             {/* Header row */}
             <div className="flex items-center justify-between gap-3">
@@ -491,7 +488,7 @@ export function RoutePage() {
           </CardHeader>
 
           <CardContent className="flex-1 overflow-hidden p-0">
-            <ScrollArea className="h-full px-4 pb-4">
+            <div className="h-full overflow-y-auto px-4 pb-4">
               {isLoading ? (
                 <div className="flex justify-center p-10">
                   <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
@@ -558,14 +555,14 @@ export function RoutePage() {
                   })}
                 </div>
               )}
-            </ScrollArea>
+            </div>
           </CardContent>
         </Card>
 
         {/* ═══════════════════════════════════════════
             RIGHT: Config + Build — 5/12 columns
             ═══════════════════════════════════════════ */}
-        <div className="lg:col-span-5 flex flex-col gap-4">
+        <div className="lg:col-span-5 flex flex-col gap-4 lg:h-[calc(100vh-230px)]">
 
           {/* Scrollable config area */}
           <div className="flex-1 min-h-0 overflow-y-auto space-y-4 pr-0.5">
