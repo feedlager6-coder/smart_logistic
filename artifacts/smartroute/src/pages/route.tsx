@@ -466,7 +466,7 @@ export function RoutePage() {
                   <SelectTrigger className="h-9 w-[130px] shrink-0 text-xs">
                     <SelectValue placeholder="Город" />
                   </SelectTrigger>
-                  <SelectContent>
+                  <SelectContent className="max-h-60">
                     <SelectItem value="all">Все города</SelectItem>
                     {cities.map(c => (
                       <SelectItem key={c} value={c}>{c}</SelectItem>
