@@ -5486,6 +5486,65 @@ class ManualOrderUpdate(BaseModel):
     products: Optional[str] = None
 
 
+class ManualOrderBulkRequest(BaseModel):
+    store_ids: list[int]
+    delivery_date: str  # "YYYY-MM-DD"
+
+
+@app.post("/api/orders/manual/bulk", status_code=201)
+def create_manual_orders_bulk(request: Request, body: ManualOrderBulkRequest):
+    """Create multiple daily order rows at once (skip duplicates). Returns created + skipped counts."""
+    uid = get_user_id(request)
+    if not body.store_ids:
+        return {"created": [], "skipped": []}
+    try:
+        datetime.strptime(body.delivery_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Некорректный формат даты (ожидается YYYY-MM-DD)")
+
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        # Fetch all requested stores in one query (ownership check included)
+        cur.execute(
+            "SELECT id, name FROM stores WHERE id = ANY(%s) AND owner_id = %s",
+            (body.store_ids, uid)
+        )
+        stores_map = {r["id"]: r["name"] for r in cur.fetchall()}
+
+        # Fetch already-existing orders for this date (to detect duplicates)
+        cur.execute(
+            "SELECT store_id FROM daily_orders WHERE owner_id = %s AND delivery_date = %s AND store_id = ANY(%s)",
+            (uid, body.delivery_date, body.store_ids)
+        )
+        already_exists = {r["store_id"] for r in cur.fetchall()}
+
+        created = []
+        skipped = []
+        for sid in body.store_ids:
+            if sid not in stores_map:
+                skipped.append({"store_id": sid, "reason": "not_found"})
+                continue
+            if sid in already_exists:
+                skipped.append({"store_id": sid, "name": stores_map[sid], "reason": "duplicate"})
+                continue
+            cur.execute(
+                """INSERT INTO daily_orders
+                       (owner_id, store_id, store_name_raw, delivery_date,
+                        weight_kg, volume_m3, amount_rub, notes, products, order_number)
+                   VALUES (%s, %s, %s, %s, 0, 0, 0, '', '', '')
+                   RETURNING id, store_id, store_name_raw, delivery_date::text""",
+                (uid, sid, stores_map[sid], body.delivery_date)
+            )
+            created.append(dict(cur.fetchone()))
+
+        conn.commit()
+        return {"created": created, "skipped": skipped}
+    finally:
+        cur.close()
+        conn.close()
+
+
 @app.post("/api/orders/manual", status_code=201)
 def create_manual_order(request: Request, body: ManualOrderRequest):
     """Create a single daily order row manually (no Excel). Returns the created order."""

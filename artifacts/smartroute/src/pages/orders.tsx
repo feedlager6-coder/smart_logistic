@@ -501,35 +501,34 @@ export function OrdersPage() {
     const ids = [...selectedToAdd].filter((id) => !addedStoreIds.has(id));
     if (ids.length === 0) return;
     setAdding(true);
-    let created = 0;
-    let failed = 0;
     try {
-      for (const storeId of ids) {
-        try {
-          const res = await fetch("/api/orders/manual", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ store_id: storeId, delivery_date: date }),
-          });
-          if (!res.ok) throw new Error();
-          created += 1;
-        } catch {
-          failed += 1;
-        }
+      const res = await fetch("/api/orders/manual/bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ store_ids: ids, delivery_date: date }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail ?? "Ошибка добавления");
       }
+      const data: { created: { id: number }[]; skipped: { reason: string }[] } = await res.json();
+      const created = data.created.length;
+      const skipped = data.skipped.filter(s => s.reason === "duplicate").length;
+      const failed = data.skipped.filter(s => s.reason === "not_found").length;
       await qc.invalidateQueries({ queryKey: ["daily_orders", date] });
       setSelectedToAdd(new Set());
       setComboOpen(false);
-      if (created > 0) {
-        toast({
-          title: failed === 0 ? "Магазины добавлены" : "Добавлено частично",
-          description: failed === 0
-            ? `Добавлено магазинов: ${created}`
-            : `Добавлено: ${created}, не удалось: ${failed}`,
-        });
+      if (created > 0 || skipped > 0) {
+        const parts = [];
+        if (created > 0) parts.push(`Добавлено: ${created}`);
+        if (skipped > 0) parts.push(`Уже было: ${skipped}`);
+        if (failed > 0) parts.push(`Не найдено: ${failed}`);
+        toast({ title: "Магазины добавлены", description: parts.join(", ") });
       } else {
         toast({ title: "Ошибка", description: "Не удалось добавить магазины", variant: "destructive" });
       }
+    } catch (e: any) {
+      toast({ title: "Ошибка", description: e.message, variant: "destructive" });
     } finally {
       setAdding(false);
     }
