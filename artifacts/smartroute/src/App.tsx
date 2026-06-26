@@ -6,6 +6,7 @@ import NotFound from "@/pages/not-found";
 
 import { AuthProvider, useAuth } from "@/context/auth";
 import { AppLayout } from "@/components/layout";
+import { ErrorBoundary } from "@/components/error-boundary";
 import { LoginPage } from "@/pages/login";
 import { HomePage } from "@/pages/home";
 import { StoresPage } from "@/pages/stores";
@@ -82,16 +83,20 @@ function ProtectedRouter() {
 
 function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <AuthProvider>
-          <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
-            <ProtectedRouter />
-          </WouterRouter>
-        </AuthProvider>
-        <Toaster />
-      </TooltipProvider>
-    </QueryClientProvider>
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider>
+          <AuthProvider>
+            <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+              <ErrorBoundary>
+                <ProtectedRouter />
+              </ErrorBoundary>
+            </WouterRouter>
+          </AuthProvider>
+          <Toaster />
+        </TooltipProvider>
+      </QueryClientProvider>
+    </ErrorBoundary>
   );
 }
 

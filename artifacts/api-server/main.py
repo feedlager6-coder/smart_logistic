@@ -232,6 +232,7 @@ _matrix_cache: dict = {}
 _matrix_cache_hits: int = 0    # cache lookups that returned a cached result
 _matrix_cache_misses: int = 0  # cache lookups that triggered a live API call
 _gh_call_successes: int = 0    # live API calls that returned a valid matrix
+MAX_MATRIX_CACHE_SIZE: int = 500   # evict oldest entries when exceeded
 
 # Auto-calibrated from the first GH 400 "Too many points" response.
 # Starts at GRAPHHOPPER_CLUSTER_MAX; reduced if the API key plan allows fewer.
@@ -439,6 +440,9 @@ def get_cluster_matrix_gh(coords: list) -> Optional[tuple]:
                 _gh_call_successes, _matrix_cache_hits, len(_matrix_cache),
             )
             _matrix_cache[cache_key] = (distances, times)
+            if len(_matrix_cache) > MAX_MATRIX_CACHE_SIZE:
+                for _old in list(_matrix_cache.keys())[:MAX_MATRIX_CACHE_SIZE // 5]:
+                    _matrix_cache.pop(_old, None)
             return distances, times
 
         logger.warning("GH response missing distances/times: %s", data)
@@ -587,6 +591,9 @@ def get_cluster_matrix_osrm(coords: list) -> Optional[tuple]:
             _osrm_call_successes, _osrm_cache_hits, len(_matrix_cache),
         )
         _matrix_cache[cache_key] = (dist_matrix, time_matrix)
+        if len(_matrix_cache) > MAX_MATRIX_CACHE_SIZE:
+            for _old in list(_matrix_cache.keys())[:MAX_MATRIX_CACHE_SIZE // 5]:
+                _matrix_cache.pop(_old, None)
         return dist_matrix, time_matrix
 
     except urllib.error.HTTPError as exc:
@@ -2959,6 +2966,64 @@ async def startup():
     admin_id = seed_admin_user()  # migrates legacy NULL owner_id data to admin
     seed_demo_data(owner_id=admin_id)  # seeds only if admin has no stores
 
+    # ── Periodic in-memory cleanup ────────────────────────────────────────────
+    t = threading.Thread(target=_memory_cleanup_loop, daemon=True)
+    t.start()
+
+
+def _memory_cleanup_loop() -> None:
+    """Daemon thread: purge stale in-memory entries every 10 minutes.
+
+    Covers four growth vectors:
+    1. _rl_store      — rate-limit buckets whose timestamps are all expired
+    2. _login_attempts — failed-login buckets whose timestamps are all expired
+    3. import_jobs / bulk_create_jobs — completed jobs older than 2 hours
+    4. _matrix_cache   — already capped by MAX_MATRIX_CACHE_SIZE on write;
+                         this adds a safety net in case of a burst
+    """
+    _JOB_TTL  = 2 * 3600   # 2 hours: keep finished jobs for polling
+    _RATE_TTL = 3600        # 1 hour: dead rate-limit keys
+    _INTERVAL = 600         # run every 10 minutes
+
+    while True:
+        time.sleep(_INTERVAL)
+        now = time.time()
+
+        # Rate-limit store: drop keys whose list is empty or entirely expired
+        with _rl_lock:
+            dead = [k for k, ts in list(_rl_store.items())
+                    if not ts or now - max(ts) > _RATE_TTL]
+            for k in dead:
+                _rl_store.pop(k, None)
+
+        # Login-attempt store: drop IPs with no recent attempts
+        with _login_attempts_lock:
+            dead = [ip for ip, ts in list(_login_attempts.items())
+                    if not ts or now - max(ts) > LOGIN_WINDOW_SECONDS * 2]
+            for ip in dead:
+                _login_attempts.pop(ip, None)
+
+        # Completed import/bulk-create jobs older than JOB_TTL
+        for store in (import_jobs, bulk_create_jobs):
+            done_old = [jid for jid, j in list(store.items())
+                        if j.get("done")
+                        and now - j.get("_created_at", now) > _JOB_TTL]
+            for jid in done_old:
+                store.pop(jid, None)
+
+        # Matrix cache safety net (evict oldest 20% if still oversized)
+        if len(_matrix_cache) > MAX_MATRIX_CACHE_SIZE:
+            n_evict = len(_matrix_cache) - MAX_MATRIX_CACHE_SIZE
+            for old_key in list(_matrix_cache.keys())[:n_evict]:
+                _matrix_cache.pop(old_key, None)
+
+        logger.debug(
+            "Memory cleanup: rl_store=%d, login=%d, import_jobs=%d, "
+            "bulk_jobs=%d, matrix_cache=%d",
+            len(_rl_store), len(_login_attempts),
+            len(import_jobs), len(bulk_create_jobs), len(_matrix_cache),
+        )
+
 
 def migrate_moscow_stores():
     """Удаляем старые московские демо-магазины (lat > 50), сохраняя всё остальное."""
@@ -4324,7 +4389,7 @@ async def start_import_stores(
     job: dict = {
         "total": 0, "processed": 0, "imported": 0, "failed": 0,
         "done": False, "stores": [], "duplicates": [], "error": None, "deduped": 0,
-        "skipped_existing": 0, "owner_id": uid,
+        "skipped_existing": 0, "owner_id": uid, "_created_at": time.time(),
     }
     import_jobs[job_id] = job
     t = threading.Thread(target=_import_process_content_sync, args=(content, job, parsed_mapping, uid, safe_mode), daemon=True)
@@ -4638,6 +4703,7 @@ def start_bulk_create_stores(request: Request, body: BulkCreateStartRequest):
         "done": False,
         "cancelled": False,
         "results": [],
+        "_created_at": time.time(),
     }
     bulk_create_jobs[job_id] = job
 
