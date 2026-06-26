@@ -181,7 +181,8 @@ const FIELD_LABELS: Record<string, string> = {
 // Only the store name is required; everything else is used if present.
 const REQUIRED_FIELDS = new Set(["store_name"]);
 
-const TODAY = new Date().toISOString().slice(0, 10);
+// Local-timezone date (avoids UTC-day-boundary bug for Russia UTC+3)
+const TODAY = new Date().toLocaleDateString("sv"); // "sv" locale gives YYYY-MM-DD
 
 function fmt(n: number, digits = 1) {
   return n.toLocaleString("ru-RU", { minimumFractionDigits: 0, maximumFractionDigits: digits });
@@ -207,8 +208,20 @@ export function OrdersPage() {
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
 
-  // Selected delivery date — drives view / import / manual add / clear
-  const [date, setDate] = useState<string>(TODAY);
+  // Selected delivery date — drives view / import / manual add / clear.
+  // Priority: ?date= URL param (coming from route page) → sessionStorage → today.
+  const [date, setDate] = useState<string>(() => {
+    const urlDate = new URLSearchParams(window.location.search).get("date");
+    if (urlDate && /^\d{4}-\d{2}-\d{2}$/.test(urlDate)) return urlDate;
+    const stored = sessionStorage.getItem("smartroute_orders_date");
+    if (stored && /^\d{4}-\d{2}-\d{2}$/.test(stored)) return stored;
+    return TODAY;
+  });
+
+  // Persist selected date to sessionStorage so navigating away and back keeps it.
+  useEffect(() => {
+    sessionStorage.setItem("smartroute_orders_date", date);
+  }, [date]);
   const AUTOSELECT_KEY = `smartroute_autoselect_${date}`;
 
   // State
@@ -980,14 +993,38 @@ export function OrdersPage() {
               <PopoverTrigger asChild>
                 <Button
                   variant="outline"
-                  className="w-[148px] justify-start text-left font-normal text-sm"
+                  className="w-[170px] justify-start text-left font-normal text-sm gap-2"
                 >
-                  {format(new Date(date + "T00:00:00"), "dd.MM.yyyy")}
+                  <span className="font-medium">
+                    {format(new Date(date + "T00:00:00"), "d MMM yyyy", { locale: ru })}
+                  </span>
+                  <span className="text-muted-foreground capitalize text-xs">
+                    {format(new Date(date + "T00:00:00"), "EEEE", { locale: ru })}
+                  </span>
                 </Button>
               </PopoverTrigger>
-              <PopoverContent className="w-auto p-0" align="end">
-                <style>{`.rdp-day-has-orders{position:relative}.rdp-day-has-orders::after{content:'';position:absolute;bottom:3px;left:50%;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:hsl(var(--primary))}`}</style>
+              <PopoverContent className="w-auto p-3" align="end">
+                {/* Dot indicator for days with orders. position:relative is needed on
+                    the day button so the absolute ::after dot is anchored correctly. */}
+                <style>{`
+                  .day-has-orders { position: relative !important; }
+                  .day-has-orders::after {
+                    content: '';
+                    position: absolute;
+                    bottom: 3px;
+                    left: 50%;
+                    transform: translateX(-50%);
+                    width: 4px;
+                    height: 4px;
+                    border-radius: 50%;
+                    background: hsl(var(--primary));
+                    pointer-events: none;
+                  }
+                `}</style>
+                {/* key=calendarOpen remounts the calendar each time it opens so
+                    defaultMonth always reflects the currently selected date */}
                 <Calendar
+                  key={String(calendarOpen)}
                   mode="single"
                   locale={ru}
                   selected={new Date(date + "T00:00:00")}
@@ -999,7 +1036,8 @@ export function OrdersPage() {
                     }
                   }}
                   modifiers={{ hasOrders: activeDates }}
-                  modifiersClassNames={{ hasOrders: "rdp-day-has-orders" }}
+                  modifiersClassNames={{ hasOrders: "day-has-orders" }}
+                  captionLayout="label"
                 />
               </PopoverContent>
             </Popover>

@@ -397,7 +397,7 @@ export function RoutePage() {
               {totalOrderKg > 0 && <> · <Weight className="inline w-3.5 h-3.5 mx-0.5" />{totalOrderKg.toLocaleString("ru-RU", {maximumFractionDigits: 0})} кг</>}
               {todayOrders.total_volume_m3 > 0 && ` · ${todayOrders.total_volume_m3} м³`}
             </p>
-            <a href="/orders" className={`text-xs underline shrink-0 ${isOverCapacity ? "text-amber-600" : "text-blue-600"}`}>изменить</a>
+            <a href={`/orders?date=${todayDate}`} className={`text-xs underline shrink-0 ${isOverCapacity ? "text-amber-600" : "text-blue-600"}`}>изменить</a>
           </div>
           {isOverCapacity && (
             <div className="flex items-start gap-3 rounded-lg border border-red-300 bg-red-50 px-4 py-2.5">
@@ -415,7 +415,7 @@ export function RoutePage() {
               <p className="text-sm text-amber-800">
                 <span className="font-semibold">Данные о весе отсутствуют.</span>{" "}
                 Контроль грузоподъёмности отключён.{" "}
-                <a href="/orders" className="underline">Загрузите файл с весами</a>.
+                <a href={`/orders?date=${todayDate}`} className="underline">Загрузите файл с весами</a>.
               </p>
             </div>
           )}
@@ -425,7 +425,7 @@ export function RoutePage() {
               <p className="text-sm text-amber-800">
                 <span className="font-semibold">Данные об объёме отсутствуют.</span>{" "}
                 Контроль объёма кузова отключён.{" "}
-                <a href="/orders" className="underline">Загрузите файл с объёмами</a>.
+                <a href={`/orders?date=${todayDate}`} className="underline">Загрузите файл с объёмами</a>.
               </p>
             </div>
           )}
