@@ -323,8 +323,9 @@ export function OrdersPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [date]);
 
-  // Weight warning — null = unknown, true = has weight, false = no weight
+  // Weight / volume warnings — null = unknown, true = has data, false = missing
   const [hasWeightData, setHasWeightData] = useState<boolean | null>(null);
+  const [hasVolumeData, setHasVolumeData] = useState<boolean | null>(null);
 
   // Import history
   const { data: importHistory, refetch: refetchHistory } = useQuery<{ imports: ImportHistoryRecord[] }>({
@@ -815,8 +816,9 @@ export function OrdersPage() {
       // triggers a fresh autoselect with newly imported orders.
       sessionStorage.removeItem(AUTOSELECT_KEY);
 
-      // Track whether weight data was present in this import
+      // Track whether weight / volume data was present in this import
       setHasWeightData(result.has_weight ?? true);
+      setHasVolumeData(result.has_volume ?? true);
 
       // Save unmatched data for bulk-create / enhanced prefill in idle view
       setPendingUnmatched(Array.from(unmatchedMap.values()));
@@ -1008,6 +1010,17 @@ export function OrdersPage() {
           <AlertDescription className="text-amber-800">
             <span className="font-semibold">В файле отсутствуют данные о весе.</span>{" "}
             Контроль грузоподъёмности отключён — ограничения по тоннажу не будут учитываться при построении маршрутов.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {/* ── No volume data warning ── */}
+      {hasVolumeData === false && hasOrders && phase === "idle" && (
+        <Alert className="border-amber-300 bg-amber-50">
+          <AlertTriangle className="h-4 w-4 text-amber-600" />
+          <AlertDescription className="text-amber-800">
+            <span className="font-semibold">В файле отсутствуют данные об объёме.</span>{" "}
+            Контроль объёма кузова отключён — ограничения по кубатуре не будут учитываться при построении маршрутов.
           </AlertDescription>
         </Alert>
       )}

@@ -5441,8 +5441,9 @@ def orders_import(request: Request, body: OrderImportRequest):
     )
     row = cur.fetchone()
 
-    # Determine whether any weight data was provided
+    # Determine whether any weight / volume data was provided
     _has_weight = any(r.weight_kg > 0 for r in body.rows)
+    _has_volume = any(r.volume_m3 > 0 for r in body.rows)
     _total_w = float(row[1])   # total_weight from the SELECT above
     _total_v = float(row[2])   # total_volume
     _total_a = float(row[3])   # total_amount
@@ -5473,6 +5474,7 @@ def orders_import(request: Request, body: OrderImportRequest):
         "matched_count": row[4],
         "unmatched_count": row[5],
         "has_weight": _has_weight,
+        "has_volume": _has_volume,
     }
 
 

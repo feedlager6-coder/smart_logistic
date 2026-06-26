@@ -676,6 +676,14 @@ export function RoutePage() {
 
                 {showVehicleDetails && (
                   <div className="space-y-2 border rounded-lg p-2 bg-muted/20 max-h-56 overflow-y-auto">
+                    {/* Column headers */}
+                    <div className="flex items-center gap-2 px-2">
+                      <span className="w-5 shrink-0" />
+                      <span className="flex-1 min-w-0 text-[10px] text-muted-foreground font-medium">Название / водитель</span>
+                      <span className="w-20 shrink-0 text-[10px] text-muted-foreground font-medium text-center">Грузоподъём., кг</span>
+                      <span className="w-16 shrink-0 text-[10px] text-muted-foreground font-medium text-center">Объём, м³</span>
+                      <span className="w-7 shrink-0" />
+                    </div>
                     {vehicles.map((vehicle, idx) => (
                       <div key={vehicle.id} className="flex items-center gap-2 bg-background rounded-md p-2 border">
                         <span className="text-xs text-muted-foreground w-5 text-center shrink-0">{idx + 1}</span>
