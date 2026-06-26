@@ -419,6 +419,16 @@ export function RoutePage() {
               </p>
             </div>
           )}
+          {todayOrders.total_volume_m3 === 0 && !ordersFetching && (
+            <div className="flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <p className="text-sm text-amber-800">
+                <span className="font-semibold">Данные об объёме отсутствуют.</span>{" "}
+                Контроль объёма кузова отключён.{" "}
+                <a href="/orders" className="underline">Загрузите файл с объёмами</a>.
+              </p>
+            </div>
+          )}
         </div>
       )}
 
