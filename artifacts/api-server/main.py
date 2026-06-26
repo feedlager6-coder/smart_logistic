@@ -3576,6 +3576,8 @@ async def import_stores(request: Request, file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail="openpyxl not installed")
 
     content = await file.read()
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Файл слишком большой (макс. 20 МБ)")
     wb = openpyxl.load_workbook(io.BytesIO(content))
     ws = wb.active
 
@@ -3789,6 +3791,8 @@ async def preview_import(request: Request, file: UploadFile = File(...)):
     if not OPENPYXL_AVAILABLE:
         raise HTTPException(status_code=500, detail="openpyxl not installed")
     content = await file.read()
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Файл слишком большой (макс. 20 МБ)")
     try:
         wb = openpyxl.load_workbook(io.BytesIO(content))
     except Exception as e:
@@ -4271,6 +4275,8 @@ async def start_import_stores(
     if not OPENPYXL_AVAILABLE:
         raise HTTPException(status_code=500, detail="openpyxl not installed")
     content = await file.read()
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Файл слишком большой (макс. 20 МБ)")
 
     parsed_mapping: Optional[dict] = None
     if mapping:
