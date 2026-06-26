@@ -6066,13 +6066,33 @@ def build_route(request: Request, body: RouteRequest):
         else:
             demands_m3 = [0.0] + [0.0] * len(store_list)
 
-    # ── Volume capacity warnings ──────────────────────────────────────────────
-    # (inserted here — after demands_m3/capacities_m3 are known, before solve_vrp)
+    # ── Weight & volume capacity warnings ────────────────────────────────────
+    # (inserted here — after demands/capacities and demands_m3/capacities_m3 are known)
+    _any_weight_in_orders = any(v > 0 for v in _store_weights.values()) if _store_weights else False
     _any_volume_in_orders = any(v > 0 for v in _store_volumes.values()) if _store_volumes else False
     route_warnings: list[str] = []   # non-fatal issues surfaced to the frontend
 
+    # Weight warnings
+    if capacities is None and _any_weight_in_orders:
+        # Weight data in orders but no vehicle kg limit set
+        route_warnings.append(
+            "Маршрут построен без учёта веса. "
+            "В заявках есть данные по весу (кг), но ни одна машина не имеет ограничения "
+            "по грузоподъёмности. Укажите «Грузоподъём. (кг)» в настройках транспорта, чтобы "
+            "система учитывала вес при распределении маршрутов."
+        )
+
+    if capacities is not None and not _any_weight_in_orders:
+        # Vehicle has kg limit set but orders have no weight data
+        route_warnings.append(
+            "Данные о весе не заполнены в заявках — "
+            "ограничения по грузоподъёмности (кг) не применяются. "
+            "Добавьте вес в заявки на доставку, чтобы система контролировала загрузку."
+        )
+
+    # Volume warnings
     if capacities_m3 is None and _any_volume_in_orders:
-        # User has volume data in today's orders but set no vehicle m³ limit
+        # Volume data in orders but no vehicle m³ limit set
         route_warnings.append(
             "Маршрут построен без учёта объёма. "
             "В заявках есть данные по объёму (м³), но ни одна машина не имеет ограничения "
@@ -6081,7 +6101,7 @@ def build_route(request: Request, body: RouteRequest):
         )
 
     if capacities_m3 is not None and not _any_volume_in_orders:
-        # Vehicle has m³ limit set but all orders have volume_m3 = 0
+        # Vehicle has m³ limit set but orders have no volume data
         route_warnings.append(
             "Данные об объёме не заполнены в заявках — "
             "ограничения по вместимости кузова (м³) не применяются. "
