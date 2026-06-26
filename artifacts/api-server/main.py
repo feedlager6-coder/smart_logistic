@@ -17,6 +17,7 @@ from typing import Optional
 import secrets
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool as _psycopg2_pool
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, Depends, Request, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -1699,28 +1700,112 @@ def _rebalance_max_stops(routes: list, full_matrix: list, max_stops: int,
     return [r for r in routes if r], total_moves
 
 
-def get_db():
-    """Connect to PostgreSQL.
-
-    Supports both URL format (postgresql://user:pass@host:port/db) and
-    key=value DSN format.  psycopg2 in some environments rejects URL strings
-    when passed as a positional DSN argument — we parse the URL explicitly.
-    """
+def _db_connect_kwargs() -> dict:
+    """Parse DATABASE_URL into psycopg2 connect keyword arguments."""
     url = DATABASE_URL.strip()
     if url.startswith("postgres://") or url.startswith("postgresql://"):
-        import urllib.parse as _urlparse
-        parsed = _urlparse.urlparse(url)
-        conn = psycopg2.connect(
+        parsed = urllib.parse.urlparse(url)
+        return dict(
             host=parsed.hostname,
             port=parsed.port or 5432,
             dbname=(parsed.path or "/").lstrip("/"),
             user=parsed.username,
             password=parsed.password,
         )
-    else:
-        conn = psycopg2.connect(url)
-    conn.autocommit = False
-    return conn
+    return {"dsn": url}
+
+
+# ── Connection pool ───────────────────────────────────────────────────────────
+# Lazily initialised on first get_db() call so startup errors are surfaced
+# through FastAPI's normal exception handling rather than at import time.
+_db_pool: Optional[_psycopg2_pool.ThreadedConnectionPool] = None
+_db_pool_lock = threading.Lock()
+
+
+def _get_pool() -> _psycopg2_pool.ThreadedConnectionPool:
+    """Return the shared connection pool, creating it on first call (thread-safe)."""
+    global _db_pool
+    if _db_pool is None:
+        with _db_pool_lock:
+            if _db_pool is None:
+                _db_pool = _psycopg2_pool.ThreadedConnectionPool(
+                    minconn=2, maxconn=15, **_db_connect_kwargs()
+                )
+    return _db_pool
+
+
+class _PooledConn:
+    """Thin wrapper around a psycopg2 connection borrowed from the pool.
+
+    Intercepts .close() to return the connection to the pool instead of
+    destroying it, so ALL existing call-sites work without modification.
+    Rolls back any open transaction before returning so the next borrower
+    always receives a clean connection.
+    """
+    __slots__ = ("_conn", "_pool", "_closed")
+
+    def __init__(self, conn, pool: _psycopg2_pool.ThreadedConnectionPool):
+        object.__setattr__(self, "_conn", conn)
+        object.__setattr__(self, "_pool", pool)
+        object.__setattr__(self, "_closed", False)
+
+    # Pass attribute reads through to the underlying connection.
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_conn"), name)
+
+    # Pass attribute writes through (e.g. conn.autocommit = False).
+    def __setattr__(self, name, value):
+        if name in _PooledConn.__slots__:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(object.__getattribute__(self, "_conn"), name, value)
+
+    def close(self):
+        """Return the connection to the pool (idempotent)."""
+        if object.__getattribute__(self, "_closed"):
+            return
+        object.__setattr__(self, "_closed", True)
+        conn = object.__getattribute__(self, "_conn")
+        pool = object.__getattribute__(self, "_pool")
+        try:
+            # Roll back any open transaction so the next borrower gets a
+            # clean connection regardless of what happened in this request.
+            if not conn.closed:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            pool.putconn(conn)
+        except Exception:
+            # Last resort: destroy the connection rather than leak it.
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def get_db() -> _PooledConn:
+    """Borrow a connection from the pool.
+
+    Supports both URL and key=value DSN formats.
+    Falls back to a direct connection if the pool is temporarily exhausted,
+    so the server degrades gracefully rather than returning 500.
+    """
+    try:
+        pool = _get_pool()
+        raw = pool.getconn()
+        raw.autocommit = False
+        return _PooledConn(raw, pool)
+    except _psycopg2_pool.PoolError:
+        # Pool exhausted — open a direct connection as a safety valve.
+        logging.warning("DB pool exhausted — opening a direct connection")
+        kwargs = _db_connect_kwargs()
+        if "dsn" in kwargs:
+            conn = psycopg2.connect(kwargs["dsn"])
+        else:
+            conn = psycopg2.connect(**kwargs)
+        conn.autocommit = False
+        return conn  # type: ignore[return-value]
 
 
 def init_db():
