@@ -405,16 +405,31 @@ export function OrdersPage() {
     setRows([]);
   }, [date]);
 
-  // Sync server orders → local editable rows when the order id-set changes.
-  // In-flight local edits for the SAME date are preserved by id.
-  const serverIds = (savedOrders?.orders ?? []).map((o) => o.id).join(",");
+  // Sync server orders → local editable rows when the order id-set OR their
+  // store assignments change. Including store_id in the key ensures the effect
+  // re-fires after /api/orders/rematch updates store_id on existing rows
+  // (without changing the set of IDs), so matching indicators update immediately.
+  const serverIds = (savedOrders?.orders ?? [])
+    .map((o) => `${o.id}:${o.store_id ?? 0}`)
+    .join(",");
   useEffect(() => {
     if (!savedOrders) return;
     setRows((prev) => {
       const prevById = new Map(prev.map((r) => [r.id, r]));
       return savedOrders.orders.map((o) => {
         const existing = prevById.get(o.id);
-        if (existing) return existing;
+        if (existing) {
+          // Preserve user's in-flight edits (weight/notes/etc.) but always
+          // sync store-matching fields from the server — rematch may have
+          // updated store_id / store_name_db / store_address.
+          if (existing.store_id === o.store_id) return existing;
+          return {
+            ...existing,
+            store_id: o.store_id,
+            store_name_db: o.store_name_db,
+            store_address: o.store_address,
+          };
+        }
         return {
           id: o.id,
           store_id: o.store_id,
