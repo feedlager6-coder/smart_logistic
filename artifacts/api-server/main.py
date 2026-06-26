@@ -171,6 +171,36 @@ def _clear_login_attempts(ip: str) -> None:
         _login_attempts.pop(ip, None)
 
 
+# ── General-purpose API rate limiter ─────────────────────────────────────────
+# Keyed by arbitrary string (e.g. "vrp:42", "import:42") so each endpoint
+# can have its own bucket per user.  Uses the same sliding-window pattern as
+# the login rate limiter above.
+_rl_store: dict = {}          # {key: [timestamp, ...]}
+_rl_lock = threading.Lock()
+
+
+def _api_rate_limit(key: str, max_calls: int, window_seconds: int) -> None:
+    """Raise HTTP 429 if *key* has been called more than *max_calls* times
+    within the last *window_seconds* seconds.
+
+    Thread-safe. Old timestamps are cleaned up on every call so the dict
+    does not grow without bound.
+    """
+    now = time.time()
+    with _rl_lock:
+        ts = _rl_store.get(key, [])
+        ts = [t for t in ts if now - t < window_seconds]   # evict expired
+        if len(ts) >= max_calls:
+            retry_after = max(1, int(window_seconds - (now - ts[0])) + 1)
+            raise HTTPException(
+                status_code=429,
+                detail=f"Слишком много запросов. Подождите {retry_after} сек.",
+                headers={"Retry-After": str(retry_after)},
+            )
+        ts.append(now)
+        _rl_store[key] = ts
+
+
 # Paths that do NOT require authentication
 _AUTH_PUBLIC_PATHS = {"/api/healthz", "/api/auth/login"}
 
@@ -3572,6 +3602,7 @@ def export_stores(request: Request):
 @app.post("/api/stores/import")
 async def import_stores(request: Request, file: UploadFile = File(...)):
     owner_id = get_user_id(request)
+    _api_rate_limit(f"stores_import:{owner_id}", max_calls=10, window_seconds=60)
     if not OPENPYXL_AVAILABLE:
         raise HTTPException(status_code=500, detail="openpyxl not installed")
 
@@ -3788,6 +3819,7 @@ async def preview_import(request: Request, file: UploadFile = File(...)):
     Also checks how many rows already exist in the DB (by normalized name+address).
     Used by the frontend to show a mapping dialog before the actual import."""
     uid = get_user_id(request)
+    _api_rate_limit(f"stores_preview:{uid}", max_calls=20, window_seconds=60)
     if not OPENPYXL_AVAILABLE:
         raise HTTPException(status_code=500, detail="openpyxl not installed")
     content = await file.read()
@@ -4272,6 +4304,7 @@ async def start_import_stores(
     mapping: optional JSON string with column indices {name, address, city, yandex, unload, tw_from, tw_to}.
     import_mode: 'new_only' (default, skip existing), 'update' (update existing), 'all' (always insert)."""
     uid = get_user_id(request)
+    _api_rate_limit(f"stores_import:{uid}", max_calls=10, window_seconds=60)
     if not OPENPYXL_AVAILABLE:
         raise HTTPException(status_code=500, detail="openpyxl not installed")
     content = await file.read()
@@ -5058,6 +5091,7 @@ async def orders_preview(request: Request, file: UploadFile = File(...), mapping
     - per-row store match results against caller's store base
     """
     uid = get_user_id(request)
+    _api_rate_limit(f"orders_preview:{uid}", max_calls=20, window_seconds=60)
 
     content = await file.read()
     if len(content) > 20 * 1024 * 1024:
@@ -5846,6 +5880,7 @@ def rematch_orders(request: Request, date: Optional[str] = None):
 @app.post("/api/route/build")
 def build_route(request: Request, body: RouteRequest):
     uid = get_user_id(request)
+    _api_rate_limit(f"vrp:{uid}", max_calls=3, window_seconds=120)
     if not body.store_ids:
         raise HTTPException(status_code=400, detail="No stores selected")
     if not body.vehicles:
