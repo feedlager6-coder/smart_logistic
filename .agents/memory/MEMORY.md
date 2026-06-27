@@ -40,3 +40,5 @@
 - [API key hard-delete pattern](api-key-hard-delete.md) — DELETE /api/auth/api-keys/{id} = soft revoke (audit trail kept). Add ?permanent=true for hard delete. DELETE /api/auth/api-keys (no id) = purge ALL revoked for current user. Admin test key cleanup: DELETE /api/admin/api-keys/cleanup-test.
 - [Integration package location](integration-package.md) — docs/ in artifacts/api-server/: Google Sheets (Apps Script), МойСклад (Python), Bitrix24 (webhook + REST), 1С (BSL), Python SDK (smartroute_client.py), JS SDK (smartroute-client.js), Postman collection JSON, README index.
 - [Integrations pattern](integrations-pattern.md) — tables integrations+sync_logs; config JSONB stores api_key_id; _record_integration_sync hooks into v1_orders_batch; BSL module served as base64.
+- [1C integration format decision](1c-integration-format.md) — EPF binary not generatable from Python (V8 container); BSL+ZIP is the correct universal approach.
+- [quick-setup key rotation](quick-setup-key-rotation.md) — quick-setup atomically revokes old api_key_id before creating new key; ZIP package_b64 returned once in response.

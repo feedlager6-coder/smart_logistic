@@ -7,6 +7,7 @@ import urllib.request
 import urllib.parse
 import time
 import io
+import zipfile
 import logging
 import threading
 import concurrent.futures
@@ -7200,6 +7201,86 @@ def list_integrations(request: Request):
     return rows
 
 
+def _generate_1c_zip(base_url: str, api_key: str) -> bytes:
+    """Build a personalised ZIP package for the 1C specialist.
+
+    Contents:
+      SmartRoute_1C/SmartRoute.bsl   — BSL module with URL + key pre-filled
+      SmartRoute_1C/Инструкция.txt  — plain-text instructions in Russian
+    """
+    import datetime as _dt
+    today = _dt.date.today().strftime("%d.%m.%Y")
+
+    bsl = _1C_BSL_MODULE.replace("{{BASE_URL}}", base_url).replace("{{API_KEY}}", api_key)
+
+    readme = (
+        "SmartRoute — Пакет интеграции для 1С:Предприятие 8.3+\n"
+        "=====================================================\n"
+        f"Дата создания: {today}\n"
+        "\n"
+        "ЧТО В ЭТОМ АРХИВЕ:\n"
+        "  SmartRoute.bsl       — программный модуль (URL и ключ уже встроены)\n"
+        "  Инструкция.txt       — эта инструкция\n"
+        "\n"
+        "────────────────────────────────────────────────────\n"
+        "ДЛЯ ДИРЕКТОРА / ЛОГИСТА\n"
+        "────────────────────────────────────────────────────\n"
+        "Передайте этот ZIP-архив специалисту по 1С.\n"
+        "Установка займёт 15–30 минут.\n"
+        "После установки заказы будут передаваться\n"
+        "в SmartRoute автоматически каждое утро.\n"
+        "\n"
+        "────────────────────────────────────────────────────\n"
+        "ДЛЯ СПЕЦИАЛИСТА ПО 1С\n"
+        "────────────────────────────────────────────────────\n"
+        "\n"
+        "1. СОЗДАЙТЕ ВНЕШНЮЮ ОБРАБОТКУ\n"
+        "   Откройте 1С:Предприятие в режиме Конфигуратора.\n"
+        "   Файл → Новый → Внешняя обработка\n"
+        "   Имя объекта: SmartRoute\n"
+        "   Синоним: SmartRoute — передача заявок\n"
+        "\n"
+        "2. ДОБАВЬТЕ ФОРМУ\n"
+        "   Дерево: Формы → кнопка «Добавить»\n"
+        "   Тип: Произвольная форма → ОК\n"
+        "   Перейдите на вкладку «Модуль»\n"
+        "\n"
+        "3. ВСТАВЬТЕ КОД\n"
+        "   Откройте файл SmartRoute.bsl из этого архива\n"
+        "   Скопируйте всё содержимое (Ctrl+A → Ctrl+C)\n"
+        "   Вставьте в модуль формы (Ctrl+V)\n"
+        "\n"
+        "4. СОХРАНИТЕ КАК EPF\n"
+        "   Файл → Сохранить как... → тип «Внешняя обработка (*.epf)»\n"
+        "   Имя файла: SmartRoute\n"
+        "\n"
+        "5. ПРОВЕРЬТЕ СОЕДИНЕНИЕ\n"
+        "   Откройте SmartRoute.epf в режиме Предприятия\n"
+        "   (Файл → Открыть → найдите SmartRoute.epf)\n"
+        "   Нажмите «Проверить соединение»\n"
+        "   Ожидаемый результат: «✅ Соединение успешно. SmartRoute подключён.»\n"
+        "\n"
+        "6. НАСТРОЙТЕ РАСПИСАНИЕ (для автоматической отправки)\n"
+        "   Конфигуратор → Регламентные задания → Добавить\n"
+        "   Метод: ОтправитьЗаявкиВSmartRoute\n"
+        "   Расписание: ежедневно в 07:30\n"
+        "\n"
+        "ВСТРОЕННЫЕ НАСТРОЙКИ:\n"
+        f"  URL:      {base_url}\n"
+        f"  API-ключ: {api_key}\n"
+        "\n"
+        "(Менять не нужно — уже встроены в SmartRoute.bsl)\n"
+        "\n"
+        "ПОДДЕРЖКА: support@smartroute.app\n"
+    )
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("SmartRoute_1C/SmartRoute.bsl", bsl.encode("utf-8-sig"))
+        zf.writestr("SmartRoute_1C/Инструкция.txt", readme.encode("utf-8-sig"))
+    return buf.getvalue()
+
+
 @app.post("/api/integrations/quick-setup", status_code=201)
 def quick_setup_integration(request: Request):
     """Одношаговая настройка интеграции 1С.
@@ -7238,13 +7319,28 @@ def quick_setup_integration(request: Request):
 
     # Check for existing 1C integration
     cur.execute(
-        "SELECT id FROM integrations WHERE owner_id=%s AND type='1c' ORDER BY created_at DESC LIMIT 1",
+        "SELECT id, config FROM integrations WHERE owner_id=%s AND type='1c' ORDER BY created_at DESC LIMIT 1",
         (uid,)
     )
     existing = cur.fetchone()
 
     if existing:
         integration_id = existing["id"]
+
+        # Revoke the previous integration API key so old credentials stop working
+        old_config = existing["config"] or {}
+        if isinstance(old_config, str):
+            try:
+                old_config = json.loads(old_config)
+            except Exception:
+                old_config = {}
+        old_key_id = old_config.get("api_key_id")
+        if old_key_id and old_key_id != api_key_id:
+            cur.execute(
+                "UPDATE api_keys SET is_active = FALSE WHERE id = %s AND owner_id = %s",
+                (old_key_id, uid)
+            )
+
         # Update config with new key and set status to setup (waiting for first sync)
         cur.execute(
             """UPDATE integrations
@@ -7266,12 +7362,18 @@ def quick_setup_integration(request: Request):
     cur.close()
     conn.close()
 
+    # Build the ZIP package (key embedded) and return as base64 — generated once
+    import base64 as _b64
+    package_bytes = _generate_1c_zip(base_url, full_key)
+    package_b64 = _b64.b64encode(package_bytes).decode()
+
     return {
         **_integration_row_to_dict(row),
         "api_key_id": api_key_id,
         "key_prefix": prefix,
-        "full_key": full_key,   # shown ONCE — embed in BSL
+        "full_key": full_key,      # shown ONCE on screen
         "base_url": base_url,
+        "package_b64": package_b64,  # ready-to-download ZIP
     }
 
 
