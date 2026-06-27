@@ -7200,6 +7200,81 @@ def list_integrations(request: Request):
     return rows
 
 
+@app.post("/api/integrations/quick-setup", status_code=201)
+def quick_setup_integration(request: Request):
+    """Одношаговая настройка интеграции 1С.
+
+    Создаёт (или обновляет) запись интеграции и новый API-ключ с нужными правами.
+    Полный ключ возвращается один раз — сохраните его в BSL-модуле.
+
+    Требует сессионной аутентификации (cookie). Вызовы через Bearer API-ключ отклоняются,
+    чтобы предотвратить возможность создания новых ключей через ранее выданный ключ.
+    """
+    # Reject API-key-based auth — only browser sessions may mint new keys
+    username = getattr(request.state, "username", "")
+    if username.startswith("api_key:"):
+        raise HTTPException(
+            status_code=403,
+            detail="Этот endpoint доступен только через браузерную сессию, не через API-ключ."
+        )
+    uid = get_user_id(request)
+    base_url = str(request.base_url).rstrip("/")
+
+    full_key, prefix = _generate_api_key()
+    key_hash = _hash_api_key(full_key)
+
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    # Create a dedicated API key for this integration
+    import datetime as _dt
+    key_name = "1С — SmartRoute (" + _dt.date.today().strftime("%d.%m.%Y") + ")"
+    cur.execute(
+        """INSERT INTO api_keys (owner_id, name, key_prefix, key_hash, scopes)
+           VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+        (uid, key_name, prefix, key_hash, ["orders:write", "webhooks:receive"])
+    )
+    api_key_id = cur.fetchone()["id"]
+
+    # Check for existing 1C integration
+    cur.execute(
+        "SELECT id FROM integrations WHERE owner_id=%s AND type='1c' ORDER BY created_at DESC LIMIT 1",
+        (uid,)
+    )
+    existing = cur.fetchone()
+
+    if existing:
+        integration_id = existing["id"]
+        # Update config with new key and set status to setup (waiting for first sync)
+        cur.execute(
+            """UPDATE integrations
+               SET config = config || %s::jsonb, status='setup'
+               WHERE id=%s
+               RETURNING id, type, name, status, config, last_sync_at, created_at""",
+            (json.dumps({"api_key_id": api_key_id, "base_url": base_url}), integration_id)
+        )
+    else:
+        cur.execute(
+            """INSERT INTO integrations (owner_id, type, name, status, config)
+               VALUES (%s, '1c', '1С:Предприятие', 'setup', %s)
+               RETURNING id, type, name, status, config, last_sync_at, created_at""",
+            (uid, json.dumps({"api_key_id": api_key_id, "base_url": base_url}))
+        )
+
+    row = dict(cur.fetchone())
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {
+        **_integration_row_to_dict(row),
+        "api_key_id": api_key_id,
+        "key_prefix": prefix,
+        "full_key": full_key,   # shown ONCE — embed in BSL
+        "base_url": base_url,
+    }
+
+
 @app.post("/api/integrations")
 def create_integration(request: Request, body: IntegrationCreate):
     """Создать интеграцию."""

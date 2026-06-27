@@ -1,9 +1,8 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -20,9 +19,7 @@ import {
   XCircle,
   Loader2,
   Download,
-  Plug,
   RefreshCw,
-  Settings,
   Trash2,
   Clock,
   Package,
@@ -33,17 +30,15 @@ import {
   Database,
   FileCode2,
   BarChart3,
+  Copy,
+  Check,
+  ExternalLink,
+  Info,
+  Wifi,
+  WifiOff,
 } from "lucide-react";
 
-// ─── Types ───────────────────────────────────────────────────────────────────
-
-interface ApiKey {
-  id: number;
-  name: string;
-  key_prefix: string;
-  scopes: string[];
-  is_active: boolean;
-}
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface Integration {
   id: number;
@@ -97,17 +92,23 @@ function friendlyDate(iso: string | null) {
   if (diffMin < 60) return `${diffMin} мин назад`;
   const diffH = Math.floor(diffMin / 60);
   if (diffH < 24) return `${diffH} ч назад`;
-  return d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleDateString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function statusBadge(status: string) {
   switch (status) {
     case "active":
-      return <Badge className="bg-emerald-100 text-emerald-800 border-emerald-200">🟢 Подключено</Badge>;
+      return <Badge className="bg-emerald-100 text-emerald-800 border-emerald-200">🟢 Работает</Badge>;
     case "error":
       return <Badge className="bg-red-100 text-red-800 border-red-200">🔴 Ошибка</Badge>;
     case "setup":
-      return <Badge className="bg-amber-100 text-amber-800 border-amber-200">🟡 Настройка</Badge>;
+      return <Badge className="bg-amber-100 text-amber-800 border-amber-200">🟡 Ожидание</Badge>;
     case "disabled":
       return <Badge className="bg-gray-100 text-gray-600 border-gray-200">⚪ Отключено</Badge>;
     default:
@@ -124,6 +125,223 @@ function downloadBase64(data: string, filename: string) {
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+/** Generate personalized BSL module with real URL and API key embedded */
+function generatePersonalizedBsl(baseUrl: string, apiKey: string): string {
+  return `// ╔══════════════════════════════════════════════════════════════════╗
+// ║   SmartRoute — Модуль интеграции для 1С:Предприятие 8.3+        ║
+// ╠══════════════════════════════════════════════════════════════════╣
+// ║  Версия: 2.1  |  Автоматически настроен ${new Date().toLocaleDateString("ru-RU")}            ║
+// ╠══════════════════════════════════════════════════════════════════╣
+// ║  КАК УСТАНОВИТЬ (для программиста 1С):                          ║
+// ║  1. Конфигуратор → Файл → Новый → Внешняя обработка             ║
+// ║  2. Имя: SmartRoute, Синоним: SmartRoute — отправка заявок      ║
+// ║  3. Формы → Добавить → скопируйте этот код в Модуль формы       ║
+// ║  4. Откройте в режиме Предприятия → нажмите "Проверить"         ║
+// ╚══════════════════════════════════════════════════════════════════╝
+
+#Область НастройкиИнтеграции
+
+Перем НастройкиSmartRoute;
+
+Процедура ИнициализироватьНастройки()
+    НастройкиSmartRoute = Новый Структура;
+    НастройкиSmartRoute.Вставить("URL",          "${baseUrl}");   // ← адрес SmartRoute (не менять)
+    НастройкиSmartRoute.Вставить("APIКлюч",      "${apiKey}");  // ← ваш ключ (не менять)
+    НастройкиSmartRoute.Вставить("ЗаменитьДату", Истина);
+    НастройкиSmartRoute.Вставить("ДатаОтправки", ТекущаяДата());
+    НастройкиSmartRoute.Вставить("ТипДокумента", "ЗаказПокупателя"); // ← адаптируйте при необходимости
+КонецПроцедуры
+
+#КонецОбласти
+
+#Область ПолучениеДанных
+
+Функция ПолучитьЗаявки(ДатаДоставки)
+    МассивЗаявок = Новый Массив;
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+        "ВЫБРАТЬ
+        |    Документ.Контрагент.НаименованиеПолное КАК НазваниеМагазина,
+        |    Документ.АдресДоставки КАК Адрес,
+        |    СУММА(СтрокаТовары.Количество * СтрокаТовары.Цена) КАК Сумма,
+        |    СУММА(СтрокаТовары.Количество * СтрокаТовары.Номенклатура.Вес) КАК ВесКг,
+        |    СУММА(СтрокаТовары.Количество) КАК КоличествоМест,
+        |    Документ.НомерДокументаПолный КАК НомерЗаказа
+        |ИЗ
+        |    Документ.ЗаказПокупателя КАК Документ
+        |        ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.ЗаказПокупателя.Товары КАК СтрокаТовары
+        |        ПО Документ.Ссылка = СтрокаТовары.Ссылка
+        |ГДЕ
+        |    Документ.Дата >= &ДатаНачало
+        |    И Документ.Дата < &ДатаКонец
+        |    И Документ.Проведен = ИСТИНА
+        |    И НЕ Документ.ПометкаУдаления
+        |СГРУППИРОВАТЬ ПО
+        |    Документ.Контрагент.НаименованиеПолное,
+        |    Документ.АдресДоставки,
+        |    Документ.НомерДокументаПолный";
+
+    Запрос.УстановитьПараметр("ДатаНачало", НачалоДня(ДатаДоставки));
+    Запрос.УстановитьПараметр("ДатаКонец",  НачалоДня(ДатаДоставки) + 86400);
+
+    Попытка
+        Выборка = Запрос.Выполнить().Выбрать();
+        Пока Выборка.Следующий() Цикл
+            Заявка = Новый Структура;
+            Заявка.Вставить("store_name",    СокрЛП(Выборка.НазваниеМагазина));
+            Заявка.Вставить("address",       СокрЛП(Выборка.Адрес));
+            Заявка.Вставить("delivery_date", Формат(ДатаДоставки, "ДФ=гггг-ММ-дд"));
+            Заявка.Вставить("weight_kg",     ?(Выборка.ВесКг = NULL, 0, Выборка.ВесКг));
+            Заявка.Вставить("quantity",      ?(Выборка.КоличествоМест = NULL, 0, Выборка.КоличествоМест));
+            Заявка.Вставить("amount_rub",    ?(Выборка.Сумма = NULL, 0, Выборка.Сумма));
+            Заявка.Вставить("order_number",  СокрЛП(Выборка.НомерЗаказа));
+            МассивЗаявок.Добавить(Заявка);
+        КонецЦикла;
+    Исключение
+        Сообщить("SmartRoute: Ошибка получения данных: " + ОписаниеОшибки());
+    КонецПопытки;
+    Возврат МассивЗаявок;
+КонецФункции
+
+#КонецОбласти
+
+#Область ОтправкаДанных
+
+Функция СформироватьJSON(МассивЗаявок)
+    ЗаписьJSON = Новый ЗаписьJSON;
+    ЗаписьJSON.УстановитьСтроку(Новый ПараметрыЗаписиJSON(ПереносСтрокJSON.Авто));
+    ЗаписьJSON.ЗаписатьНачалоОбъекта();
+    ЗаписьJSON.ЗаписатьИмяСвойства("orders");
+    ЗаписьJSON.ЗаписатьНачалоМассива();
+    Для Каждого Заявка Из МассивЗаявок Цикл
+        ЗаписьJSON.ЗаписатьНачалоОбъекта();
+        Для Каждого КЗ Из Заявка Цикл
+            ЗаписьJSON.ЗаписатьИмяСвойства(КЗ.Ключ);
+            ЗаписьJSON.ЗаписатьЗначение(КЗ.Значение);
+        КонецЦикла;
+        ЗаписьJSON.ЗаписатьКонецОбъекта();
+    КонецЦикла;
+    ЗаписьJSON.ЗаписатьКонецМассива();
+    ЗаписьJSON.ЗаписатьИмяСвойства("replace_date");
+    ЗаписьJSON.ЗаписатьЗначение(Истина);
+    ЗаписьJSON.ЗаписатьКонецОбъекта();
+    Возврат ЗаписьJSON.Закрыть();
+КонецФункции
+
+Функция ОтправитьЗаявкиВSmartRoute(ДатаДоставки = Неопределено) Экспорт
+    ИнициализироватьНастройки();
+    Если ДатаДоставки = Неопределено Тогда
+        ДатаДоставки = НастройкиSmartRoute["ДатаОтправки"];
+    КонецЕсли;
+
+    МассивЗаявок = ПолучитьЗаявки(ДатаДоставки);
+    Если МассивЗаявок.Количество() = 0 Тогда
+        Возврат "⚠️ Нет проведённых заказов за " + Формат(ДатаДоставки, "ДЛФ=D");
+    КонецЕсли;
+
+    URLСервера = НастройкиSmartRoute["URL"];
+    Если Прав(URLСервера, 1) = "/" Тогда
+        URLСервера = Лев(URLСервера, СтрДлина(URLСервера) - 1);
+    КонецЕсли;
+
+    ЗащитаSSL = ?(НРег(Лев(URLСервера, 5)) = "https", Новый ЗащищённоеСоединениеOpenSSL(), Неопределено);
+    ЧастиURL = СтрРазделить(СтрЗаменить(СтрЗаменить(URLСервера, "https://", ""), "http://", ""), "/");
+    Хост = ЧастиURL[0];
+
+    HTTPСоединение = Новый HTTPСоединение(Хост, , , , , 30, ЗащитаSSL);
+    Запрос = Новый HTTPЗапрос("/api/v1/orders/batch");
+    Запрос.Заголовки.Вставить("Content-Type",  "application/json; charset=utf-8");
+    Запрос.Заголовки.Вставить("Authorization", "Bearer " + НастройкиSmartRoute["APIКлюч"]);
+    Запрос.УстановитьТелоИзСтроки(СформироватьJSON(МассивЗаявок), "UTF-8");
+
+    Попытка
+        Ответ = HTTPСоединение.ВызватьHTTPМетод("POST", Запрос);
+    Исключение
+        Возврат "❌ Нет связи с SmartRoute (" + Хост + "). Проверьте интернет на сервере 1С. " + ОписаниеОшибки();
+    КонецПопытки;
+
+    ТелоОтвета = Ответ.ПолучитьТелоКакСтроку("UTF-8");
+
+    Если Ответ.КодСостояния = 200 Тогда
+        ЧтениеJSON = Новый ЧтениеJSON;
+        ЧтениеJSON.УстановитьСтроку(ТелоОтвета);
+        Данные = ПрочитатьJSON(ЧтениеJSON, Истина);
+        Рез = Данные["data"];
+        Возврат СтрШаблон(
+            "✅ Отправлено %1 заявок. Найдено магазинов: %2. Дата: %3",
+            Рез["created"], Рез["matched"], Формат(ДатаДоставки, "ДЛФ=D")
+        );
+    ИначеЕсли Ответ.КодСостояния = 401 Тогда
+        Возврат "❌ Неверный API-ключ. Проверьте APIКлюч в настройках модуля.";
+    ИначеЕсли Ответ.КодСостояния = 403 Тогда
+        Возврат "❌ Ключ не имеет нужных прав (orders:write). Пересоздайте ключ в SmartRoute.";
+    ИначеЕсли Ответ.КодСостояния = 422 Тогда
+        Возврат "❌ Ошибка данных: " + Лев(ТелоОтвета, 300);
+    ИначеЕсли Ответ.КодСостояния = 429 Тогда
+        Возврат "⚠️ Слишком много запросов. Подождите минуту.";
+    Иначе
+        Возврат "❌ Ошибка сервера (HTTP " + Ответ.КодСостояния + "): " + Лев(ТелоОтвета, 200);
+    КонецЕсли;
+КонецФункции
+
+Функция ПроверитьСоединение() Экспорт
+    ИнициализироватьНастройки();
+    URLСервера = НастройкиSmartRoute["URL"];
+    Если Прав(URLСервера, 1) = "/" Тогда
+        URLСервера = Лев(URLСервера, СтрДлина(URLСервера) - 1);
+    КонецЕсли;
+    ЗащитаSSL = ?(НРег(Лев(URLСервера, 5)) = "https", Новый ЗащищённоеСоединениеOpenSSL(), Неопределено);
+    ЧастиURL = СтрРазделить(СтрЗаменить(СтрЗаменить(URLСервера, "https://", ""), "http://", ""), "/");
+    Хост = ЧастиURL[0];
+    Попытка
+        Соед = Новый HTTPСоединение(Хост, , , , , 10, ЗащитаSSL);
+        Запрос = Новый HTTPЗапрос("/api/v1/keys/me");
+        Запрос.Заголовки.Вставить("Authorization", "Bearer " + НастройкиSmartRoute["APIКлюч"]);
+        Ответ = Соед.Получить(Запрос);
+        Если Ответ.КодСостояния = 200 Тогда
+            Возврат "✅ Соединение успешно! SmartRoute подключён.";
+        ИначеЕсли Ответ.КодСостояния = 401 Тогда
+            Возврат "❌ Неверный API-ключ. Проверьте значение APIКлюч в модуле.";
+        Иначе
+            Возврат "❌ Сервер ответил кодом " + Ответ.КодСостояния;
+        КонецЕсли;
+    Исключение
+        Возврат "❌ Нет связи: " + ОписаниеОшибки();
+    КонецПопытки;
+КонецФункции
+
+#КонецОбласти
+
+// ── Регламентное задание (раскомментировать для автозапуска) ──
+// Процедура ВыполнитьРегламентноеЗадание() Экспорт
+//     Результат = ОтправитьЗаявкиВSmartRoute();
+//     ЗаписьЖурналаРегистрации("SmartRoute", УровеньЖурналаРегистрации.Информация, , , Результат);
+// КонецПроцедуры
+`;
+}
+
+// ─── Copy Button ──────────────────────────────────────────────────────────────
+
+function CopyButton({ text, label }: { text: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+  return (
+    <button
+      onClick={copy}
+      className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground transition-colors"
+      title="Скопировать"
+    >
+      {copied ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+      {label ?? (copied ? "Скопировано!" : "Копировать")}
+    </button>
+  );
 }
 
 // ─── Integration Cards Landing ────────────────────────────────────────────────
@@ -203,12 +421,14 @@ function CardsView({ existingIntegrations, onSelect, onOpenDashboard }: CardsVie
                   )}
                 </div>
                 <CardTitle className="text-base mt-3">{card.label}</CardTitle>
-                <CardDescription className="text-xs">{card.desc}</CardDescription>
+                <p className="text-xs text-muted-foreground">{card.desc}</p>
               </CardHeader>
               {existing && (
                 <CardContent className="pt-0">
                   <p className="text-xs text-muted-foreground">
-                    Последняя синхр.: {friendlyDate(existing.last_sync_at)}
+                    {existing.status === "setup"
+                      ? "Ожидаем первую синхронизацию"
+                      : `Последняя синхр.: ${friendlyDate(existing.last_sync_at)}`}
                   </p>
                 </CardContent>
               )}
@@ -229,41 +449,14 @@ function CardsView({ existingIntegrations, onSelect, onOpenDashboard }: CardsVie
 
 // ─── Wizard ───────────────────────────────────────────────────────────────────
 
-const FIELD_MAPPINGS_DEFAULT: Record<string, string> = {
-  store_name: "Контрагент",
-  address: "Адрес доставки",
-  delivery_date: "Дата доставки",
-  weight_kg: "Вес (кг)",
-  quantity: "Количество мест",
-  products: "Комментарий / Товары",
-  amount_rub: "Сумма заказа",
-  order_number: "Номер заказа",
-};
+type WizardStep = 1 | 2 | 3;
 
-const SMARTROUTE_FIELD_LABELS: Record<string, string> = {
-  store_name: "Магазин (обязательно)",
-  address: "Адрес доставки",
-  delivery_date: "Дата доставки (обязательно)",
-  weight_kg: "Вес, кг",
-  quantity: "Количество мест",
-  products: "Товары/комментарий",
-  amount_rub: "Сумма, ₽",
-  order_number: "Номер заказа",
-};
-
-type WizardStep = 1 | 2 | 3 | 4 | 5;
-
-interface WizardState {
-  healthStatus: "idle" | "checking" | "ok" | "error";
-  healthMessage: string;
-  apiKeys: ApiKey[];
-  selectedKeyId: number | null;
-  testStatus: "idle" | "testing" | "ok" | "error";
-  testMessage: string;
-  fieldMappings: Record<string, string>;
+interface WizardData {
   integrationId: number | null;
-  saving: boolean;
-  downloading: boolean;
+  fullKey: string;        // shown once — used for BSL generation
+  keyPrefix: string;
+  baseUrl: string;
+  bslDownloaded: boolean;
 }
 
 interface OneCWizardProps {
@@ -274,151 +467,108 @@ interface OneCWizardProps {
 function OneCWizard({ onBack, onDone }: OneCWizardProps) {
   const { toast } = useToast();
   const [step, setStep] = useState<WizardStep>(1);
-  const [state, setState] = useState<WizardState>({
-    healthStatus: "idle",
-    healthMessage: "",
-    apiKeys: [],
-    selectedKeyId: null,
-    testStatus: "idle",
-    testMessage: "",
-    fieldMappings: { ...FIELD_MAPPINGS_DEFAULT },
+  const [settingUp, setSettingUp] = useState(false);
+  const [data, setData] = useState<WizardData>({
     integrationId: null,
-    saving: false,
-    downloading: false,
+    fullKey: "",
+    keyPrefix: "",
+    baseUrl: window.location.origin,
+    bslDownloaded: false,
   });
 
-  useEffect(() => {
-    apiFetch("/api/auth/api-keys")
-      .then((keys: ApiKey[]) => {
-        const valid = keys.filter((k) => k.is_active && k.scopes?.includes("orders:write"));
-        setState((s) => ({ ...s, apiKeys: valid }));
-      })
-      .catch(() => {});
+  // Step 3: poll for first sync
+  const [pollStatus, setPollStatus] = useState<"waiting" | "connected" | "skipped">("waiting");
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const startPolling = useCallback((integrationId: number) => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = setInterval(async () => {
+      try {
+        // Check integration status first — any transition away from "setup" means 1C connected
+        const integration: Integration = await apiFetch(`/api/integrations/${integrationId}`);
+        if (integration.status === "active" || integration.status === "error") {
+          setPollStatus("connected");
+          if (pollRef.current) clearInterval(pollRef.current);
+          return;
+        }
+        // Also accept: any non-manual sync log entry (even with 0 orders — means 1C reached us)
+        const logs: SyncLog[] = await apiFetch(`/api/integrations/${integrationId}/logs?limit=5`);
+        const realLogs = logs.filter((l) => l.error_detail !== "Ручная проверка");
+        if (realLogs.length > 0) {
+          setPollStatus("connected");
+          if (pollRef.current) clearInterval(pollRef.current);
+        }
+      } catch {}
+    }, 5000);
   }, []);
 
-  const checkHealth = async () => {
-    setState((s) => ({ ...s, healthStatus: "checking", healthMessage: "" }));
-    try {
-      await apiFetch("/api/healthz");
-      setState((s) => ({ ...s, healthStatus: "ok", healthMessage: "✅ SmartRoute доступен и работает нормально" }));
-    } catch {
-      setState((s) => ({
-        ...s,
-        healthStatus: "error",
-        healthMessage: "❌ Сервер SmartRoute недоступен. Попробуйте позже.",
-      }));
+  useEffect(() => {
+    if (step === 3 && data.integrationId) {
+      startPolling(data.integrationId);
     }
-  };
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [step, data.integrationId, startPolling]);
 
-  const downloadTemplate = async () => {
-    setState((s) => ({ ...s, downloading: true }));
+  const handleAutoSetup = async () => {
+    setSettingUp(true);
     try {
-      // Download generic BSL template (without real API key)
-      const hostname = window.location.origin;
-      const bsl = generateBslTemplate(hostname, "ВАШИ_ДАННЫЕ_ИЗ_НАСТРОЕК");
-      const encoder = new TextEncoder();
-      const bytes = encoder.encode(bsl);
-      const b64 = btoa(String.fromCharCode(...bytes));
-      downloadBase64(b64, "SmartRoute_1C_Integration.bsl");
-    } finally {
-      setState((s) => ({ ...s, downloading: false }));
-    }
-  };
-
-  const testApiKey = async () => {
-    if (!state.selectedKeyId) return;
-    setState((s) => ({ ...s, testStatus: "testing", testMessage: "" }));
-    try {
-      // Create integration first if not exists
-      let integrationId = state.integrationId;
-      if (!integrationId) {
-        const newIntegration: Integration = await apiFetch("/api/integrations", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            type: "1c",
-            name: "1C Интеграция",
-            config: {
-              api_key_id: state.selectedKeyId,
-              base_url: window.location.origin,
-            },
-          }),
-        });
-        integrationId = newIntegration.id;
-        setState((s) => ({ ...s, integrationId }));
-      } else {
-        // Update api_key_id
-        await apiFetch(`/api/integrations/${integrationId}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ config: { api_key_id: state.selectedKeyId } }),
-        });
-      }
-      // Test connection
-      const result = await apiFetch(`/api/integrations/${integrationId}/test`, { method: "POST" });
-      if (result.ok) {
-        setState((s) => ({ ...s, testStatus: "ok", testMessage: result.message }));
-      } else {
-        setState((s) => ({ ...s, testStatus: "error", testMessage: result.message }));
-      }
-    } catch (e: unknown) {
-      setState((s) => ({
-        ...s,
-        testStatus: "error",
-        testMessage: `❌ Ошибка: ${e instanceof Error ? e.message : String(e)}`,
-      }));
-    }
-  };
-
-  const saveFieldMappings = async () => {
-    if (!state.integrationId) return;
-    setState((s) => ({ ...s, saving: true }));
-    try {
-      await apiFetch(`/api/integrations/${state.integrationId}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          config: { field_mappings: state.fieldMappings },
-        }),
+      const result = await apiFetch("/api/integrations/quick-setup", { method: "POST" });
+      setData({
+        integrationId: result.id,
+        fullKey: result.full_key,
+        keyPrefix: result.key_prefix,
+        baseUrl: result.base_url || window.location.origin,
+        bslDownloaded: false,
       });
-      setStep(5);
+      setStep(2);
     } catch (e: unknown) {
-      toast({ title: "Ошибка", description: `${e instanceof Error ? e.message : String(e)}`, variant: "destructive" });
+      toast({
+        title: "Ошибка",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
     } finally {
-      setState((s) => ({ ...s, saving: false }));
+      setSettingUp(false);
     }
   };
 
-  const downloadPersonalizedModule = async () => {
-    if (!state.integrationId) return;
-    setState((s) => ({ ...s, downloading: true }));
-    try {
-      const result = await apiFetch(`/api/integrations/${state.integrationId}/download-module`);
-      downloadBase64(result.data, result.filename);
-      toast({ title: "Модуль скачан", description: "Файл SmartRoute_1C_Integration.bsl готов к установке" });
-    } catch (e: unknown) {
-      toast({ title: "Ошибка скачивания", description: `${e instanceof Error ? e.message : String(e)}`, variant: "destructive" });
-    } finally {
-      setState((s) => ({ ...s, downloading: false }));
-    }
+  const downloadBsl = () => {
+    const bsl = generatePersonalizedBsl(data.baseUrl, data.fullKey);
+    const encoder = new TextEncoder();
+    const bytes = encoder.encode(bsl);
+    // Convert to latin1-compatible base64
+    let binary = "";
+    bytes.forEach((b) => (binary += String.fromCharCode(b)));
+    const b64 = btoa(binary);
+    downloadBase64(b64, "SmartRoute_1C.bsl");
+    setData((d) => ({ ...d, bslDownloaded: true }));
+    toast({ title: "Файл скачан", description: "SmartRoute_1C.bsl готов. Передайте его программисту 1С." });
   };
 
-  const finishWizard = async () => {
-    if (!state.integrationId) return;
+  const goToDone = async () => {
+    if (!data.integrationId) return;
     try {
-      const integration: Integration = await apiFetch(`/api/integrations/${state.integrationId}`);
+      const integration: Integration = await apiFetch(`/api/integrations/${data.integrationId}`);
       onDone(integration);
     } catch {
-      onDone({ id: state.integrationId!, type: "1c", name: "1C Интеграция", status: "setup", config: {}, last_sync_at: null, created_at: new Date().toISOString() });
+      onDone({
+        id: data.integrationId!,
+        type: "1c",
+        name: "1С:Предприятие",
+        status: "setup",
+        config: {},
+        last_sync_at: null,
+        created_at: new Date().toISOString(),
+      });
     }
   };
 
   const STEPS = [
-    { n: 1, label: "Проверка" },
-    { n: 2, label: "Модуль" },
-    { n: 3, label: "API-ключ" },
-    { n: 4, label: "Поля" },
-    { n: 5, label: "Готово" },
+    { n: 1, label: "Настройка" },
+    { n: 2, label: "Установка" },
+    { n: 3, label: "Проверка" },
   ];
 
   return (
@@ -429,7 +579,7 @@ function OneCWizard({ onBack, onDone }: OneCWizardProps) {
 
       <div className="mb-8">
         <h1 className="text-2xl font-bold mb-1">Подключение 1С:Предприятие</h1>
-        <p className="text-muted-foreground text-sm">Мастер настройки — около 5 минут</p>
+        <p className="text-muted-foreground text-sm">Займёт 5–10 минут. Нужен программист 1С для последнего шага.</p>
       </div>
 
       {/* Progress */}
@@ -457,244 +607,215 @@ function OneCWizard({ onBack, onDone }: OneCWizardProps) {
         ))}
       </div>
 
-      {/* Step content */}
       <Card>
         <CardContent className="p-6">
-          {/* ── Step 1: Health check ── */}
+
+          {/* ── Step 1: Auto-setup ── */}
           {step === 1 && (
-            <div className="space-y-4">
+            <div className="space-y-5">
               <div>
-                <h2 className="text-lg font-semibold mb-1">Шаг 1: Проверка SmartRoute</h2>
-                <p className="text-sm text-muted-foreground">Убедимся, что SmartRoute доступен и готов к интеграции</p>
+                <h2 className="text-lg font-semibold mb-1">Шаг 1: Автоматическая настройка</h2>
+                <p className="text-sm text-muted-foreground">
+                  SmartRoute создаст ключ доступа и подготовит файл для 1С. Никаких технических знаний не нужно.
+                </p>
               </div>
+
+              <div className="rounded-lg border bg-muted/40 p-4 space-y-2">
+                <p className="text-sm font-medium">Что произойдёт автоматически:</p>
+                <ul className="space-y-1.5 text-sm text-muted-foreground">
+                  <li className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                    Создание уникального ключа доступа для 1С
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                    Подготовка настроенного файла модуля
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                    Создание канала передачи заказов
+                  </li>
+                </ul>
+              </div>
+
+              <Alert className="border-blue-200 bg-blue-50">
+                <Info className="w-4 h-4 text-blue-600" />
+                <AlertDescription className="text-blue-800 text-sm ml-2">
+                  Для последнего шага потребуется ваш <strong>программист 1С</strong> — ему нужно будет установить
+                  готовый файл. Это займёт около 15 минут.
+                </AlertDescription>
+              </Alert>
+
               <Button
-                onClick={checkHealth}
-                disabled={state.healthStatus === "checking"}
                 className="w-full"
+                size="lg"
+                onClick={handleAutoSetup}
+                disabled={settingUp}
               >
-                {state.healthStatus === "checking" ? (
-                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Проверяем...</>
+                {settingUp ? (
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Настраиваем...</>
                 ) : (
-                  <><Zap className="w-4 h-4 mr-2" /> Проверить соединение</>
+                  <>Начать подключение <ChevronRight className="w-4 h-4 ml-1" /></>
                 )}
-              </Button>
-              {state.healthMessage && (
-                <Alert className={state.healthStatus === "ok" ? "border-emerald-200 bg-emerald-50" : "border-red-200 bg-red-50"}>
-                  <AlertDescription className={state.healthStatus === "ok" ? "text-emerald-800" : "text-red-800"}>
-                    {state.healthMessage}
-                  </AlertDescription>
-                </Alert>
-              )}
-              <Button
-                className="w-full"
-                disabled={state.healthStatus !== "ok"}
-                onClick={() => setStep(2)}
-              >
-                Далее <ChevronRight className="w-4 h-4 ml-1" />
               </Button>
             </div>
           )}
 
-          {/* ── Step 2: Download module ── */}
+          {/* ── Step 2: Hand off to 1C programmer ── */}
           {step === 2 && (
-            <div className="space-y-4">
+            <div className="space-y-5">
               <div>
-                <h2 className="text-lg font-semibold mb-1">Шаг 2: Модуль для 1С</h2>
+                <h2 className="text-lg font-semibold mb-1">Шаг 2: Установка в 1С</h2>
                 <p className="text-sm text-muted-foreground">
-                  Скачайте готовый BSL-модуль и установите в вашу 1С
+                  Скачайте файл и передайте его программисту 1С вместе с двумя параметрами ниже.
                 </p>
               </div>
-              <Button
-                variant="outline"
-                className="w-full"
-                onClick={downloadTemplate}
-                disabled={state.downloading}
-              >
-                {state.downloading ? (
-                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Скачивание...</>
-                ) : (
-                  <><Download className="w-4 h-4 mr-2" /> Скачать модуль SmartRoute.bsl</>
-                )}
-              </Button>
-              <div className="bg-muted/50 rounded-lg p-4 space-y-2 text-sm">
-                <p className="font-medium text-foreground">Установка за 3 шага:</p>
-                <ol className="list-decimal list-inside space-y-1.5 text-muted-foreground">
-                  <li>Откройте 1С в режиме <strong>Конфигуратора</strong></li>
-                  <li>Меню <strong>Файл → Открыть</strong> → выберите скачанный файл <code className="text-xs bg-background px-1 py-0.5 rounded">.bsl</code></li>
-                  <li>Заполните поля URL и API-ключ (настроим на следующих шагах)</li>
-                </ol>
-              </div>
-              <div className="flex gap-2">
-                <Button variant="ghost" onClick={() => setStep(1)} className="flex-1">Назад</Button>
-                <Button onClick={() => setStep(3)} className="flex-1">
-                  Далее <ChevronRight className="w-4 h-4 ml-1" />
-                </Button>
-              </div>
-            </div>
-          )}
 
-          {/* ── Step 3: API Key ── */}
-          {step === 3 && (
-            <div className="space-y-4">
-              <div>
-                <h2 className="text-lg font-semibold mb-1">Шаг 3: API-ключ</h2>
-                <p className="text-sm text-muted-foreground">
-                  Выберите ключ с правом <code className="text-xs bg-muted px-1 rounded">orders:write</code> — он будет использован для передачи заказов из 1С
-                </p>
-              </div>
-              {state.apiKeys.length === 0 ? (
-                <Alert className="border-amber-200 bg-amber-50">
-                  <AlertTriangle className="w-4 h-4 text-amber-600" />
-                  <AlertDescription className="text-amber-800 text-sm ml-2">
-                    Нет подходящих ключей. Перейдите в{" "}
-                    <a href="/settings" className="underline font-medium">Настройки → API-ключи</a>{" "}
-                    и создайте ключ с правом <strong>orders:write</strong>.
-                  </AlertDescription>
-                </Alert>
-              ) : (
-                <Select
-                  value={state.selectedKeyId ? String(state.selectedKeyId) : ""}
-                  onValueChange={(v) =>
-                    setState((s) => ({
-                      ...s,
-                      selectedKeyId: Number(v),
-                      testStatus: "idle",
-                      testMessage: "",
-                    }))
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Выберите API-ключ..." />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {state.apiKeys.map((k) => (
-                      <SelectItem key={k.id} value={String(k.id)}>
-                        {k.name} — {k.key_prefix}…
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              )}
-              {state.selectedKeyId && (
-                <Button
-                  variant="outline"
-                  className="w-full"
-                  onClick={testApiKey}
-                  disabled={state.testStatus === "testing"}
-                >
-                  {state.testStatus === "testing" ? (
-                    <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Проверяем...</>
-                  ) : (
-                    <><Plug className="w-4 h-4 mr-2" /> Проверить соединение</>
-                  )}
-                </Button>
-              )}
-              {state.testMessage && (
-                <Alert className={state.testStatus === "ok" ? "border-emerald-200 bg-emerald-50" : "border-red-200 bg-red-50"}>
-                  <AlertDescription className={state.testStatus === "ok" ? "text-emerald-800" : "text-red-800"}>
-                    {state.testMessage}
-                  </AlertDescription>
-                </Alert>
-              )}
-              <div className="flex gap-2">
-                <Button variant="ghost" onClick={() => setStep(2)} className="flex-1">Назад</Button>
-                <Button
-                  className="flex-1"
-                  disabled={state.testStatus !== "ok"}
-                  onClick={() => setStep(4)}
-                >
-                  Далее <ChevronRight className="w-4 h-4 ml-1" />
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {/* ── Step 4: Field mapping ── */}
-          {step === 4 && (
-            <div className="space-y-4">
-              <div>
-                <h2 className="text-lg font-semibold mb-1">Шаг 4: Сопоставление полей</h2>
-                <p className="text-sm text-muted-foreground">
-                  Укажите, как называются соответствующие поля в вашей 1С
-                </p>
-              </div>
-              <div className="space-y-3">
-                {Object.entries(SMARTROUTE_FIELD_LABELS).map(([key, label]) => (
-                  <div key={key} className="flex items-center gap-3">
-                    <div className="w-44 shrink-0">
-                      <p className="text-sm font-medium text-foreground">{label}</p>
-                      <p className="text-xs text-muted-foreground">SmartRoute</p>
-                    </div>
-                    <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />
-                    <input
-                      className="flex-1 h-9 rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
-                      value={state.fieldMappings[key] ?? ""}
-                      onChange={(e) =>
-                        setState((s) => ({
-                          ...s,
-                          fieldMappings: { ...s.fieldMappings, [key]: e.target.value },
-                        }))
-                      }
-                      placeholder="Поле в 1С..."
-                    />
-                  </div>
-                ))}
-              </div>
-              <p className="text-xs text-muted-foreground bg-muted/40 rounded p-3">
-                💡 Эти названия используются в BSL-модуле для маппинга полей из 1С. Отредактируйте при необходимости.
-              </p>
-              <div className="flex gap-2">
-                <Button variant="ghost" onClick={() => setStep(3)} className="flex-1">Назад</Button>
-                <Button
-                  className="flex-1"
-                  onClick={saveFieldMappings}
-                  disabled={state.saving}
-                >
-                  {state.saving ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
-                  Далее <ChevronRight className="w-4 h-4 ml-1" />
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {/* ── Step 5: Done ── */}
-          {step === 5 && (
-            <div className="space-y-4">
-              <div className="text-center py-2">
-                <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                  <CheckCircle2 className="w-8 h-8 text-emerald-600" />
+              {/* Download BSL */}
+              <div className="rounded-lg border-2 border-dashed border-primary/30 bg-primary/5 p-4 text-center space-y-3">
+                <FileCode2 className="w-10 h-10 text-primary/60 mx-auto" />
+                <div>
+                  <p className="font-medium text-sm">Файл модуля для 1С</p>
+                  <p className="text-xs text-muted-foreground">SmartRoute_1C.bsl — уже настроен с вашим ключом</p>
                 </div>
-                <h2 className="text-lg font-semibold mb-1">Интеграция настроена!</h2>
-                <p className="text-sm text-muted-foreground">
-                  Осталось установить персональный модуль в 1С и начать отправку заказов
-                </p>
-              </div>
-              <Button
-                variant="outline"
-                className="w-full"
-                onClick={downloadPersonalizedModule}
-                disabled={state.downloading}
-              >
-                {state.downloading ? (
-                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Генерируем модуль...</>
-                ) : (
-                  <><Download className="w-4 h-4 mr-2" /> Скачать настроенный модуль 1С</>
+                <Button onClick={downloadBsl} className="w-full">
+                  <Download className="w-4 h-4 mr-2" />
+                  Скачать файл модуля
+                </Button>
+                {data.bslDownloaded && (
+                  <p className="text-xs text-emerald-600 flex items-center justify-center gap-1">
+                    <CheckCircle2 className="w-3 h-3" /> Файл скачан
+                  </p>
                 )}
-              </Button>
-              <div className="bg-muted/50 rounded-lg p-4 text-sm space-y-2">
-                <p className="font-medium">Что дальше:</p>
-                <ol className="list-decimal list-inside space-y-1 text-muted-foreground">
-                  <li>Скачайте и откройте модуль в 1С Конфигураторе</li>
-                  <li>Вставьте ваш API-ключ из SmartRoute в поле <code className="text-xs bg-background px-1 rounded">APIКлюч</code></li>
-                  <li>Запустите функцию <code className="text-xs bg-background px-1 rounded">ОтправитьЗаявкиВSmartRoute()</code></li>
-                  <li>Настройте регламентное задание для автозапуска</li>
+              </div>
+
+              {/* Params to share */}
+              <div className="rounded-lg border bg-amber-50 border-amber-200 p-4 space-y-3">
+                <p className="text-sm font-medium text-amber-900">
+                  Передайте программисту эти данные:
+                </p>
+                <div className="space-y-2">
+                  <div>
+                    <p className="text-xs text-amber-700 mb-1">Адрес SmartRoute:</p>
+                    <div className="flex items-center gap-2 bg-white rounded border border-amber-200 px-3 py-2">
+                      <code className="text-xs flex-1 font-mono break-all">{data.baseUrl}</code>
+                      <CopyButton text={data.baseUrl} />
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-xs text-amber-700 mb-1">API-ключ (показывается только сейчас — скопируйте!):</p>
+                    <div className="flex items-center gap-2 bg-white rounded border border-amber-200 px-3 py-2">
+                      <code className="text-xs flex-1 font-mono break-all">{data.fullKey}</code>
+                      <CopyButton text={data.fullKey} />
+                    </div>
+                    <p className="text-xs text-amber-600 mt-1">
+                      ⚠️ Ключ уже встроен в скачанный файл. Сохраните его на случай переустановки.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Instructions for programmer */}
+              <div className="rounded-lg border bg-muted/40 p-4 space-y-3">
+                <p className="text-sm font-medium">Инструкция для программиста 1С:</p>
+                <ol className="space-y-2 text-sm text-muted-foreground list-none">
+                  {[
+                    { n: 1, text: 'Откройте 1С в режиме Конфигуратора → Файл → Новый → Внешняя обработка. Имя: SmartRoute' },
+                    { n: 2, text: 'Добавьте форму (Формы → Добавить). Откройте вкладку «Модуль» и вставьте содержимое скачанного файла SmartRoute_1C.bsl' },
+                    { n: 3, text: 'В разделе «Настройки» убедитесь, что URL и APIКлюч заполнены. Сохраните и откройте в режиме Предприятия.' },
+                    { n: 4, text: 'Нажмите кнопку «Проверить соединение» — должно появиться «✅ Соединение успешно». Затем настройте регламентное задание на 07:30.' },
+                  ].map((item) => (
+                    <li key={item.n} className="flex gap-3">
+                      <span className="w-6 h-6 rounded-full bg-primary/10 text-primary text-xs flex items-center justify-center shrink-0 font-medium mt-0.5">
+                        {item.n}
+                      </span>
+                      <span>{item.text}</span>
+                    </li>
+                  ))}
                 </ol>
               </div>
-              <Button className="w-full" onClick={finishWizard}>
-                Открыть панель интеграции →
+
+              <Button
+                className="w-full"
+                onClick={() => setStep(3)}
+              >
+                Готово — жду первую синхронизацию <ChevronRight className="w-4 h-4 ml-1" />
               </Button>
             </div>
           )}
+
+          {/* ── Step 3: Wait for first sync ── */}
+          {step === 3 && (
+            <div className="space-y-5">
+              <div>
+                <h2 className="text-lg font-semibold mb-1">Шаг 3: Ожидаем первую синхронизацию</h2>
+                <p className="text-sm text-muted-foreground">
+                  Когда программист установит модуль и нажмёт «Отправить заявки», здесь появится результат.
+                </p>
+              </div>
+
+              {pollStatus === "waiting" && (
+                <div className="rounded-lg border-2 border-dashed border-muted p-8 text-center space-y-3">
+                  <div className="relative inline-block">
+                    <Wifi className="w-12 h-12 text-muted-foreground/40" />
+                    <Loader2 className="w-5 h-5 animate-spin text-primary absolute -bottom-1 -right-1" />
+                  </div>
+                  <p className="text-sm font-medium">Ожидаем данные из 1С...</p>
+                  <p className="text-xs text-muted-foreground">
+                    Проверяем каждые 5 секунд. Страницу закрывать не нужно.
+                  </p>
+                </div>
+              )}
+
+              {pollStatus === "connected" && (
+                <div className="rounded-lg border-2 border-emerald-200 bg-emerald-50 p-8 text-center space-y-3">
+                  <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto">
+                    <CheckCircle2 className="w-8 h-8 text-emerald-600" />
+                  </div>
+                  <p className="text-lg font-semibold text-emerald-800">Интеграция работает!</p>
+                  <p className="text-sm text-emerald-700">Первые данные из 1С получены. Теперь заказы будут поступать автоматически.</p>
+                </div>
+              )}
+
+              <div className="rounded-lg border bg-muted/40 p-4 space-y-2">
+                <p className="text-xs font-medium text-muted-foreground">Что происходит прямо сейчас:</p>
+                <ul className="space-y-1 text-xs text-muted-foreground">
+                  <li className="flex items-center gap-2">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-500" /> Ключ доступа создан и активен
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-500" /> Файл модуля скачан
+                  </li>
+                  <li className="flex items-center gap-2">
+                    {pollStatus === "connected" ? (
+                      <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+                    ) : (
+                      <Clock className="w-3 h-3 text-amber-500" />
+                    )}
+                    {pollStatus === "connected" ? "Первая синхронизация выполнена" : "Ожидаем первую синхронизацию из 1С"}
+                  </li>
+                </ul>
+              </div>
+
+              <div className="flex gap-2">
+                {pollStatus !== "connected" && (
+                  <Button
+                    variant="ghost"
+                    className="flex-1 text-muted-foreground"
+                    onClick={() => { setPollStatus("skipped"); goToDone(); }}
+                  >
+                    Открыть панель сейчас
+                  </Button>
+                )}
+                {pollStatus === "connected" && (
+                  <Button className="w-full" onClick={goToDone}>
+                    Открыть панель интеграции →
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+
         </CardContent>
       </Card>
     </div>
@@ -714,8 +835,8 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
   const [integration, setIntegration] = useState<Integration>(initialIntegration);
   const [logs, setLogs] = useState<SyncLog[]>([]);
   const [loading, setLoading] = useState(false);
-  const [syncing, setSyncing] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
+  const [showInstructions, setShowInstructions] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -733,22 +854,14 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
     }
   }, [integration.id, toast]);
 
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
+  useEffect(() => { refresh(); }, [refresh]);
 
-  const handleSync = async () => {
-    setSyncing(true);
-    try {
-      await apiFetch(`/api/integrations/${integration.id}/sync`, { method: "POST" });
-      toast({ title: "Проверка выполнена", description: "Статус обновлён" });
-      await refresh();
-    } catch (e: unknown) {
-      toast({ title: "Ошибка", description: `${e instanceof Error ? e.message : String(e)}`, variant: "destructive" });
-    } finally {
-      setSyncing(false);
-    }
-  };
+  // Auto-refresh every 30s when status=setup (waiting for first sync)
+  useEffect(() => {
+    if (integration.status !== "setup") return;
+    const timer = setInterval(refresh, 30000);
+    return () => clearInterval(timer);
+  }, [integration.status, refresh]);
 
   const handleToggle = async () => {
     const newStatus = integration.status === "disabled" ? "active" : "disabled";
@@ -775,19 +888,11 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
     }
   };
 
-  const downloadModule = async () => {
-    try {
-      const result = await apiFetch(`/api/integrations/${integration.id}/download-module`);
-      downloadBase64(result.data, result.filename);
-    } catch (e: unknown) {
-      toast({ title: "Ошибка", description: `${e instanceof Error ? e.message : String(e)}`, variant: "destructive" });
-    }
-  };
-
   const stats = integration.stats ?? { total_syncs: 0, total_orders: 0, total_matched: 0, total_errors: 0 };
+  const baseUrl = (integration.config?.base_url as string) || window.location.origin;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div>
@@ -800,34 +905,51 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
             {statusBadge(integration.status)}
           </h1>
           <p className="text-muted-foreground text-sm mt-1">
-            Последняя синхронизация: {friendlyDate(integration.last_sync_at)}
+            {integration.status === "setup"
+              ? "Ожидаем первую синхронизацию из 1С"
+              : `Последняя синхронизация: ${friendlyDate(integration.last_sync_at)}`}
           </p>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={refresh}
-            disabled={loading}
-          >
-            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
-          </Button>
-          <Button
-            size="sm"
-            onClick={handleSync}
-            disabled={syncing || integration.status === "disabled"}
-          >
-            {syncing ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Zap className="w-4 h-4 mr-2" />}
-            Проверить сейчас
-          </Button>
-        </div>
+        <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
+          <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+        </Button>
       </div>
 
-      {/* Stats grid */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* Status banners */}
+      {integration.status === "setup" && (
+        <Alert className="border-amber-200 bg-amber-50">
+          <Clock className="w-4 h-4 text-amber-600" />
+          <AlertDescription className="text-amber-800 ml-2">
+            <strong>Ожидаем первую синхронизацию.</strong> Попросите программиста 1С нажать кнопку
+            «Отправить заявки» в установленном модуле. После этого здесь появятся данные.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {integration.status === "error" && (
+        <Alert className="border-red-200 bg-red-50">
+          <WifiOff className="w-4 h-4 text-red-600" />
+          <AlertDescription className="text-red-800 ml-2">
+            <strong>Ошибка синхронизации.</strong> Проверьте журнал ниже — там указана причина.
+            Возможные решения: убедитесь, что ключ доступа не отозван, и у 1С есть доступ в интернет.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {integration.status === "active" && stats.total_orders === 0 && (
+        <Alert className="border-blue-200 bg-blue-50">
+          <Info className="w-4 h-4 text-blue-600" />
+          <AlertDescription className="text-blue-800 ml-2">
+            Соединение установлено, но заказов ещё не поступало. 1С начнёт отправлять их по расписанию (07:30).
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {/* Stats */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {[
           { label: "Синхронизаций", value: stats.total_syncs, icon: <RefreshCw className="w-4 h-4" />, color: "text-blue-600" },
-          { label: "Заказов получено", value: stats.total_orders, icon: <Package className="w-4 h-4" />, color: "text-emerald-600" },
+          { label: "Заказов загружено", value: stats.total_orders, icon: <Package className="w-4 h-4" />, color: "text-emerald-600" },
           { label: "Магазинов найдено", value: stats.total_matched, icon: <CheckCircle2 className="w-4 h-4" />, color: "text-emerald-600" },
           { label: "Ошибок", value: stats.total_errors, icon: <XCircle className="w-4 h-4" />, color: stats.total_errors > 0 ? "text-red-600" : "text-muted-foreground" },
         ].map((s) => (
@@ -843,7 +965,7 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
         ))}
       </div>
 
-      {/* Logs */}
+      {/* Sync log */}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base flex items-center gap-2">
@@ -851,60 +973,125 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
           </CardTitle>
         </CardHeader>
         <CardContent className="p-0">
-          {logs.length === 0 ? (
-            <div className="px-6 py-8 text-center text-muted-foreground text-sm">
-              Синхронизаций ещё не было. Отправьте первую партию заказов из 1С.
+          {logs.filter((l) => l.error_detail !== "Ручная проверка").length === 0 ? (
+            <div className="px-6 py-8 text-center text-sm text-muted-foreground">
+              <p className="font-medium mb-1">Синхронизаций ещё не было</p>
+              <p className="text-xs">Когда 1С отправит первые заказы — здесь появится история.</p>
             </div>
           ) : (
             <div className="divide-y">
-              {logs.map((log) => (
-                <div key={log.id} className="flex items-start gap-4 px-6 py-3">
-                  <div className="shrink-0 mt-0.5">
-                    {log.status === "success" ? (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-                    ) : log.status === "partial" ? (
-                      <AlertTriangle className="w-4 h-4 text-amber-500" />
-                    ) : (
-                      <XCircle className="w-4 h-4 text-red-500" />
-                    )}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-medium">
-                        {log.orders_received} заказов
-                      </span>
-                      {log.stores_matched > 0 && (
-                        <span className="text-xs text-emerald-600">• найдено {log.stores_matched}</span>
-                      )}
-                      {log.stores_unmatched > 0 && (
-                        <span className="text-xs text-amber-600">• не найдено {log.stores_unmatched}</span>
-                      )}
-                      {log.errors_count > 0 && (
-                        <span className="text-xs text-red-600">• ошибок {log.errors_count}</span>
+              {logs
+                .filter((l) => l.error_detail !== "Ручная проверка")
+                .map((log) => (
+                  <div key={log.id} className="flex items-start gap-4 px-6 py-3">
+                    <div className="shrink-0 mt-0.5">
+                      {log.status === "success" ? (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+                      ) : log.status === "partial" ? (
+                        <AlertTriangle className="w-4 h-4 text-amber-500" />
+                      ) : (
+                        <XCircle className="w-4 h-4 text-red-500" />
                       )}
                     </div>
-                    {log.error_detail && log.error_detail !== "Ручная проверка" && (
-                      <p className="text-xs text-muted-foreground mt-0.5 truncate">{log.error_detail}</p>
-                    )}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-medium">{log.orders_received} заказов</span>
+                        {log.stores_matched > 0 && (
+                          <span className="text-xs text-emerald-600">• найдено {log.stores_matched}</span>
+                        )}
+                        {log.stores_unmatched > 0 && (
+                          <span className="text-xs text-amber-600">• не найдено {log.stores_unmatched}</span>
+                        )}
+                        {log.errors_count > 0 && (
+                          <span className="text-xs text-red-600">• ошибок {log.errors_count}</span>
+                        )}
+                      </div>
+                      {log.error_detail && (
+                        <p className="text-xs text-muted-foreground mt-0.5 truncate">{log.error_detail}</p>
+                      )}
+                      {log.stores_unmatched > 0 && (
+                        <p className="text-xs text-amber-700 mt-0.5">
+                          ⚠️ Незнакомые магазины —{" "}
+                          <a href="/stores" className="underline">добавьте их в справочник</a>
+                        </p>
+                      )}
+                    </div>
+                    <span className="text-xs text-muted-foreground shrink-0">{friendlyDate(log.started_at)}</span>
                   </div>
-                  <span className="text-xs text-muted-foreground shrink-0">{friendlyDate(log.started_at)}</span>
-                </div>
-              ))}
+                ))}
             </div>
           )}
         </CardContent>
       </Card>
 
+      {/* Programmer instructions panel */}
+      <Card>
+        <CardHeader className="pb-3">
+          <button
+            className="flex items-center justify-between w-full text-left"
+            onClick={() => setShowInstructions((v) => !v)}
+          >
+            <CardTitle className="text-base flex items-center gap-2">
+              <FileCode2 className="w-4 h-4" /> Инструкция для программиста 1С
+            </CardTitle>
+            <ChevronRight className={`w-4 h-4 text-muted-foreground transition-transform ${showInstructions ? "rotate-90" : ""}`} />
+          </button>
+        </CardHeader>
+        {showInstructions && (
+          <CardContent className="pt-0 space-y-4">
+            <div className="space-y-2">
+              <p className="text-xs text-muted-foreground mb-3">
+                Передайте эту информацию программисту, который устанавливает модуль.
+              </p>
+              <div>
+                <p className="text-xs font-medium mb-1">Адрес SmartRoute:</p>
+                <div className="flex items-center gap-2 bg-muted rounded border px-3 py-2">
+                  <code className="text-xs flex-1 font-mono break-all">{baseUrl}</code>
+                  <CopyButton text={baseUrl} />
+                </div>
+              </div>
+            </div>
+            <div className="rounded-lg border bg-muted/40 p-4 space-y-2">
+              <p className="text-sm font-medium">Шаги для программиста:</p>
+              <ol className="space-y-2 text-sm text-muted-foreground list-none">
+                {[
+                  'Конфигуратор → Файл → Новый → Внешняя обработка. Имя: SmartRoute.',
+                  'Формы → Добавить. Скопируйте содержимое файла SmartRoute_1C.bsl в Модуль формы.',
+                  'URL и APIКлюч в коде уже заполнены. Проверьте раздел «НастройкиИнтеграции».',
+                  'Откройте обработку в режиме Предприятия → нажмите «Проверить соединение». Должно быть ✅.',
+                  'Настройте регламентное задание: метод ОтправитьЗаявкиВSmartRoute() — запуск ежедневно в 07:30.',
+                ].map((text, i) => (
+                  <li key={i} className="flex gap-3">
+                    <span className="w-5 h-5 rounded-full bg-primary/10 text-primary text-xs flex items-center justify-center shrink-0 font-medium mt-0.5">
+                      {i + 1}
+                    </span>
+                    <span>{text}</span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+            <Alert className="border-blue-200 bg-blue-50">
+              <AlertDescription className="text-blue-800 text-xs">
+                Если возникла ошибка «SSL Handshake» — это проблема сертификата на сервере 1С.
+                Попросите системного администратора открыть доступ на порт 443 или установить сертификат Let's Encrypt.
+              </AlertDescription>
+            </Alert>
+          </CardContent>
+        )}
+      </Card>
+
       {/* Actions */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <Settings className="w-4 h-4" /> Управление
-          </CardTitle>
+          <CardTitle className="text-base">Управление</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-wrap gap-3">
-          <Button variant="outline" size="sm" onClick={downloadModule}>
-            <Download className="w-4 h-4 mr-2" /> Скачать модуль 1С
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => window.open(`${baseUrl}/integrations`, "_blank")}
+          >
+            <ExternalLink className="w-4 h-4 mr-2" /> Открыть SmartRoute
           </Button>
           <Button variant="outline" size="sm" onClick={handleToggle}>
             {integration.status === "disabled" ? (
@@ -924,13 +1111,38 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
         </CardContent>
       </Card>
 
+      {/* Error guidance */}
+      {integration.status === "error" && (
+        <Card className="border-red-200">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base text-red-700 flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4" /> Что делать при ошибке
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {[
+              { title: "Неверный API-ключ", fix: "Пересоздайте интеграцию — ключ создастся автоматически." },
+              { title: "Нет доступа в интернет", fix: "Убедитесь, что с сервера 1С есть выход в интернет (порт 443)." },
+              { title: "Магазины не найдены", fix: 'Добавьте магазины в SmartRoute → раздел "Магазины".' },
+              { title: "Ошибка формата данных", fix: "Проверьте имена реквизитов в модуле 1С — они должны совпадать с вашей конфигурацией." },
+            ].map((item) => (
+              <div key={item.title} className="rounded-lg border bg-red-50 p-3">
+                <p className="text-sm font-medium text-red-800">{item.title}</p>
+                <p className="text-xs text-red-700 mt-0.5">{item.fix}</p>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
       {/* Delete confirmation */}
       <AlertDialog open={showDelete} onOpenChange={setShowDelete}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Удалить интеграцию?</AlertDialogTitle>
             <AlertDialogDescription>
-              Все настройки и журнал синхронизаций будут удалены. Заказы, уже переданные в SmartRoute, останутся.
+              Все настройки и журнал синхронизаций будут удалены. Заказы, уже переданные в SmartRoute,
+              останутся. Ключ доступа потребуется обновить в модуле 1С.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -941,38 +1153,8 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-
     </div>
   );
-}
-
-// ─── BSL template generator (client-side, no API key embedded) ───────────────
-
-function generateBslTemplate(baseUrl: string, apiKeyPlaceholder: string): string {
-  return `// SmartRoute — Модуль интеграции для 1С:Предприятие 8.3+
-// Версия: 2.0
-// 
-// УСТАНОВКА:
-// 1. Откройте 1С в режиме Конфигуратора
-// 2. Файл → Открыть → выберите этот файл
-// 3. Укажите URL SmartRoute и ваш API-ключ ниже
-// 4. Вызовите ОтправитьЗаявкиВSmartRoute() или настройте регламентное задание
-
-#Область НастройкиИнтеграции
-
-Перем НастройкиSmartRoute;
-
-Процедура ИнициализироватьНастройки()
-    НастройкиSmartRoute = Новый Структура;
-    НастройкиSmartRoute.Вставить("URL",          "${baseUrl}");
-    НастройкиSmartRoute.Вставить("APIКлюч",      "${apiKeyPlaceholder}");
-    НастройкиSmartRoute.Вставить("ЗаменитьДату", Истина);
-КонецПроцедуры
-
-#КонецОбласти
-
-// ... (полный модуль доступен в SmartRoute → Интеграции → 1С → Скачать настроенный модуль)
-`;
 }
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
@@ -991,14 +1173,10 @@ export function IntegrationsPage() {
       const list: Integration[] = await apiFetch("/api/integrations");
       setIntegrations(list);
     } catch {}
-    finally {
-      setLoadingList(false);
-    }
+    finally { setLoadingList(false); }
   }, []);
 
-  useEffect(() => {
-    loadIntegrations();
-  }, [loadIntegrations]);
+  useEffect(() => { loadIntegrations(); }, [loadIntegrations]);
 
   if (loadingList && view === "cards") {
     return (
@@ -1025,14 +1203,8 @@ export function IntegrationsPage() {
     return (
       <OneCDashboard
         integration={selectedIntegration}
-        onBack={() => {
-          loadIntegrations();
-          setView("cards");
-        }}
-        onDeleted={() => {
-          loadIntegrations();
-          setView("cards");
-        }}
+        onBack={() => { loadIntegrations(); setView("cards"); }}
+        onDeleted={() => { loadIntegrations(); setView("cards"); }}
       />
     );
   }
