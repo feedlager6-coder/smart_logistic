@@ -68,6 +68,8 @@ interface PreviewResult {
   matched_points: number;
   unmatched_points: number;
   total_rows: number;
+  file_total_rows?: number;
+  truncated?: boolean;
   matched_stores: number;
   unmatched_stores: number;
   db_stores_count: number;
@@ -260,7 +262,7 @@ export function OrdersPage() {
   // City confirmation dialog before bulk-create geocoding
   const [cityDialogOpen, setCityDialogOpen] = useState(false);
   const [bulkDefaultCity, setBulkDefaultCity] = useState(() =>
-    localStorage.getItem("smartroute_bulk_default_city") || "Махачкала"
+    localStorage.getItem("smartroute_bulk_default_city") || ""
   );
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentFileRef = useRef<File | null>(null);
@@ -1400,6 +1402,16 @@ export function OrdersPage() {
             </Card>
           </div>
 
+          {preview.truncated && (
+            <Alert className="border-red-200 bg-red-50">
+              <AlertTriangle className="w-4 h-4 text-red-600" />
+              <AlertDescription className="text-red-800">
+                Файл содержит {preview.file_total_rows?.toLocaleString("ru-RU")} строк — обработаны первые 5 000.
+                Разбейте файл на части или свяжитесь с поддержкой.
+              </AlertDescription>
+            </Alert>
+          )}
+
           {preview.db_stores_count === 0 && (
             <Alert className="border-amber-200 bg-amber-50">
               <AlertTriangle className="w-4 h-4 text-amber-600" />
@@ -1948,7 +1960,7 @@ export function OrdersPage() {
             <Input
               value={bulkDefaultCity}
               onChange={e => setBulkDefaultCity(e.target.value)}
-              placeholder="Например: Махачкала"
+              placeholder="Например: Москва"
               autoFocus
               onKeyDown={e => {
                 if (e.key === "Enter" && bulkDefaultCity.trim()) {

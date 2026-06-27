@@ -15,6 +15,7 @@ import openpyxl
 from datetime import date, datetime, timedelta
 from typing import Optional
 import secrets
+import hashlib
 import psycopg2
 import psycopg2.extras
 import psycopg2.pool as _psycopg2_pool
@@ -203,6 +204,8 @@ def _api_rate_limit(key: str, max_calls: int, window_seconds: int) -> None:
 
 # Paths that do NOT require authentication
 _AUTH_PUBLIC_PATHS = {"/api/healthz", "/api/auth/login"}
+# Webhook ingest paths use token-in-URL auth (checked inside the handler)
+_AUTH_WEBHOOK_PREFIX = "/api/v1/webhooks/ingest/"
 
 AVG_SPEED_KMH = 30
 TRAFFIC_MULTIPLIER = 1.2
@@ -1979,6 +1982,26 @@ def init_db():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_admin ON admin_audit_log(admin_user_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created ON admin_audit_log(created_at DESC)")
+    # ── API Keys ───────────────────────────────────────────────────────────────
+    # Bearer-token keys for machine-to-machine access (integrations, webhooks).
+    # The full key is shown once on creation; only SHA-256 hash stored in DB.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS api_keys (
+            id SERIAL PRIMARY KEY,
+            owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            key_prefix TEXT NOT NULL,
+            key_hash TEXT NOT NULL UNIQUE,
+            scopes TEXT[] NOT NULL DEFAULT '{}',
+            is_active BOOLEAN DEFAULT TRUE,
+            expires_at TIMESTAMP,
+            last_used_at TIMESTAMP,
+            last_used_ip TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_owner ON api_keys(owner_id, is_active)")
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash)")
     # ── Persistent geocoding cache ─────────────────────────────────────────────
     # Replaces ephemeral in-memory dict; survives restarts, prevents redundant
     # Yandex API calls on re-import. Only successful results (lat/lon != NULL)
@@ -3066,23 +3089,7 @@ def seed_demo_data(owner_id: int = None):
         conn.close()
         return
 
-    demo_stores = [
-        ("Продукты Центр", "Махачкала, пр. Расула Гамзатова, 37", 42.9849, 47.5046, "found"),
-        ("Супермаркет Каспий", "Махачкала, ул. Ленина, 15", 42.9800, 47.5012, "found"),
-        ("Магазин Дагестан", "Махачкала, ул. Коркмасова, 8", 42.9764, 47.4989, "found"),
-        ("Торговый дом Север", "Махачкала, ул. Батырая, 22", 42.9838, 47.5155, "found"),
-        ("Мини-маркет Восток", "Махачкала, пр. Акушинского, 10", 42.9912, 47.5078, "found"),
-        ("Продукты Юг", "Махачкала, ул. Имама Шамиля, 31", 42.9691, 47.5034, "found"),
-        ("Супермаркет Горный", "Махачкала, ул. Гагарина, 44", 42.9857, 47.4921, "found"),
-        ("Магазин Приморский", "Махачкала, ул. Приморская, 5", 42.9929, 47.5196, "found"),
-    ]
-
-    for name, address, lat, lon, status in demo_stores:
-        cur.execute(
-            """INSERT INTO stores (name, address, lat, lon, geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
-               VALUES (%s, %s, %s, %s, %s, '09:00', '18:00', 15, %s)""",
-            (name, address, lat, lon, status, owner_id)
-        )
+    # No demo stores — new users start with onboarding flow (city-agnostic)
 
     # Seed some historical route sessions
     today = date.today()
@@ -3195,6 +3202,53 @@ def seed_admin_user() -> Optional[int]:
 
 # ── Auth middleware ───────────────────────────────────────────────────────────
 
+def _hash_api_key(raw_key: str) -> str:
+    """SHA-256 hash of a raw API key string (hex digest)."""
+    return hashlib.sha256(raw_key.encode()).hexdigest()
+
+
+def _generate_api_key() -> tuple[str, str]:
+    """Return (full_key, key_prefix). Full key shown once; only hash stored."""
+    rand = secrets.token_urlsafe(32)
+    full_key = f"sr_live_{rand}"
+    prefix = full_key[:16]  # "sr_live_" + 8 chars — safe to display
+    return full_key, prefix
+
+
+def _resolve_api_key(raw_key: str) -> dict | None:
+    """Lookup an API key by hash; update last_used; return key row or None."""
+    key_hash = _hash_api_key(raw_key)
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """SELECT ak.id, ak.owner_id, ak.scopes, ak.is_active, ak.expires_at,
+                      u.id as user_id, u.is_active as user_active, u.is_admin
+               FROM api_keys ak
+               JOIN users u ON u.id = ak.owner_id
+               WHERE ak.key_hash = %s""",
+            (key_hash,)
+        )
+        row = cur.fetchone()
+        if row and row["is_active"] and row["user_active"]:
+            if row["expires_at"] is None or row["expires_at"] > datetime.utcnow():
+                # Update last_used (best-effort, no fail if it errors)
+                try:
+                    cur.execute(
+                        "UPDATE api_keys SET last_used_at = NOW() WHERE id = %s",
+                        (row["id"],)
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
+                cur.close(); conn.close()
+                return dict(row)
+        cur.close(); conn.close()
+    except Exception as exc:
+        logger.error("_resolve_api_key error: %s", exc)
+    return None
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     # Always pass through OPTIONS (CORS pre-flight) and public paths
@@ -3202,54 +3256,53 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
 
     path = request.url.path
+
+    # Webhook ingest: token-in-URL, authenticated inside the handler
+    if path.startswith(_AUTH_WEBHOOK_PREFIX):
+        return await call_next(request)
+
     if path in _AUTH_PUBLIC_PATHS or not path.startswith("/api/"):
         return await call_next(request)
 
+    # ── 1. Cookie JWT (browser sessions) ─────────────────────────────────────
     token = request.cookies.get(JWT_COOKIE_NAME)
-    if not token:
-        return JSONResponse(
-            status_code=401,
-            content={"detail": "Не авторизован. Войдите в систему."},
-        )
+    if token:
+        username = _decode_token(token)
+        if not username:
+            return JSONResponse(status_code=401, content={"detail": "Токен недействителен или истёк. Войдите снова."})
+        try:
+            _conn = get_db()
+            _cur = _conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            _cur.execute("SELECT id, is_active, is_admin FROM users WHERE username = %s", (username,))
+            _user_row = _cur.fetchone()
+            _cur.close(); _conn.close()
+        except Exception as _exc:
+            logger.error("Auth middleware DB error: %s", _exc)
+            _user_row = None
+        if not _user_row:
+            return JSONResponse(status_code=401, content={"detail": "Пользователь не найден. Войдите снова."})
+        if not _user_row.get("is_active", True):
+            return JSONResponse(status_code=401, content={"detail": "Аккаунт отключён. Обратитесь к администратору."})
+        request.state.username = username
+        request.state.user_id = _user_row["id"]
+        request.state.is_admin = bool(_user_row.get("is_admin", False))
+        request.state.api_key_scopes = None  # cookie auth = full access
+        return await call_next(request)
 
-    username = _decode_token(token)
-    if not username:
-        return JSONResponse(
-            status_code=401,
-            content={"detail": "Токен недействителен или истёк. Войдите снова."},
-        )
+    # ── 2. Bearer API Key (machine-to-machine) ────────────────────────────────
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        raw_key = auth_header[7:].strip()
+        key_row = _resolve_api_key(raw_key)
+        if not key_row:
+            return JSONResponse(status_code=401, content={"detail": "Недействительный API-ключ."})
+        request.state.username = f"api_key:{key_row['id']}"
+        request.state.user_id = key_row["user_id"]
+        request.state.is_admin = bool(key_row.get("is_admin", False))
+        request.state.api_key_scopes = key_row.get("scopes") or []
+        return await call_next(request)
 
-    # Load user from DB on every request: checks is_active, populates user_id and is_admin
-    try:
-        _conn = get_db()
-        _cur = _conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        _cur.execute(
-            "SELECT id, is_active, is_admin FROM users WHERE username = %s",
-            (username,)
-        )
-        _user_row = _cur.fetchone()
-        _cur.close()
-        _conn.close()
-    except Exception as _exc:
-        logger.error("Auth middleware DB error: %s", _exc)
-        _user_row = None
-
-    if not _user_row:
-        return JSONResponse(
-            status_code=401,
-            content={"detail": "Пользователь не найден. Войдите снова."},
-        )
-
-    if not _user_row.get("is_active", True):
-        return JSONResponse(
-            status_code=401,
-            content={"detail": "Аккаунт отключён. Обратитесь к администратору."},
-        )
-
-    request.state.username = username
-    request.state.user_id = _user_row["id"]
-    request.state.is_admin = bool(_user_row.get("is_admin", False))
-    return await call_next(request)
+    return JSONResponse(status_code=401, content={"detail": "Не авторизован. Войдите в систему или укажите API-ключ."})
 
 
 # ── Auth endpoints ────────────────────────────────────────────────────────────
@@ -5242,6 +5295,8 @@ async def orders_preview(request: Request, file: UploadFile = File(...), mapping
     # weight/volume/amount/quantity and a concatenated product list.
     MAX_DATA_ROWS = 5000
     data_rows = rows_raw[header_row_idx + 1:]
+    file_total_rows = len(data_rows)          # raw count before cap
+    truncated = file_total_rows > MAX_DATA_ROWS
     points: dict[tuple, dict] = {}
     order_seq: list[tuple] = []
     sample_rows: list[tuple] = []   # (cells, key) for the raw preview table
@@ -5354,7 +5409,9 @@ async def orders_preview(request: Request, file: UploadFile = File(...), mapping
         "total_points": total_points,
         "matched_points": matched_points,
         "unmatched_points": total_points - matched_points,
-        "total_rows": total_data_rows,   # raw data lines parsed
+        "total_rows": total_data_rows,   # raw data lines parsed (after cap)
+        "file_total_rows": file_total_rows,  # actual lines in the file (pre-cap)
+        "truncated": truncated,          # True when file > MAX_DATA_ROWS
         # Backward-compatible aliases — now point-based (the correct semantics).
         "matched_stores": matched_points,
         "unmatched_stores": total_points - matched_points,
@@ -5973,9 +6030,14 @@ def build_route(request: Request, body: RouteRequest):
     cur.close()
     conn.close()
 
-    # Depot coordinates
-    depot_lat = body.depot_lat or 42.9849
-    depot_lon = body.depot_lon or 47.5046
+    # Depot coordinates — required; no city-specific fallback
+    if not body.depot_lat or not body.depot_lon:
+        raise HTTPException(
+            status_code=400,
+            detail="Укажите адрес склада (депо) на странице построения маршрута перед запуском оптимизации."
+        )
+    depot_lat = body.depot_lat
+    depot_lon = body.depot_lon
 
     # Build coordinate list: depot first, then stores (preserve input order for savings baseline)
     store_list = [stores_rows[sid] for sid in body.store_ids if sid in stores_rows and stores_rows[sid]["lat"]]
@@ -7289,6 +7351,235 @@ def admin_clear_geocode_cache(request: Request):
     conn.commit(); cur.close(); conn.close()
     geocode_cache.clear()
     return {"ok": True, "deleted_count": count}
+
+
+# ── API Key management endpoints ─────────────────────────────────────────────
+
+class ApiKeyCreate(BaseModel):
+    name: str
+    scopes: list[str] = []
+    expires_days: int | None = None  # None = never expires
+
+
+@app.get("/api/auth/api-keys")
+def list_api_keys(request: Request):
+    """List all API keys for the current user (without the secret part)."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """SELECT id, name, key_prefix, scopes, is_active, expires_at,
+                  last_used_at, created_at
+           FROM api_keys WHERE owner_id = %s ORDER BY created_at DESC""",
+        (uid,)
+    )
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/auth/api-keys", status_code=201)
+def create_api_key(request: Request, body: ApiKeyCreate):
+    """Create a new API key. Returns the full key ONCE — store it safely."""
+    uid = get_user_id(request)
+    if not body.name.strip():
+        raise HTTPException(status_code=422, detail="Укажите название ключа")
+
+    # Validate scopes
+    _VALID_SCOPES = {
+        "stores:read", "stores:write",
+        "orders:read", "orders:write",
+        "routes:build", "routes:read",
+        "analytics:read",
+        "settings:read", "settings:write",
+        "webhooks:receive",
+    }
+    invalid = [s for s in body.scopes if s not in _VALID_SCOPES]
+    if invalid:
+        raise HTTPException(status_code=422, detail=f"Недопустимые scopes: {invalid}")
+
+    full_key, prefix = _generate_api_key()
+    key_hash = _hash_api_key(full_key)
+    expires_at = None
+    if body.expires_days:
+        expires_at = datetime.utcnow() + timedelta(days=body.expires_days)
+
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """INSERT INTO api_keys (owner_id, name, key_prefix, key_hash, scopes, expires_at)
+           VALUES (%s, %s, %s, %s, %s, %s) RETURNING id, name, key_prefix, scopes, is_active, created_at""",
+        (uid, body.name.strip(), prefix, key_hash, body.scopes, expires_at)
+    )
+    row = dict(cur.fetchone())
+    conn.commit(); cur.close(); conn.close()
+
+    row["key"] = full_key  # shown ONCE
+    return row
+
+
+@app.delete("/api/auth/api-keys/{key_id}", status_code=200)
+def revoke_api_key(key_id: int, request: Request):
+    """Revoke (deactivate) an API key. Keeps record for audit trail."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE api_keys SET is_active = FALSE WHERE id = %s AND owner_id = %s",
+        (key_id, uid)
+    )
+    if cur.rowcount == 0:
+        cur.close(); conn.close()
+        raise HTTPException(status_code=404, detail="Ключ не найден")
+    conn.commit(); cur.close(); conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/auth/api-keys/{key_id}/rotate", status_code=201)
+def rotate_api_key(key_id: int, request: Request):
+    """Rotate: deactivate old key, create new one with same name+scopes."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        "SELECT name, scopes, expires_at FROM api_keys WHERE id = %s AND owner_id = %s AND is_active = TRUE",
+        (key_id, uid)
+    )
+    old = cur.fetchone()
+    if not old:
+        cur.close(); conn.close()
+        raise HTTPException(status_code=404, detail="Ключ не найден или уже отозван")
+
+    # Deactivate old
+    cur.execute("UPDATE api_keys SET is_active = FALSE WHERE id = %s", (key_id,))
+
+    # Create new
+    full_key, prefix = _generate_api_key()
+    key_hash = _hash_api_key(full_key)
+    cur.execute(
+        """INSERT INTO api_keys (owner_id, name, key_prefix, key_hash, scopes, expires_at)
+           VALUES (%s, %s, %s, %s, %s, %s) RETURNING id, name, key_prefix, scopes, is_active, created_at""",
+        (uid, old["name"], prefix, key_hash, old["scopes"], old["expires_at"])
+    )
+    row = dict(cur.fetchone())
+    conn.commit(); cur.close(); conn.close()
+    row["key"] = full_key
+    return row
+
+
+# ── Universal Webhook Ingest endpoint ─────────────────────────────────────────
+# Accepts delivery orders from any external system (1С, МойСклад, Bitrix24, etc.)
+# in a single universal format. Authentication via token-in-URL (api_key with
+# scope "webhooks:receive"). Connector-specific adapters call this endpoint
+# after transforming their native format to UniversalOrderModel.
+
+class WebhookOrderItem(BaseModel):
+    store_name: str
+    address: str | None = None
+    delivery_date: str  # YYYY-MM-DD
+    weight_kg: float = 0.0
+    volume_m3: float = 0.0
+    quantity: float = 0.0
+    amount_rub: float = 0.0
+    products: str = ""
+    order_number: str = ""
+    notes: str = ""
+    time_window_from: str | None = None
+    time_window_to: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    external_id: str = ""   # ID в системе-источнике (для идемпотентности)
+    source: str = "webhook" # "moysklad" | "bitrix24" | "excel" | "api" | ...
+
+
+class WebhookIngestRequest(BaseModel):
+    orders: list[WebhookOrderItem]
+    replace_date: bool = False  # if True — delete existing orders for dates in batch first
+
+
+@app.post("/api/v1/webhooks/ingest/{token}")
+def webhook_ingest(token: str, body: WebhookIngestRequest, request: Request):
+    """
+    Universal order ingest endpoint.
+    Auth: token is a raw API key with scope 'webhooks:receive'.
+    Accepts a batch of orders in universal format.
+    """
+    # Authenticate via token (key_hash lookup)
+    key_row = _resolve_api_key(token)
+    if not key_row:
+        raise HTTPException(status_code=401, detail="Недействительный webhook-токен")
+    if "webhooks:receive" not in (key_row.get("scopes") or []):
+        raise HTTPException(status_code=403, detail="Ключ не имеет права webhooks:receive")
+
+    uid = key_row["user_id"]
+
+    if not body.orders:
+        return {"created": 0, "matched": 0, "skipped": 0, "errors": []}
+
+    # Validate all dates
+    for item in body.orders:
+        try:
+            datetime.strptime(item.delivery_date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Неверный формат даты '{item.delivery_date}'. Используйте YYYY-MM-DD"
+            )
+
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    # Load stores for matching
+    cur.execute("SELECT id, name, address, city FROM stores WHERE owner_id = %s", (uid,))
+    db_stores = [dict(r) for r in cur.fetchall()]
+
+    # Optional: delete existing orders for replaced dates
+    if body.replace_date:
+        dates_to_replace = list({item.delivery_date for item in body.orders})
+        for d in dates_to_replace:
+            cur.execute(
+                "DELETE FROM daily_orders WHERE owner_id = %s AND delivery_date = %s",
+                (uid, d)
+            )
+
+    created = matched = skipped = 0
+    errors = []
+
+    for item in body.orders:
+        try:
+            if not item.store_name.strip():
+                skipped += 1
+                continue
+
+            # Attempt store matching
+            store_id = None
+            matched_store = _match_store_to_db(item.store_name, item.address or "", db_stores)
+            if matched_store:
+                store_id = matched_store["id"]
+                matched += 1
+
+            # Use provided coordinates if given (bypass geocoding)
+            lat = item.latitude
+            lon = item.longitude
+
+            cur.execute(
+                """INSERT INTO daily_orders
+                   (owner_id, store_id, store_name_raw, address_raw, delivery_date,
+                    weight_kg, volume_m3, quantity, amount_rub, products,
+                    order_number, notes)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (uid, store_id, item.store_name.strip(), item.address or "",
+                 item.delivery_date, item.weight_kg, item.volume_m3,
+                 item.quantity, item.amount_rub, item.products,
+                 item.order_number, item.notes)
+            )
+            created += 1
+        except Exception as exc:
+            errors.append({"store": item.store_name, "error": str(exc)})
+            logger.error("webhook_ingest row error: %s", exc)
+
+    conn.commit(); cur.close(); conn.close()
+    return {"created": created, "matched": matched, "skipped": skipped, "errors": errors[:20]}
 
 
 # ── Production static file serving ────────────────────────────────────────────

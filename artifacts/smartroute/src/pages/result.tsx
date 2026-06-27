@@ -318,7 +318,16 @@ export function ResultPage() {
   }
 
   // ── Desktop view ─────────────────────────────────────────────────────────
-  const center: [number, number] = [42.9849, 47.5046]; // Махачкала
+  // Compute map center from actual route points (city-agnostic)
+  const allRoutePoints = result.routes.flatMap(r =>
+    r.stores.filter(s => s.lat && s.lon).map(s => [s.lat!, s.lon!] as [number, number])
+  );
+  const center: [number, number] = allRoutePoints.length > 0
+    ? [
+        allRoutePoints.reduce((acc, p) => acc + p[0], 0) / allRoutePoints.length,
+        allRoutePoints.reduce((acc, p) => acc + p[1], 0) / allRoutePoints.length,
+      ]
+    : [55.7558, 37.6173]; // Москва как нейтральный fallback
 
   return (
     <div className="space-y-6 pb-20">

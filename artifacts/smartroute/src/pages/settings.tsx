@@ -4,7 +4,16 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import { Settings, Save, Fuel, Gauge, Calculator, TrendingDown, Users } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel,
+  AlertDialogContent, AlertDialogDescription, AlertDialogFooter,
+  AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
+  Settings, Save, Fuel, Gauge, Calculator, TrendingDown,
+  Users, Key, Plus, Trash2, RotateCcw, Copy, Check, Eye, EyeOff,
+} from "lucide-react";
 import { useAuth } from "@/context/auth";
 import { UsersPanel } from "@/components/UsersPanel";
 
@@ -18,7 +27,349 @@ function calcCostPerKm(fuelPrice: number, consumption: number): number {
   return Math.round((fuelPrice * consumption) / 100 * 100) / 100;
 }
 
-type Tab = "fuel" | "users";
+type Tab = "fuel" | "users" | "apikeys";
+
+interface ApiKey {
+  id: number;
+  name: string;
+  key_prefix: string;
+  scopes: string[];
+  is_active: boolean;
+  expires_at: string | null;
+  last_used_at: string | null;
+  created_at: string;
+}
+
+const SCOPE_LABELS: Record<string, string> = {
+  "stores:read": "Магазины: чтение",
+  "stores:write": "Магазины: запись",
+  "orders:read": "Заявки: чтение",
+  "orders:write": "Заявки: запись",
+  "routes:build": "Маршруты: построение",
+  "routes:read": "Маршруты: чтение",
+  "analytics:read": "Аналитика",
+  "settings:read": "Настройки: чтение",
+  "settings:write": "Настройки: запись",
+  "webhooks:receive": "Webhook: приём заявок",
+};
+
+const ALL_SCOPES = Object.keys(SCOPE_LABELS);
+
+function ApiKeysPanel() {
+  const { toast } = useToast();
+  const [keys, setKeys] = useState<ApiKey[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [newKeyName, setNewKeyName] = useState("");
+  const [newKeyScopes, setNewKeyScopes] = useState<string[]>(["orders:write", "webhooks:receive"]);
+  const [showCreate, setShowCreate] = useState(false);
+  const [newlyCreatedKey, setNewlyCreatedKey] = useState<string | null>(null);
+  const [copiedKey, setCopiedKey] = useState(false);
+  const [revokeId, setRevokeId] = useState<number | null>(null);
+  const [rotateId, setRotateId] = useState<number | null>(null);
+
+  async function loadKeys() {
+    try {
+      const res = await fetch("/api/auth/api-keys", { credentials: "include" });
+      if (res.ok) setKeys(await res.json());
+    } catch { /* ignore */ }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { loadKeys(); }, []);
+
+  async function handleCreate() {
+    if (!newKeyName.trim()) {
+      toast({ title: "Укажите название ключа", variant: "destructive" });
+      return;
+    }
+    setCreating(true);
+    try {
+      const res = await fetch("/api/auth/api-keys", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newKeyName.trim(), scopes: newKeyScopes }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Ошибка");
+      setNewlyCreatedKey(data.key);
+      setShowCreate(false);
+      setNewKeyName("");
+      setNewKeyScopes(["orders:write", "webhooks:receive"]);
+      await loadKeys();
+    } catch (e: any) {
+      toast({ title: "Не удалось создать ключ", description: e.message, variant: "destructive" });
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function handleRevoke(id: number) {
+    try {
+      await fetch(`/api/auth/api-keys/${id}`, { method: "DELETE", credentials: "include" });
+      setKeys(k => k.filter(x => x.id !== id));
+      toast({ title: "Ключ отозван" });
+    } catch {
+      toast({ title: "Не удалось отозвать ключ", variant: "destructive" });
+    }
+    setRevokeId(null);
+  }
+
+  async function handleRotate(id: number) {
+    try {
+      const res = await fetch(`/api/auth/api-keys/${id}/rotate`, { method: "POST", credentials: "include" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Ошибка");
+      setNewlyCreatedKey(data.key);
+      await loadKeys();
+      toast({ title: "Ключ обновлён", description: "Новый ключ показан ниже. Обновите его в своих системах." });
+    } catch (e: any) {
+      toast({ title: "Не удалось обновить ключ", description: e.message, variant: "destructive" });
+    }
+    setRotateId(null);
+  }
+
+  function copyKey() {
+    if (!newlyCreatedKey) return;
+    navigator.clipboard.writeText(newlyCreatedKey).then(() => {
+      setCopiedKey(true);
+      setTimeout(() => setCopiedKey(false), 2000);
+    });
+  }
+
+  function toggleScope(scope: string) {
+    setNewKeyScopes(prev =>
+      prev.includes(scope) ? prev.filter(s => s !== scope) : [...prev, scope]
+    );
+  }
+
+  function fmt(dt: string | null) {
+    if (!dt) return "—";
+    return new Date(dt).toLocaleDateString("ru-RU", { day: "2-digit", month: "short", year: "numeric" });
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Newly created key — show once */}
+      {newlyCreatedKey && (
+        <div className="rounded-xl border-2 border-emerald-400 bg-emerald-50 dark:bg-emerald-950/30 p-5 space-y-3">
+          <div className="flex items-center gap-2 font-semibold text-emerald-800 dark:text-emerald-300">
+            <Key className="w-4 h-4" />
+            Новый API-ключ — сохраните его сейчас
+          </div>
+          <p className="text-sm text-emerald-700 dark:text-emerald-400">
+            Ключ показывается только один раз. После закрытия этого блока восстановить его невозможно — только создать новый.
+          </p>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 font-mono text-sm bg-white dark:bg-black/30 border border-emerald-300 rounded-lg px-4 py-2.5 break-all select-all">
+              {newlyCreatedKey}
+            </code>
+            <Button size="sm" variant="outline" onClick={copyKey} className="shrink-0 gap-1.5">
+              {copiedKey ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
+              {copiedKey ? "Скопировано" : "Копировать"}
+            </Button>
+          </div>
+          <Button variant="ghost" size="sm" className="text-xs" onClick={() => setNewlyCreatedKey(null)}>
+            Закрыть
+          </Button>
+        </div>
+      )}
+
+      {/* Header + create button */}
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm text-muted-foreground">
+            Используйте API-ключи для интеграции с 1С, МойСклад, Bitrix24 и другими системами через Webhook.
+          </p>
+        </div>
+        <Button size="sm" onClick={() => setShowCreate(v => !v)} className="gap-2 shrink-0">
+          <Plus className="w-4 h-4" />
+          Создать ключ
+        </Button>
+      </div>
+
+      {/* Create form */}
+      {showCreate && (
+        <Card className="border-primary/30 bg-primary/5">
+          <CardContent className="pt-5 space-y-4">
+            <div className="space-y-2">
+              <Label>Название ключа</Label>
+              <Input
+                value={newKeyName}
+                onChange={e => setNewKeyName(e.target.value)}
+                placeholder="Например: МойСклад вебхук"
+                onKeyDown={e => e.key === "Enter" && handleCreate()}
+                autoFocus
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Права доступа (scopes)</Label>
+              <div className="flex flex-wrap gap-2">
+                {ALL_SCOPES.map(scope => (
+                  <button
+                    key={scope}
+                    type="button"
+                    onClick={() => toggleScope(scope)}
+                    className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                      newKeyScopes.includes(scope)
+                        ? "bg-primary text-primary-foreground border-primary"
+                        : "bg-background text-muted-foreground border-border hover:border-primary/50"
+                    }`}
+                  >
+                    {SCOPE_LABELS[scope]}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="flex gap-2 pt-1">
+              <Button onClick={handleCreate} disabled={creating} size="sm" className="gap-2">
+                {creating ? (
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <Key className="w-4 h-4" />
+                )}
+                Создать
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => { setShowCreate(false); setNewKeyName(""); }}>
+                Отмена
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Keys list */}
+      {loading ? (
+        <div className="flex items-center justify-center h-24">
+          <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+        </div>
+      ) : keys.length === 0 ? (
+        <div className="rounded-xl border-2 border-dashed border-border bg-muted/30 py-12 text-center space-y-2">
+          <Key className="w-8 h-8 text-muted-foreground mx-auto" />
+          <p className="text-sm font-medium">Нет API-ключей</p>
+          <p className="text-xs text-muted-foreground">Создайте ключ для интеграции с внешними системами</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {keys.map(k => (
+            <div key={k.id} className={`rounded-xl border p-4 space-y-3 ${!k.is_active ? "opacity-50 bg-muted/30" : "bg-background"}`}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="space-y-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-medium text-sm">{k.name}</span>
+                    {!k.is_active && <Badge variant="secondary" className="text-xs">Отозван</Badge>}
+                  </div>
+                  <code className="text-xs text-muted-foreground font-mono">{k.key_prefix}…</code>
+                </div>
+                {k.is_active && (
+                  <div className="flex gap-1.5 shrink-0">
+                    <Button
+                      variant="ghost" size="sm"
+                      className="h-8 gap-1.5 text-xs"
+                      onClick={() => setRotateId(k.id)}
+                      title="Обновить ключ"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span className="hidden sm:inline">Обновить</span>
+                    </Button>
+                    <Button
+                      variant="ghost" size="sm"
+                      className="h-8 gap-1.5 text-xs text-destructive hover:text-destructive"
+                      onClick={() => setRevokeId(k.id)}
+                      title="Отозвать ключ"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span className="hidden sm:inline">Отозвать</span>
+                    </Button>
+                  </div>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {(k.scopes || []).map(s => (
+                  <Badge key={s} variant="outline" className="text-xs font-normal">
+                    {SCOPE_LABELS[s] || s}
+                  </Badge>
+                ))}
+                {(!k.scopes || k.scopes.length === 0) && (
+                  <span className="text-xs text-muted-foreground">Без ограничений по правам</span>
+                )}
+              </div>
+              <div className="flex gap-4 text-xs text-muted-foreground">
+                <span>Создан: {fmt(k.created_at)}</span>
+                <span>Последнее использование: {fmt(k.last_used_at)}</span>
+                {k.expires_at && <span>Истекает: {fmt(k.expires_at)}</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Webhook usage example */}
+      <Card className="border-border bg-muted/20">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm font-medium">Пример: приём заявок через Webhook</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2 text-xs text-muted-foreground">
+          <p>Создайте ключ со scope <code className="bg-muted px-1 rounded">webhooks:receive</code>, затем отправляйте заявки POST-запросом:</p>
+          <pre className="bg-muted rounded-lg p-3 overflow-x-auto text-xs font-mono whitespace-pre-wrap break-all">
+{`POST /api/v1/webhooks/ingest/<ваш_ключ>
+Content-Type: application/json
+
+{
+  "orders": [
+    {
+      "store_name": "Магазин Центральный",
+      "address": "ул. Пушкина, 10",
+      "delivery_date": "2026-07-01",
+      "weight_kg": 120.5,
+      "quantity": 48,
+      "products": "Молоко×12, Хлеб×24"
+    }
+  ]
+}`}
+          </pre>
+        </CardContent>
+      </Card>
+
+      {/* Revoke dialog */}
+      <AlertDialog open={revokeId !== null} onOpenChange={o => !o && setRevokeId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Отозвать API-ключ?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Все интеграции, использующие этот ключ, перестанут работать. Действие необратимо.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Отмена</AlertDialogCancel>
+            <AlertDialogAction onClick={() => revokeId && handleRevoke(revokeId)} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+              Отозвать
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Rotate dialog */}
+      <AlertDialog open={rotateId !== null} onOpenChange={o => !o && setRotateId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Обновить API-ключ?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Старый ключ будет отозван немедленно. Новый ключ будет показан один раз — обновите его во всех своих системах.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Отмена</AlertDialogCancel>
+            <AlertDialogAction onClick={() => rotateId && handleRotate(rotateId)}>
+              Обновить ключ
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
 
 export function SettingsPage() {
   const { toast } = useToast();
@@ -96,7 +447,7 @@ export function SettingsPage() {
           Настройки компании
         </h1>
         <p className="text-muted-foreground mt-2">
-          Параметры топлива и управление пользователями
+          Параметры топлива, API-ключи и управление пользователями
         </p>
       </div>
 
@@ -111,7 +462,18 @@ export function SettingsPage() {
           }`}
         >
           <Fuel className="w-4 h-4" />
-          Параметры топлива
+          Топливо
+        </button>
+        <button
+          onClick={() => setActiveTab("apikeys")}
+          className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === "apikeys"
+              ? "border-primary text-primary"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <Key className="w-4 h-4" />
+          API-ключи
         </button>
         {isAdmin && (
           <button
@@ -246,6 +608,22 @@ export function SettingsPage() {
               </p>
             </CardContent>
           </Card>
+        </div>
+      )}
+
+      {/* API Keys tab */}
+      {activeTab === "apikeys" && (
+        <div className="space-y-2">
+          <div className="mb-4">
+            <h2 className="text-lg font-semibold flex items-center gap-2">
+              <Key className="w-5 h-5 text-primary" />
+              API-ключи
+            </h2>
+            <p className="text-sm text-muted-foreground mt-1">
+              Безопасный доступ для интеграций: 1С, МойСклад, Bitrix24, собственные скрипты
+            </p>
+          </div>
+          <ApiKeysPanel />
         </div>
       )}
 

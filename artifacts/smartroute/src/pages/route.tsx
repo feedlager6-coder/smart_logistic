@@ -299,6 +299,17 @@ export function RoutePage() {
   const executeBuild = () => {
     const depotLatNum = depotLat ? parseFloat(depotLat) : undefined;
     const depotLonNum = depotLon ? parseFloat(depotLon) : undefined;
+
+    // Guard: require depot coordinates before building
+    if (!depotLatNum || !depotLonNum) {
+      toast({
+        title: "Укажите адрес склада",
+        description: "Введите адрес склада (депо) и нажмите «Найти» для определения координат.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     buildRoute.mutate({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       data: {

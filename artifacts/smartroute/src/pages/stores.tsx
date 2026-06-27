@@ -1023,7 +1023,7 @@ export function StoresPage() {
               <Input
                 value={editYandexUrl}
                 onChange={(e) => setEditYandexUrl(e.target.value)}
-                placeholder="https://yandex.ru/maps/?whatshere[point]=47.5,42.98"
+                placeholder="https://yandex.ru/maps/?whatshere[point]=..."
                 type="url"
               />
               <p className="text-xs text-muted-foreground">
@@ -1035,13 +1035,13 @@ export function StoresPage() {
               <Input
                 value={editAddress}
                 onChange={(e) => setEditAddress(e.target.value)}
-                placeholder="Махачкала, ул. Ленина 5"
+                placeholder="ул. Пушкина, 10"
               />
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Город</Label>
-                <Input value={editCity} onChange={(e) => setEditCity(e.target.value)} placeholder="Махачкала" />
+                <Input value={editCity} onChange={(e) => setEditCity(e.target.value)} placeholder="Название города" />
               </div>
               <div className="space-y-2">
                 <Label>Телефон</Label>

@@ -457,7 +457,7 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
                 id="default-city"
                 value={defaultCity}
                 onChange={(e) => { setDefaultCity(e.target.value); setShowCityWarning(false); }}
-                placeholder="Например: Махачкала"
+                placeholder="Например: Москва"
                 disabled={cityColSelected}
                 className="h-8 text-sm"
               />
