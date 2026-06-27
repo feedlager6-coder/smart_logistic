@@ -7582,6 +7582,1071 @@ def webhook_ingest(token: str, body: WebhookIngestRequest, request: Request):
     return {"created": created, "matched": matched, "skipped": skipped, "errors": errors[:20]}
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# PUBLIC API v1
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Design principles:
+#   • All routes live under /api/v1/*
+#   • Auth: Bearer <api_key>  OR  HttpOnly cookie (same middleware already handles both)
+#   • Every handler calls _v1_require_scope(request, "scope:action") first
+#   • Responses always wrapped in {"data":…,"meta":…,"request_id":…} envelope
+#   • Errors always {"error":{"code":…,"message":…},"request_id":…}
+#   • Per-key rate limiting with X-RateLimit-* headers
+#   • NO business logic duplication — thin wrappers over existing functions
+# ══════════════════════════════════════════════════════════════════════════════
+
+import uuid as _uuid
+
+_V1_VALID_SCOPES = {
+    "stores:read", "stores:write",
+    "orders:read", "orders:write",
+    "routes:read", "routes:build",
+    "analytics:read",
+    "settings:read", "settings:write",
+    "webhooks:receive",
+    "keys:read",
+}
+
+# ── Per-key rate limiter (sliding window, shared with _rl_store/_rl_lock) ─────
+
+def _v1_key_rate_limit(key_hash: str, limit: int = 60, window: int = 60) -> tuple[int, int]:
+    """Return (remaining, reset_unix). Raises 429 if limit exceeded."""
+    bucket = f"v1:{key_hash}"
+    now = time.time()
+    with _rl_lock:
+        ts = _rl_store.get(bucket, [])
+        ts = [t for t in ts if now - t < window]
+        remaining = max(0, limit - len(ts) - 1)
+        reset_ts = int(now) + window
+        if len(ts) >= limit:
+            retry = max(1, int(window - (now - ts[0])) + 1)
+            raise HTTPException(
+                status_code=429,
+                detail="Превышен лимит запросов к API.",
+                headers={
+                    "Retry-After": str(retry),
+                    "X-RateLimit-Limit": str(limit),
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": str(reset_ts),
+                },
+            )
+        ts.append(now)
+        _rl_store[bucket] = ts
+    return remaining, reset_ts
+
+
+def _v1_rl_headers(request: Request, limit: int = 60, window: int = 60) -> dict:
+    """Apply per-key rate limiting; return X-RateLimit-* headers dict."""
+    scopes = getattr(request.state, "api_key_scopes", None)
+    if scopes is None:
+        # Cookie auth — no per-key rate limit, return informational headers only
+        return {"X-RateLimit-Limit": str(limit), "X-RateLimit-Remaining": str(limit)}
+    # Identify key by username set by middleware ("api_key:<id>")
+    username = getattr(request.state, "username", "unknown")
+    remaining, reset_ts = _v1_key_rate_limit(username, limit=limit, window=window)
+    return {
+        "X-RateLimit-Limit": str(limit),
+        "X-RateLimit-Remaining": str(remaining),
+        "X-RateLimit-Reset": str(reset_ts),
+    }
+
+
+# ── Scope enforcement ─────────────────────────────────────────────────────────
+
+def _v1_require_scope(request: Request, scope: str) -> None:
+    """Raise _V1Error 403 if the authenticated API key doesn't have *scope*.
+    Cookie-authenticated users (api_key_scopes is None) always pass."""
+    key_scopes = getattr(request.state, "api_key_scopes", None)
+    if key_scopes is None:
+        return  # cookie auth = full access
+    if "*" in key_scopes:
+        return  # wildcard key
+    if scope not in key_scopes:
+        raise _V1Error(
+            code="FORBIDDEN",
+            message=f"API ключ не имеет права «{scope}». Добавьте этот scope при создании ключа.",
+            status=403,
+            details={"required_scope": scope, "key_scopes": key_scopes},
+        )
+
+
+# ── Envelope helpers ──────────────────────────────────────────────────────────
+
+def _v1_request_id() -> str:
+    return "req_" + _uuid.uuid4().hex[:12]
+
+
+def _v1_ok(data, *, meta: dict | None = None, request_id: str | None = None) -> dict:
+    out: dict = {"data": data, "request_id": request_id or _v1_request_id()}
+    if meta is not None:
+        out["meta"] = meta
+    return out
+
+
+class _V1Error(Exception):
+    """Custom exception for v1 API errors — bypasses FastAPI detail wrapping."""
+    def __init__(self, code: str, message: str, status: int, details: dict | None = None):
+        self.code = code
+        self.message = message
+        self.status = status
+        self.details = details
+        self.request_id = _v1_request_id()
+
+
+def _v1_err(code: str, message: str, status: int, details: dict | None = None) -> "_V1Error":
+    return _V1Error(code, message, status, details)
+
+
+@app.exception_handler(_V1Error)
+async def _v1_error_handler(request: Request, exc: "_V1Error"):
+    body: dict = {
+        "error": {"code": exc.code, "message": exc.message},
+        "request_id": exc.request_id,
+    }
+    if exc.details:
+        body["error"]["details"] = exc.details
+    headers = {}
+    try:
+        headers = _v1_rl_headers(request)
+    except Exception:
+        pass
+    return JSONResponse(status_code=exc.status, content=body, headers=headers)
+
+
+# ── Response helper that adds rate-limit headers ──────────────────────────────
+
+def _v1_serialize(obj):
+    """Recursively make a dict/list JSON-safe (convert datetime, Decimal, etc.)."""
+    import decimal
+    if isinstance(obj, dict):
+        return {k: _v1_serialize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_v1_serialize(v) for v in obj]
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, decimal.Decimal):
+        return float(obj)
+    return obj
+
+
+def _v1_response(data, request: Request, *, meta: dict | None = None,
+                 status_code: int = 200) -> JSONResponse:
+    headers = _v1_rl_headers(request)
+    return JSONResponse(
+        content=_v1_ok(_v1_serialize(data), meta=meta),
+        status_code=status_code,
+        headers=headers,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v1 — STORES
+# ══════════════════════════════════════════════════════════════════════════════
+
+class V1StoreCreate(BaseModel):
+    name: str
+    address: str | None = None
+    city: str | None = None
+    lat: float | None = None
+    lon: float | None = None
+    yandex_url: str | None = None
+    phone: str | None = None
+    client: str | None = None
+    time_window_from: str | None = None
+    time_window_to: str | None = None
+    unload_minutes: int | None = None
+
+
+class V1StoreUpdate(BaseModel):
+    name: str | None = None
+    address: str | None = None
+    city: str | None = None
+    lat: float | None = None
+    lon: float | None = None
+    yandex_url: str | None = None
+    phone: str | None = None
+    client: str | None = None
+    time_window_from: str | None = None
+    time_window_to: str | None = None
+    unload_minutes: int | None = None
+
+
+class V1StoreBatchItem(BaseModel):
+    name: str
+    address: str | None = None
+    city: str | None = None
+    lat: float | None = None
+    lon: float | None = None
+    yandex_url: str | None = None
+    phone: str | None = None
+    client: str | None = None
+    time_window_from: str | None = None
+    time_window_to: str | None = None
+    unload_minutes: int | None = None
+    external_id: str | None = None  # for idempotency tracking
+
+
+class V1StoreBatchRequest(BaseModel):
+    stores: list[V1StoreBatchItem]
+
+
+@app.get("/api/v1/stores",
+         summary="Список магазинов",
+         tags=["v1-stores"])
+def v1_list_stores(
+    request: Request,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    q: str | None = Query(None, description="Поиск по имени или адресу"),
+    city: str | None = Query(None),
+    geocode_status: str | None = Query(None, description="found | not_found | pending"),
+):
+    """Список точек доставки с пагинацией и фильтрами.
+
+    **Auth**: `stores:read`
+    """
+    _v1_require_scope(request, "stores:read")
+    uid = get_user_id(request)
+    conditions = ["owner_id = %s"]
+    params: list = [uid]
+    if q:
+        conditions.append("(name ILIKE %s OR address ILIKE %s)")
+        params += [f"%{q}%", f"%{q}%"]
+    if city:
+        conditions.append("city ILIKE %s")
+        params.append(f"%{city}%")
+    if geocode_status:
+        conditions.append("geocode_status = %s")
+        params.append(geocode_status)
+    where = "WHERE " + " AND ".join(conditions)
+    offset = (page - 1) * page_size
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(f"SELECT COUNT(*) as total FROM stores {where}", params)
+    total = int(cur.fetchone()["total"])
+    cur.execute(
+        f"SELECT * FROM stores {where} ORDER BY id LIMIT %s OFFSET %s",
+        params + [page_size, offset],
+    )
+    rows = [store_row_to_dict(r) for r in cur.fetchall()]
+    cur.close(); conn.close()
+    meta = {"total": total, "page": page, "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size)}
+    return _v1_response(rows, request, meta=meta)
+
+
+@app.get("/api/v1/stores/{store_id}",
+         summary="Магазин по ID",
+         tags=["v1-stores"])
+def v1_get_store(store_id: int, request: Request):
+    """Получить одну точку доставки по ID.
+
+    **Auth**: `stores:read`
+    """
+    _v1_require_scope(request, "stores:read")
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT * FROM stores WHERE id = %s AND owner_id = %s", (store_id, uid))
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    if not row:
+        raise _v1_err("STORE_NOT_FOUND", f"Магазин с ID {store_id} не найден", 404,
+                      {"store_id": store_id})
+    return _v1_response(store_row_to_dict(row), request)
+
+
+@app.post("/api/v1/stores",
+          status_code=201,
+          summary="Создать магазин",
+          tags=["v1-stores"])
+def v1_create_store(request: Request, body: V1StoreCreate):
+    """Создать точку доставки. Геокодинг выполняется автоматически.
+
+    **Auth**: `stores:write`
+    """
+    _v1_require_scope(request, "stores:write")
+    uid = get_user_id(request)
+    if not body.name or not body.name.strip():
+        raise _v1_err("VALIDATION_ERROR", "Поле name обязательно", 422)
+
+    # Resolve coordinates
+    lat, lon, status = body.lat, body.lon, "not_found"
+    address = (body.address or "").strip()
+    city = (body.city or "").strip()
+    geocode_query = f"{city} {address}".strip() if city and city not in address else address
+
+    if lat is not None and lon is not None:
+        status = "found"
+    elif body.yandex_url:
+        lat, lon = parse_yandex_link(body.yandex_url)
+        if lat is not None:
+            status = "found"
+            if not address:
+                address = reverse_geocode_nominatim(lat, lon) or f"{lat:.5f},{lon:.5f}"
+        elif geocode_query:
+            coords = geocode_address(geocode_query)
+            lat, lon = (coords[0], coords[1]) if coords else (None, None)
+            status = "found" if coords else "not_found"
+    elif geocode_query:
+        coords = geocode_address(geocode_query)
+        lat, lon = (coords[0], coords[1]) if coords else (None, None)
+        status = "found" if coords else "not_found"
+
+    if not address:
+        address = geocode_query or (f"{lat:.5f},{lon:.5f}" if lat else "")
+
+    if city and address and city not in address:
+        address = f"{city}, {address}"
+
+    map_url = body.yandex_url or None
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """INSERT INTO stores (name, address, city, phone, client, lat, lon, map_url,
+           geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
+        (body.name.strip(), address, city, (body.phone or "").strip(),
+         (body.client or "").strip(), lat, lon, map_url, status,
+         body.time_window_from, body.time_window_to, body.unload_minutes, uid),
+    )
+    row = cur.fetchone()
+    conn.commit(); cur.close(); conn.close()
+    return _v1_response(store_row_to_dict(row), request, status_code=201)
+
+
+@app.put("/api/v1/stores/{store_id}",
+         summary="Обновить магазин",
+         tags=["v1-stores"])
+def v1_update_store(store_id: int, request: Request, body: V1StoreUpdate):
+    """Частичное обновление точки доставки (PATCH-семантика).
+
+    **Auth**: `stores:write`
+    """
+    _v1_require_scope(request, "stores:write")
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT * FROM stores WHERE id = %s AND owner_id = %s", (store_id, uid))
+    existing = cur.fetchone()
+    if not existing:
+        cur.close(); conn.close()
+        raise _v1_err("STORE_NOT_FOUND", f"Магазин с ID {store_id} не найден", 404)
+
+    fields: dict = {}
+    if body.name is not None:
+        fields["name"] = body.name.strip()
+    if body.address is not None:
+        fields["address"] = body.address
+        coords = geocode_address(body.address)
+        fields["lat"], fields["lon"] = (coords[0], coords[1]) if coords else (None, None)
+        fields["geocode_status"] = "found" if coords else "not_found"
+    if body.yandex_url is not None:
+        fields["map_url"] = body.yandex_url or None
+        if body.yandex_url:
+            ly, loy = parse_yandex_link(body.yandex_url)
+            if ly is not None:
+                fields["lat"] = ly; fields["lon"] = loy; fields["geocode_status"] = "found"
+    if body.city is not None:
+        fields["city"] = body.city.strip()
+    if body.phone is not None:
+        fields["phone"] = body.phone.strip()
+    if body.client is not None:
+        fields["client"] = body.client.strip()
+    if body.lat is not None:
+        fields["lat"] = body.lat
+    if body.lon is not None:
+        fields["lon"] = body.lon
+    if body.time_window_from is not None:
+        fields["time_window_from"] = body.time_window_from
+    if body.time_window_to is not None:
+        fields["time_window_to"] = body.time_window_to
+    if body.unload_minutes is not None:
+        fields["unload_minutes"] = body.unload_minutes
+
+    if fields:
+        set_clause = ", ".join(f"{k} = %s" for k in fields)
+        cur.execute(
+            f"UPDATE stores SET {set_clause} WHERE id = %s AND owner_id = %s RETURNING *",
+            list(fields.values()) + [store_id, uid],
+        )
+        row = cur.fetchone()
+        conn.commit()
+    else:
+        row = existing
+    cur.close(); conn.close()
+    return _v1_response(store_row_to_dict(row), request)
+
+
+@app.delete("/api/v1/stores/{store_id}",
+            summary="Удалить магазин",
+            tags=["v1-stores"])
+def v1_delete_store(store_id: int, request: Request):
+    """Удалить точку доставки.
+
+    **Auth**: `stores:write`
+    """
+    _v1_require_scope(request, "stores:write")
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM stores WHERE id = %s AND owner_id = %s", (store_id, uid))
+    deleted = cur.rowcount
+    conn.commit(); cur.close(); conn.close()
+    if deleted == 0:
+        raise _v1_err("STORE_NOT_FOUND", f"Магазин с ID {store_id} не найден", 404)
+    return _v1_response({"ok": True, "deleted": 1}, request)
+
+
+@app.post("/api/v1/stores/batch",
+          summary="Создать/обновить магазины пакетом",
+          tags=["v1-stores"])
+def v1_batch_stores(request: Request, body: V1StoreBatchRequest):
+    """Upsert магазинов пакетом. Если магазин с таким именем и городом уже существует —
+    обновляется; иначе создаётся новый. Максимум 500 за запрос.
+
+    **Auth**: `stores:write`
+    """
+    _v1_require_scope(request, "stores:write")
+    uid = get_user_id(request)
+    if not body.stores:
+        raise _v1_err("VALIDATION_ERROR", "Список stores не может быть пустым", 422)
+    if len(body.stores) > 500:
+        raise _v1_err("VALIDATION_ERROR", "Максимум 500 магазинов за один запрос", 422)
+
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    # Load existing stores for upsert matching
+    cur.execute("SELECT id, name, city FROM stores WHERE owner_id = %s", (uid,))
+    existing_map = {(r["name"].strip().lower(), (r["city"] or "").strip().lower()): r["id"]
+                    for r in cur.fetchall()}
+
+    created = updated = errors = 0
+    result_ids: list[int] = []
+
+    for item in body.stores:
+        if not item.name or not item.name.strip():
+            errors += 1
+            continue
+        try:
+            lat, lon, status = item.lat, item.lon, "not_found"
+            address = (item.address or "").strip()
+            city = (item.city or "").strip()
+            geocode_query = f"{city} {address}".strip() if city and city not in address else address
+
+            if lat is not None and lon is not None:
+                status = "found"
+            elif item.yandex_url:
+                lat, lon = parse_yandex_link(item.yandex_url)
+                status = "found" if lat is not None else "not_found"
+            elif geocode_query:
+                coords = geocode_address(geocode_query)
+                lat, lon = (coords[0], coords[1]) if coords else (None, None)
+                status = "found" if coords else "not_found"
+
+            if city and address and city not in address:
+                address = f"{city}, {address}"
+
+            key = (item.name.strip().lower(), city.lower())
+            existing_id = existing_map.get(key)
+
+            # address column is NOT NULL in DB — fallback to city or name
+            safe_address = address or city or item.name.strip()
+            if existing_id:
+                cur.execute(
+                    """UPDATE stores SET address=%s, city=%s, phone=%s, client=%s,
+                       lat=%s, lon=%s, geocode_status=%s,
+                       time_window_from=%s, time_window_to=%s, unload_minutes=%s
+                       WHERE id=%s AND owner_id=%s RETURNING id""",
+                    (safe_address, city or "", (item.phone or "").strip(),
+                     (item.client or "").strip(), lat, lon, status,
+                     item.time_window_from, item.time_window_to, item.unload_minutes,
+                     existing_id, uid),
+                )
+                result_ids.append(existing_id)
+                updated += 1
+            else:
+                cur.execute(
+                    """INSERT INTO stores (name, address, city, phone, client, lat, lon,
+                       geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    (item.name.strip(), safe_address, city or "",
+                     (item.phone or "").strip(), (item.client or "").strip(),
+                     lat, lon, status,
+                     item.time_window_from, item.time_window_to, item.unload_minutes, uid),
+                )
+                new_id = cur.fetchone()["id"]
+                existing_map[key] = new_id
+                result_ids.append(new_id)
+                created += 1
+        except Exception as exc:
+            logger.error("v1_batch_stores item error: %s", exc, exc_info=True)
+            errors += 1
+
+    conn.commit(); cur.close(); conn.close()
+    return _v1_response(
+        {"created": created, "updated": updated, "errors": errors, "ids": result_ids},
+        request, status_code=200,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v1 — ORDERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/v1/orders",
+         summary="Заявки на доставку",
+         tags=["v1-orders"])
+def v1_get_orders(
+    request: Request,
+    date: str | None = Query(None, description="YYYY-MM-DD (default: сегодня)"),
+):
+    """Заявки на доставку за указанную дату.
+
+    **Auth**: `orders:read`
+    """
+    _v1_require_scope(request, "orders:read")
+    uid = get_user_id(request)
+    target_date = date if date else str(datetime.now().date())
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """SELECT o.id, o.store_id, o.store_name_raw, o.address_raw, o.order_number,
+                  o.weight_kg, o.volume_m3, o.amount_rub, o.quantity, o.products, o.notes,
+                  o.delivery_date::text as delivery_date,
+                  s.name as store_name_db, s.address as store_address
+             FROM daily_orders o
+             LEFT JOIN stores s ON s.id = o.store_id
+            WHERE o.owner_id = %s AND o.delivery_date = %s
+            ORDER BY o.id""",
+        (uid, target_date),
+    )
+    orders = [dict(r) for r in cur.fetchall()]
+    cur.execute(
+        """SELECT COUNT(*) as cnt, COALESCE(SUM(weight_kg),0) as tw,
+                  COALESCE(SUM(volume_m3),0) as tv, COALESCE(SUM(amount_rub),0) as ta
+             FROM daily_orders WHERE owner_id=%s AND delivery_date=%s""",
+        (uid, target_date),
+    )
+    s = cur.fetchone()
+    cur.close(); conn.close()
+    data = {
+        "delivery_date": target_date,
+        "orders": orders,
+        "total_count": s["cnt"],
+        "total_weight_kg": round(float(s["tw"]), 2),
+        "total_volume_m3": round(float(s["tv"]), 3),
+        "total_amount_rub": round(float(s["ta"]), 2),
+    }
+    return _v1_response(data, request)
+
+
+@app.delete("/api/v1/orders",
+            summary="Удалить заявки за дату",
+            tags=["v1-orders"])
+def v1_delete_orders(
+    request: Request,
+    date: str = Query(..., description="YYYY-MM-DD — дата для удаления"),
+):
+    """Удалить все заявки за указанную дату.
+
+    **Auth**: `orders:write`
+    """
+    _v1_require_scope(request, "orders:write")
+    uid = get_user_id(request)
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise _v1_err("VALIDATION_ERROR", "Неверный формат даты. Используйте YYYY-MM-DD", 422)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM daily_orders WHERE owner_id=%s AND delivery_date=%s", (uid, date))
+    deleted = cur.rowcount
+    conn.commit(); cur.close(); conn.close()
+    return _v1_response({"ok": True, "deleted": deleted, "date": date}, request)
+
+
+@app.post("/api/v1/orders/batch",
+          summary="Загрузить заявки пакетом",
+          tags=["v1-orders"])
+def v1_orders_batch(request: Request, body: WebhookIngestRequest):
+    """Загрузить заявки на доставку пакетом. Принимает тот же формат, что и
+    `POST /api/v1/webhooks/ingest`, но использует стандартный Bearer-заголовок.
+
+    Поле `replace_date=true` удаляет существующие заявки за указанные даты перед вставкой.
+
+    **Auth**: `orders:write`
+    """
+    _v1_require_scope(request, "orders:write")
+    uid = get_user_id(request)
+
+    if not body.orders:
+        return _v1_response({"created": 0, "matched": 0, "skipped": 0, "errors": []}, request)
+
+    for item in body.orders:
+        try:
+            datetime.strptime(item.delivery_date, "%Y-%m-%d")
+        except ValueError:
+            raise _v1_err(
+                "VALIDATION_ERROR",
+                f"Неверный формат даты '{item.delivery_date}'. Используйте YYYY-MM-DD",
+                422,
+            )
+
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT id, name, address, city FROM stores WHERE owner_id=%s", (uid,))
+    db_stores = [dict(r) for r in cur.fetchall()]
+
+    if body.replace_date:
+        for d in {item.delivery_date for item in body.orders}:
+            cur.execute("DELETE FROM daily_orders WHERE owner_id=%s AND delivery_date=%s", (uid, d))
+
+    created = matched = skipped = 0
+    errors: list = []
+    for item in body.orders:
+        try:
+            if not item.store_name.strip():
+                skipped += 1
+                continue
+            store_id = None
+            ms = _match_store_to_db(item.store_name, item.address or "", db_stores)
+            if ms:
+                store_id = ms["id"]
+                matched += 1
+            cur.execute(
+                """INSERT INTO daily_orders
+                   (owner_id, store_id, store_name_raw, address_raw, delivery_date,
+                    weight_kg, volume_m3, quantity, amount_rub, products, order_number, notes)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (uid, store_id, item.store_name.strip(), item.address or "",
+                 item.delivery_date, item.weight_kg, item.volume_m3,
+                 item.quantity, item.amount_rub, item.products,
+                 item.order_number, item.notes),
+            )
+            created += 1
+        except Exception as exc:
+            errors.append({"store": item.store_name, "error": str(exc)})
+    conn.commit(); cur.close(); conn.close()
+    return _v1_response(
+        {"created": created, "matched": matched, "skipped": skipped, "errors": errors[:20]},
+        request,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v1 — ROUTES
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/v1/routes",
+         summary="История маршрутов",
+         tags=["v1-routes"])
+def v1_list_routes(
+    request: Request,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
+    """Список построенных маршрутов с пагинацией.
+
+    **Auth**: `routes:read`
+    """
+    _v1_require_scope(request, "routes:read")
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT COUNT(*) as total FROM route_sessions WHERE owner_id=%s", (uid,))
+    total = int(cur.fetchone()["total"])
+    offset = (page - 1) * page_size
+    cur.execute(
+        """SELECT id, date, num_vehicles, total_km, saved_km, saved_rub, num_points, created_at
+           FROM route_sessions WHERE owner_id=%s ORDER BY created_at DESC LIMIT %s OFFSET %s""",
+        (uid, page_size, offset),
+    )
+    items = [
+        {
+            "id": r["id"],
+            "date": r["date"],
+            "num_vehicles": r["num_vehicles"] or 0,
+            "total_km": round(float(r["total_km"] or 0), 1),
+            "saved_km": round(float(r["saved_km"] or 0), 1),
+            "saved_rub": int(r["saved_rub"] or 0),
+            "num_points": r["num_points"] or 0,
+            "created_at": str(r["created_at"]) if r["created_at"] else None,
+        }
+        for r in cur.fetchall()
+    ]
+    cur.close(); conn.close()
+    meta = {"total": total, "page": page, "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size)}
+    return _v1_response(items, request, meta=meta)
+
+
+@app.get("/api/v1/routes/{route_id}",
+         summary="Маршрут по ID",
+         tags=["v1-routes"])
+def v1_get_route(route_id: int, request: Request):
+    """Полный результат маршрута по ID.
+
+    **Auth**: `routes:read`
+    """
+    _v1_require_scope(request, "routes:read")
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT result_json FROM route_sessions WHERE id=%s AND owner_id=%s", (route_id, uid))
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    if not row or not row["result_json"]:
+        raise _v1_err("ROUTE_NOT_FOUND", f"Маршрут с ID {route_id} не найден", 404,
+                      {"route_id": route_id})
+    return _v1_response(json.loads(row["result_json"]), request)
+
+
+@app.delete("/api/v1/routes/{route_id}",
+            summary="Удалить маршрут",
+            tags=["v1-routes"])
+def v1_delete_route(route_id: int, request: Request):
+    """Удалить маршрут из истории.
+
+    **Auth**: `routes:write`
+    """
+    _v1_require_scope(request, "routes:write")
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM route_sessions WHERE id=%s AND owner_id=%s", (route_id, uid))
+    deleted = cur.rowcount
+    conn.commit(); cur.close(); conn.close()
+    if deleted == 0:
+        raise _v1_err("ROUTE_NOT_FOUND", f"Маршрут с ID {route_id} не найден", 404)
+    return _v1_response({"ok": True, "deleted": 1}, request)
+
+
+@app.post("/api/v1/routes/build",
+          summary="Построить маршрут",
+          tags=["v1-routes"])
+def v1_build_route(request: Request, body: RouteRequest):
+    """Запустить VRP-оптимизацию маршрутов.
+
+    Поведение идентично `POST /api/route/build`. Depot (склад) задаётся через
+    `depot_lat` + `depot_lon` — оба поля обязательны.
+
+    **Auth**: `routes:build`
+    """
+    _v1_require_scope(request, "routes:build")
+    # Delegate entirely to existing handler — same rate limit, same logic
+    return build_route(request, body)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v1 — ANALYTICS
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/v1/analytics/summary",
+         summary="Сводная аналитика",
+         tags=["v1-analytics"])
+def v1_analytics_summary(request: Request):
+    """Агрегированные показатели за всё время.
+
+    **Auth**: `analytics:read`
+    """
+    _v1_require_scope(request, "analytics:read")
+    return _v1_response(get_analytics_summary(request), request)
+
+
+@app.get("/api/v1/analytics/daily",
+         summary="Аналитика по дням",
+         tags=["v1-analytics"])
+def v1_analytics_daily(
+    request: Request,
+    date_from: str | None = Query(None, description="YYYY-MM-DD"),
+    date_to: str | None = Query(None, description="YYYY-MM-DD"),
+):
+    """Пробег, экономия по дням.
+
+    **Auth**: `analytics:read`
+    """
+    _v1_require_scope(request, "analytics:read")
+    return _v1_response(get_analytics_daily(request, date_from, date_to), request)
+
+
+@app.get("/api/v1/analytics/monthly",
+         summary="Аналитика по месяцам",
+         tags=["v1-analytics"])
+def v1_analytics_monthly(
+    request: Request,
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+):
+    """Помесячная статистика.
+
+    **Auth**: `analytics:read`
+    """
+    _v1_require_scope(request, "analytics:read")
+    return _v1_response(get_analytics_monthly(request, date_from, date_to), request)
+
+
+@app.get("/api/v1/analytics/vehicle-load",
+         summary="Загрузка машин",
+         tags=["v1-analytics"])
+def v1_analytics_vehicle_load(
+    request: Request,
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+):
+    """Среднее число точек на машину по дням.
+
+    **Auth**: `analytics:read`
+    """
+    _v1_require_scope(request, "analytics:read")
+    return _v1_response(get_analytics_vehicle_load(request, date_from, date_to), request)
+
+
+@app.get("/api/v1/analytics/top-stores",
+         summary="Топ магазинов",
+         tags=["v1-analytics"])
+def v1_analytics_top_stores(request: Request):
+    """10 магазинов с наибольшим числом доставок.
+
+    **Auth**: `analytics:read`
+    """
+    _v1_require_scope(request, "analytics:read")
+    return _v1_response(get_top_stores(request), request)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v1 — SETTINGS
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/v1/settings",
+         summary="Настройки компании",
+         tags=["v1-settings"])
+def v1_get_settings(request: Request):
+    """Параметры расчёта стоимости км.
+
+    **Auth**: `settings:read`
+    """
+    _v1_require_scope(request, "settings:read")
+    uid = get_user_id(request)
+    return _v1_response(get_company_settings(user_id=uid), request)
+
+
+@app.put("/api/v1/settings",
+         summary="Обновить настройки",
+         tags=["v1-settings"])
+def v1_update_settings(request: Request, body: CompanySettingsInput):
+    """Обновить цену топлива и расход. `cost_per_km` рассчитывается автоматически.
+
+    **Auth**: `settings:write`
+    """
+    _v1_require_scope(request, "settings:write")
+    return _v1_response(update_settings_endpoint(request, body), request)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v1 — WEBHOOKS (Bearer variant)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/v1/webhooks/ingest",
+          summary="Webhook ingest (Bearer)",
+          tags=["v1-webhooks"])
+def v1_webhook_ingest_bearer(request: Request, body: WebhookIngestRequest):
+    """Универсальный приём заявок через стандартный Bearer-заголовок.
+
+    Идентичен `POST /api/v1/webhooks/ingest/{token}`, но токен передаётся
+    в заголовке `Authorization: Bearer <key>` — более удобен для REST-клиентов.
+
+    **Auth**: `webhooks:receive`
+    """
+    _v1_require_scope(request, "webhooks:receive")
+    uid = get_user_id(request)
+
+    if not body.orders:
+        return _v1_response({"created": 0, "matched": 0, "skipped": 0, "errors": []}, request)
+
+    for item in body.orders:
+        try:
+            datetime.strptime(item.delivery_date, "%Y-%m-%d")
+        except ValueError:
+            raise _v1_err(
+                "VALIDATION_ERROR",
+                f"Неверный формат даты '{item.delivery_date}'. Используйте YYYY-MM-DD", 422,
+            )
+
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT id, name, address, city FROM stores WHERE owner_id=%s", (uid,))
+    db_stores = [dict(r) for r in cur.fetchall()]
+
+    if body.replace_date:
+        for d in {item.delivery_date for item in body.orders}:
+            cur.execute("DELETE FROM daily_orders WHERE owner_id=%s AND delivery_date=%s", (uid, d))
+
+    created = matched = skipped = 0
+    errors: list = []
+    for item in body.orders:
+        try:
+            if not item.store_name.strip():
+                skipped += 1; continue
+            store_id = None
+            ms = _match_store_to_db(item.store_name, item.address or "", db_stores)
+            if ms:
+                store_id = ms["id"]; matched += 1
+            cur.execute(
+                """INSERT INTO daily_orders
+                   (owner_id, store_id, store_name_raw, address_raw, delivery_date,
+                    weight_kg, volume_m3, quantity, amount_rub, products, order_number, notes)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (uid, store_id, item.store_name.strip(), item.address or "",
+                 item.delivery_date, item.weight_kg, item.volume_m3,
+                 item.quantity, item.amount_rub, item.products,
+                 item.order_number, item.notes),
+            )
+            created += 1
+        except Exception as exc:
+            errors.append({"store": item.store_name, "error": str(exc)})
+    conn.commit(); cur.close(); conn.close()
+    return _v1_response(
+        {"created": created, "matched": matched, "skipped": skipped, "errors": errors[:20]},
+        request,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v1 — KEYS (self-service)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/v1/keys/me",
+         summary="Метаданные текущего ключа",
+         tags=["v1-keys"])
+def v1_key_me(request: Request):
+    """Вернуть метаданные API ключа, которым выполнен запрос.
+    Секретная часть ключа не возвращается никогда.
+
+    **Auth**: любой API ключ (scope не требуется)
+    """
+    scopes = getattr(request.state, "api_key_scopes", None)
+    if scopes is None:
+        raise _v1_err(
+            "COOKIE_AUTH",
+            "Этот endpoint предназначен для API-ключей, а не для cookie-сессий.",
+            400,
+        )
+    username = getattr(request.state, "username", "")
+    try:
+        key_id = int(username.split(":")[-1]) if ":" in username else None
+    except (ValueError, TypeError):
+        key_id = None
+    if not key_id:
+        raise _v1_err("KEY_NOT_FOUND", "Не удалось определить ID ключа", 404)
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """SELECT id, name, key_prefix, scopes, is_active, expires_at, last_used_at, created_at
+           FROM api_keys WHERE id=%s AND owner_id=%s""",
+        (key_id, uid),
+    )
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    if not row:
+        raise _v1_err("KEY_NOT_FOUND", "Ключ не найден", 404)
+    return _v1_response(dict(row), request)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v1 — OpenAPI docs (separate sub-app for clean /api/v1/docs URL)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/v1/openapi.json",
+         include_in_schema=False)
+def v1_openapi_json():
+    """Return OpenAPI spec filtered to v1 tags only."""
+    from fastapi.openapi.utils import get_openapi
+    full = get_openapi(
+        title="SmartRoute Public API v1",
+        version="1.0.0",
+        description=(
+            "## SmartRoute Public API\n\n"
+            "Публичный REST API для интеграции с внешними системами.\n\n"
+            "### Аутентификация\n\n"
+            "Все запросы требуют заголовок:\n"
+            "```\nAuthorization: Bearer sr_live_<ваш_ключ>\n```\n\n"
+            "API-ключи создаются в настройках SmartRoute → раздел «API-ключи».\n\n"
+            "### Rate Limiting\n\n"
+            "60 запросов в минуту на ключ. Заголовки:\n"
+            "- `X-RateLimit-Limit` — лимит\n"
+            "- `X-RateLimit-Remaining` — осталось запросов\n"
+            "- `X-RateLimit-Reset` — Unix timestamp сброса\n\n"
+            "### Формат ответов\n\n"
+            "```json\n"
+            '{"data": ..., "meta": {...}, "request_id": "req_abc123"}\n'
+            "```\n\n"
+            "### Формат ошибок\n\n"
+            "```json\n"
+            '{"error": {"code": "STORE_NOT_FOUND", "message": "..."}, '
+            '"request_id": "req_abc123"}\n'
+            "```"
+        ),
+        routes=[r for r in app.routes if any(
+            tag.startswith("v1-") for tag in getattr(r, "tags", [])
+        )],
+        tags=[
+            {"name": "v1-stores",    "description": "Точки доставки (магазины)"},
+            {"name": "v1-orders",    "description": "Заявки на доставку"},
+            {"name": "v1-routes",    "description": "Маршруты и VRP-оптимизация"},
+            {"name": "v1-analytics", "description": "Аналитика"},
+            {"name": "v1-settings",  "description": "Настройки компании"},
+            {"name": "v1-webhooks",  "description": "Webhook ingest"},
+            {"name": "v1-keys",      "description": "API-ключи (self-service)"},
+        ],
+    )
+    # Inject Bearer security scheme
+    full["components"] = full.get("components", {})
+    full["components"]["securitySchemes"] = {
+        "bearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "SmartRoute API Key (sr_live_...)",
+        }
+    }
+    full["security"] = [{"bearerAuth": []}]
+    return full
+
+
+@app.get("/api/v1/docs",
+         include_in_schema=False)
+def v1_swagger_ui():
+    """Swagger UI for Public API v1."""
+    html = """<!DOCTYPE html>
+<html>
+<head>
+  <title>SmartRoute API v1</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" type="text/css"
+    href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+</head>
+<body>
+<div id="swagger-ui"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script>
+SwaggerUIBundle({
+  url: "/api/v1/openapi.json",
+  dom_id: '#swagger-ui',
+  presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+  layout: "BaseLayout",
+  deepLinking: true,
+  persistAuthorization: true,
+})
+</script>
+</body>
+</html>"""
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(html)
+
+
 # ── Production static file serving ────────────────────────────────────────────
 # In production (Docker / Railway), FastAPI serves the Vite build output from
 # ./static/. In development, the Vite dev server handles this via the proxy.
