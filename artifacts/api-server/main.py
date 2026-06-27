@@ -3264,12 +3264,23 @@ async def auth_middleware(request: Request, call_next):
     if path in _AUTH_PUBLIC_PATHS or not path.startswith("/api/"):
         return await call_next(request)
 
+    # ── Helper: emit 401 in v1-envelope format for /api/v1/* paths ───────────
+    _is_v1 = path.startswith("/api/v1/")
+
+    def _auth_401(message: str, code: str = "UNAUTHORIZED"):
+        if _is_v1:
+            import uuid as _u
+            body = {"error": {"code": code, "message": message},
+                    "request_id": "req_" + _u.uuid4().hex[:12]}
+            return JSONResponse(status_code=401, content=body)
+        return JSONResponse(status_code=401, content={"detail": message})
+
     # ── 1. Cookie JWT (browser sessions) ─────────────────────────────────────
     token = request.cookies.get(JWT_COOKIE_NAME)
     if token:
         username = _decode_token(token)
         if not username:
-            return JSONResponse(status_code=401, content={"detail": "Токен недействителен или истёк. Войдите снова."})
+            return _auth_401("Токен недействителен или истёк. Войдите снова.")
         try:
             _conn = get_db()
             _cur = _conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -3280,9 +3291,9 @@ async def auth_middleware(request: Request, call_next):
             logger.error("Auth middleware DB error: %s", _exc)
             _user_row = None
         if not _user_row:
-            return JSONResponse(status_code=401, content={"detail": "Пользователь не найден. Войдите снова."})
+            return _auth_401("Пользователь не найден. Войдите снова.")
         if not _user_row.get("is_active", True):
-            return JSONResponse(status_code=401, content={"detail": "Аккаунт отключён. Обратитесь к администратору."})
+            return _auth_401("Аккаунт отключён. Обратитесь к администратору.")
         request.state.username = username
         request.state.user_id = _user_row["id"]
         request.state.is_admin = bool(_user_row.get("is_admin", False))
@@ -3295,14 +3306,14 @@ async def auth_middleware(request: Request, call_next):
         raw_key = auth_header[7:].strip()
         key_row = _resolve_api_key(raw_key)
         if not key_row:
-            return JSONResponse(status_code=401, content={"detail": "Недействительный API-ключ."})
+            return _auth_401("Недействительный API-ключ.")
         request.state.username = f"api_key:{key_row['id']}"
         request.state.user_id = key_row["user_id"]
         request.state.is_admin = bool(key_row.get("is_admin", False))
         request.state.api_key_scopes = key_row.get("scopes") or []
         return await call_next(request)
 
-    return JSONResponse(status_code=401, content={"detail": "Не авторизован. Войдите в систему или укажите API-ключ."})
+    return _auth_401("Не авторизован. Укажите Bearer-токен в заголовке Authorization.")
 
 
 # ── Auth endpoints ────────────────────────────────────────────────────────────
@@ -3412,8 +3423,19 @@ def get_user_id(request: Request) -> int:
 
 
 def require_admin(request: Request) -> int:
-    """Return current user ID if they are an admin, else raise 403."""
+    """Return current user ID if they are an admin, else raise 403.
+
+    Admin endpoints require cookie-based session auth — Bearer API keys are
+    intentionally excluded even when the underlying user is an admin.
+    This prevents leaked/stolen API keys from being used to escalate privileges.
+    """
     uid = get_user_id(request)
+    # Reject Bearer-authenticated requests regardless of is_admin flag
+    if getattr(request.state, "api_key_scopes", None) is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="Панель администратора доступна только через браузерную сессию, не через API-ключ."
+        )
     if not getattr(request.state, "is_admin", False):
         raise HTTPException(status_code=403, detail="Доступ запрещён. Только для администраторов.")
     return uid
@@ -7611,7 +7633,7 @@ _V1_VALID_SCOPES = {
 # ── Per-key rate limiter (sliding window, shared with _rl_store/_rl_lock) ─────
 
 def _v1_key_rate_limit(key_hash: str, limit: int = 60, window: int = 60) -> tuple[int, int]:
-    """Return (remaining, reset_unix). Raises 429 if limit exceeded."""
+    """Return (remaining, reset_unix). Raises _V1Error 429 if limit exceeded."""
     bucket = f"v1:{key_hash}"
     now = time.time()
     with _rl_lock:
@@ -7621,16 +7643,20 @@ def _v1_key_rate_limit(key_hash: str, limit: int = 60, window: int = 60) -> tupl
         reset_ts = int(now) + window
         if len(ts) >= limit:
             retry = max(1, int(window - (now - ts[0])) + 1)
-            raise HTTPException(
-                status_code=429,
-                detail="Превышен лимит запросов к API.",
-                headers={
-                    "Retry-After": str(retry),
-                    "X-RateLimit-Limit": str(limit),
-                    "X-RateLimit-Remaining": "0",
-                    "X-RateLimit-Reset": str(reset_ts),
-                },
+            err = _V1Error(
+                code="RATE_LIMITED",
+                message=f"Превышен лимит {limit} запросов в минуту. Повторите через {retry} сек.",
+                status=429,
+                details={"retry_after": retry, "limit": limit, "window_seconds": window},
             )
+            # Attach rate-limit headers so they reach the client via _v1_error_handler
+            err._extra_headers = {
+                "Retry-After": str(retry),
+                "X-RateLimit-Limit": str(limit),
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": str(reset_ts),
+            }
+            raise err
         ts.append(now)
         _rl_store[bucket] = ts
     return remaining, reset_ts
@@ -7678,10 +7704,8 @@ def _v1_request_id() -> str:
 
 
 def _v1_ok(data, *, meta: dict | None = None, request_id: str | None = None) -> dict:
-    out: dict = {"data": data, "request_id": request_id or _v1_request_id()}
-    if meta is not None:
-        out["meta"] = meta
-    return out
+    # Always include `meta` key (null for single-resource responses) for consistent envelope
+    return {"data": data, "meta": meta, "request_id": request_id or _v1_request_id()}
 
 
 class _V1Error(Exception):
@@ -7711,6 +7735,9 @@ async def _v1_error_handler(request: Request, exc: "_V1Error"):
         headers = _v1_rl_headers(request)
     except Exception:
         pass
+    # Merge any extra headers (e.g. Retry-After from rate limiter)
+    extra = getattr(exc, "_extra_headers", {})
+    headers.update(extra)
     return JSONResponse(status_code=exc.status, content=body, headers=headers)
 
 
@@ -7796,8 +7823,8 @@ class V1StoreBatchRequest(BaseModel):
          tags=["v1-stores"])
 def v1_list_stores(
     request: Request,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=200),
+    page: int = Query(1, description="Номер страницы (≥1; отрицательные → 1)"),
+    page_size: int = Query(50, description="Размер страницы (1–500; вне диапазона → ближайшая граница)"),
     q: str | None = Query(None, description="Поиск по имени или адресу"),
     city: str | None = Query(None),
     geocode_status: str | None = Query(None, description="found | not_found | pending"),
@@ -7807,6 +7834,9 @@ def v1_list_stores(
     **Auth**: `stores:read`
     """
     _v1_require_scope(request, "stores:read")
+    # Clamp instead of rejecting — friendlier for API consumers
+    page = max(1, page)
+    page_size = max(1, min(500, page_size))
     uid = get_user_id(request)
     conditions = ["owner_id = %s"]
     params: list = [uid]
@@ -8012,8 +8042,8 @@ def v1_batch_stores(request: Request, body: V1StoreBatchRequest):
     uid = get_user_id(request)
     if not body.stores:
         raise _v1_err("VALIDATION_ERROR", "Список stores не может быть пустым", 422)
-    if len(body.stores) > 500:
-        raise _v1_err("VALIDATION_ERROR", "Максимум 500 магазинов за один запрос", 422)
+    if len(body.stores) > 1000:
+        raise _v1_err("VALIDATION_ERROR", "Максимум 1000 магазинов за один запрос", 422)
 
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -8244,14 +8274,16 @@ def v1_orders_batch(request: Request, body: WebhookIngestRequest):
          tags=["v1-routes"])
 def v1_list_routes(
     request: Request,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page: int = Query(1, description="Номер страницы (≥1)"),
+    page_size: int = Query(20, description="Размер страницы (1–100)"),
 ):
     """Список построенных маршрутов с пагинацией.
 
     **Auth**: `routes:read`
     """
     _v1_require_scope(request, "routes:read")
+    page = max(1, page)
+    page_size = max(1, min(100, page_size))
     uid = get_user_id(request)
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -8335,8 +8367,12 @@ def v1_build_route(request: Request, body: RouteRequest):
     **Auth**: `routes:build`
     """
     _v1_require_scope(request, "routes:build")
-    # Delegate entirely to existing handler — same rate limit, same logic
-    return build_route(request, body)
+    result = build_route(request, body)
+    # build_route returns a JSONResponse (binary-safe); extract body and wrap in envelope
+    if isinstance(result, JSONResponse):
+        data = json.loads(result.body)
+        return _v1_response(data, request, status_code=result.status_code)
+    return _v1_response(result, request)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
