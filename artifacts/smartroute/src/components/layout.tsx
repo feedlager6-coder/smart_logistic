@@ -12,7 +12,7 @@ import {
   SidebarFooter,
 } from "@/components/ui/sidebar";
 import { Link, useLocation } from "wouter";
-import { Home, Store, Map, BarChart3, Truck, History, LogOut, User, Settings, Package, ClipboardList } from "lucide-react";
+import { Home, Store, Map, BarChart3, Truck, History, LogOut, User, Settings, ClipboardList, Puzzle } from "lucide-react";
 import React from "react";
 import { useAuth } from "@/context/auth";
 import { Button } from "@/components/ui/button";
@@ -55,6 +55,7 @@ function AppSidebar() {
     { title: "Новый маршрут", url: "/route", icon: Map },
     { title: "Аналитика", url: "/analytics", icon: BarChart3 },
     { title: "История", url: "/history", icon: History },
+    { title: "Интеграции", url: "/integrations", icon: Puzzle },
     { title: "Настройки", url: "/settings", icon: Settings },
   ];
 

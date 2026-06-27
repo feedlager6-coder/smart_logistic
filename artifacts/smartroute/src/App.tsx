@@ -16,6 +16,7 @@ import { AnalyticsPage } from "@/pages/analytics";
 import { HistoryPage } from "@/pages/history";
 import { SettingsPage } from "@/pages/settings";
 import { OrdersPage } from "@/pages/orders";
+import { IntegrationsPage } from "@/pages/integrations";
 import { ApiError } from "@workspace/api-client-react";
 
 function is401(error: unknown): boolean {
@@ -75,6 +76,7 @@ function ProtectedRouter() {
         <Route path="/analytics" component={AnalyticsPage} />
         <Route path="/history" component={HistoryPage} />
         <Route path="/settings" component={SettingsPage} />
+        <Route path="/integrations" component={IntegrationsPage} />
         <Route component={NotFound} />
       </Switch>
     </AppLayout>

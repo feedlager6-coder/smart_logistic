@@ -2046,6 +2046,37 @@ def init_db():
     cur.execute("ALTER TABLE daily_orders ADD COLUMN IF NOT EXISTS address_raw TEXT DEFAULT ''")
     cur.execute("ALTER TABLE daily_orders ADD COLUMN IF NOT EXISTS quantity DOUBLE PRECISION DEFAULT 0")
     cur.execute("ALTER TABLE daily_orders ADD COLUMN IF NOT EXISTS products TEXT DEFAULT ''")
+    # ── Integrations ───────────────────────────────────────────────────────────
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS integrations (
+            id SERIAL PRIMARY KEY,
+            owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            type TEXT NOT NULL DEFAULT '1c',
+            name TEXT NOT NULL DEFAULT '1C Интеграция',
+            status TEXT DEFAULT 'setup',
+            config JSONB DEFAULT '{}',
+            last_sync_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_integrations_owner ON integrations(owner_id)")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS integration_sync_logs (
+            id SERIAL PRIMARY KEY,
+            integration_id INTEGER REFERENCES integrations(id) ON DELETE CASCADE,
+            started_at TIMESTAMP DEFAULT NOW(),
+            finished_at TIMESTAMP,
+            duration_ms INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'success',
+            orders_received INTEGER DEFAULT 0,
+            stores_matched INTEGER DEFAULT 0,
+            stores_unmatched INTEGER DEFAULT 0,
+            errors_count INTEGER DEFAULT 0,
+            error_detail TEXT DEFAULT '',
+            meta JSONB DEFAULT '{}'
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sync_logs_integration ON integration_sync_logs(integration_id, started_at DESC)")
     conn.commit()
     cur.close()
     conn.close()
@@ -6841,6 +6872,597 @@ def update_settings_endpoint(request: Request, body: CompanySettingsInput):
     }
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Integrations
+# ══════════════════════════════════════════════════════════════════════════════
+
+# 1C BSL module template — placeholders {{BASE_URL}} and {{API_KEY}} are filled
+# dynamically when the user downloads the module.
+_1C_BSL_MODULE = '''// ============================================================
+// SmartRoute — Модуль интеграции для 1С:Предприятие 8.3+
+// Версия: 2.0  |  https://smartroute.app
+// ============================================================
+//
+// УСТАНОВКА:
+// 1. Откройте 1С:Предприятие в режиме Конфигуратора
+// 2. Меню Файл → Открыть → выберите этот файл (.bsl)
+// 3. Заполните раздел НастройкиИнтеграции ниже
+// 4. Запустите функцию ОтправитьЗаявкиВSmartRoute()
+//    вручную или через регламентное задание
+//
+// ПОДДЕРЖКА: support@smartroute.app
+// ============================================================
+
+#Область НастройкиИнтеграции
+
+// *** ЗАПОЛНИТЕ ЭТИ ПОЛЯ ***
+Перем НастройкиSmartRoute;
+
+Процедура ИнициализироватьНастройки()
+    НастройкиSmartRoute = Новый Структура;
+    НастройкиSmartRoute.Вставить("URL",             "{{BASE_URL}}");
+    НастройкиSmartRoute.Вставить("APIКлюч",         "{{API_KEY}}");
+    НастройкиSmartRoute.Вставить("ЗаменитьДату",    Истина);  // True = заменять заявки за дату; False = добавлять
+    НастройкиSmartRoute.Вставить("ДатаОтправки",    ТекущаяДата()); // Какую дату отправлять
+    НастройкиSmartRoute.Вставить("ТипДокумента",    "ЗаказПокупателя"); // Имя документа в 1С
+КонецПроцедуры
+
+#КонецОбласти
+
+#Область ПолучениеДанных
+
+// Получить заявки из 1С за указанную дату
+// Адаптируйте запрос под вашу конфигурацию
+Функция ПолучитьЗаявки(ДатаДоставки)
+    МассивЗаявок = Новый Массив;
+
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+        "ВЫБРАТЬ
+        |    Документ.Контрагент.НаименованиеПолное КАК НазваниеМагазина,
+        |    Документ.АдресДоставки КАК Адрес,
+        |    Документ.Дата КАК ДатаДоставки,
+        |    СУММА(СтрокаТовары.Количество * СтрокаТовары.Цена) КАК Сумма,
+        |    СУММА(СтрокаТовары.Количество * СтрокаТовары.Номенклатура.Вес) КАК ВесКг,
+        |    СУММА(СтрокаТовары.Количество) КАК КоличествоМест,
+        |    Документ.НомерДокументаПолный КАК НомерЗаказа,
+        |    СУММА(СтрокаТовары.Номенклатура.Наименование + "" х "" + СТРОКА(ЦЕЛОЕ(СтрокаТовары.Количество)) + "" шт; "") КАК Товары
+        |ИЗ
+        |    Документ.ЗаказПокупателя КАК Документ
+        |        ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.ЗаказПокупателя.Товары КАК СтрокаТовары
+        |        ПО Документ.Ссылка = СтрокаТовары.Ссылка
+        |ГДЕ
+        |    Документ.Дата >= &ДатаНачало
+        |    И Документ.Дата < &ДатаКонец
+        |    И Документ.Проведен = ИСТИНА
+        |    И НЕ Документ.ПометкаУдаления
+        |СГРУППИРОВАТЬ ПО
+        |    Документ.Контрагент.НаименованиеПолное,
+        |    Документ.АдресДоставки,
+        |    Документ.Дата,
+        |    Документ.НомерДокументаПолный";
+
+    Запрос.УстановитьПараметр("ДатаНачало", НачалоДня(ДатаДоставки));
+    Запрос.УстановитьПараметр("ДатаКонец",  НачалоДня(ДатаДоставки) + 86400);
+
+    Попытка
+        Выборка = Запрос.Выполнить().Выбрать();
+        Пока Выборка.Следующий() Цикл
+            Заявка = Новый Структура;
+            Заявка.Вставить("store_name",    СокрЛП(Выборка.НазваниеМагазина));
+            Заявка.Вставить("address",       СокрЛП(Выборка.Адрес));
+            Заявка.Вставить("delivery_date", Формат(ДатаДоставки, "ДФ=гггг-ММ-дд"));
+            Заявка.Вставить("weight_kg",     ?(Выборка.ВесКг = NULL, 0, Выборка.ВесКг));
+            Заявка.Вставить("quantity",      ?(Выборка.КоличествоМест = NULL, 0, Выборка.КоличествоМест));
+            Заявка.Вставить("products",      ?(Выборка.Товары = NULL, "", Выборка.Товары));
+            Заявка.Вставить("amount_rub",    ?(Выборка.Сумма = NULL, 0, Выборка.Сумма));
+            Заявка.Вставить("order_number",  СокрЛП(Выборка.НомерЗаказа));
+            МассивЗаявок.Добавить(Заявка);
+        КонецЦикла;
+    Исключение
+        Сообщить("SmartRoute: Ошибка получения данных из 1С: " + ОписаниеОшибки());
+    КонецПопытки;
+
+    Возврат МассивЗаявок;
+КонецФункции
+
+#КонецОбласти
+
+#Область ОтправкаДанных
+
+// Сформировать JSON-строку заявок
+Функция СформироватьJSON(МассивЗаявок, ЗаменитьДату)
+    ЗаписьJSON = Новый ЗаписьJSON;
+    ЗаписьJSON.УстановитьСтроку(Новый ПараметрыЗаписиJSON(ПереносСтрокJSON.Авто));
+    ЗаписьJSON.ЗаписатьНачалоОбъекта();
+
+    ЗаписьJSON.ЗаписатьИмяСвойства("orders");
+    ЗаписьJSON.ЗаписатьНачалоМассива();
+    Для Каждого Заявка Из МассивЗаявок Цикл
+        ЗаписьJSON.ЗаписатьНачалоОбъекта();
+        Для Каждого КЗ Из Заявка Цикл
+            ЗаписьJSON.ЗаписатьИмяСвойства(КЗ.Ключ);
+            ЗаписьJSON.ЗаписатьЗначение(КЗ.Значение);
+        КонецЦикла;
+        ЗаписьJSON.ЗаписатьКонецОбъекта();
+    КонецЦикла;
+    ЗаписьJSON.ЗаписатьКонецМассива();
+
+    ЗаписьJSON.ЗаписатьИмяСвойства("replace_date");
+    ЗаписьJSON.ЗаписатьЗначение(ЗаменитьДату);
+
+    ЗаписьJSON.ЗаписатьКонецОбъекта();
+    Возврат ЗаписьJSON.Закрыть();
+КонецФункции
+
+// Отправить заявки в SmartRoute
+// Возвращает строку с результатом (для вывода пользователю)
+Функция ОтправитьЗаявкиВSmartRoute(ДатаДоставки = Неопределено) Экспорт
+    ИнициализироватьНастройки();
+
+    Если ДатаДоставки = Неопределено Тогда
+        ДатаДоставки = НастройкиSmartRoute["ДатаОтправки"];
+    КонецЕсли;
+
+    // 1. Получаем данные
+    МассивЗаявок = ПолучитьЗаявки(ДатаДоставки);
+    Если МассивЗаявок.Количество() = 0 Тогда
+        Возврат "⚠️ Нет проведённых заказов за " + Формат(ДатаДоставки, "ДЛФ=D");
+    КонецЕсли;
+
+    // 2. Сериализуем
+    СтрокаJSON = СформироватьJSON(МассивЗаявок, НастройкиSmartRoute["ЗаменитьДату"]);
+
+    // 3. HTTP-запрос
+    URLСервера = НастройкиSmartRoute["URL"];
+    Если Прав(URLСервера, 1) = "/" Тогда
+        URLСервера = Лев(URLСервера, СтрДлина(URLСервера) - 1);
+    КонецЕсли;
+
+    ЗащитаSSL = Неопределено;
+    Если НРег(Лев(URLСервера, 5)) = "https" Тогда
+        ЗащитаSSL = Новый ЗащищённоеСоединениеOpenSSL();
+    КонецЕсли;
+
+    ЧастиURL = СтрРазделить(СтрЗаменить(URLСервера, "https://", ""), "/");
+    Хост = ЧастиURL[0];
+
+    HTTPСоединение = Новый HTTPСоединение(
+        Хост, , , , , 30, ЗащитаSSL
+    );
+
+    Запрос = Новый HTTPЗапрос("/api/v1/orders/batch");
+    Запрос.Заголовки.Вставить("Content-Type",  "application/json; charset=utf-8");
+    Запрос.Заголовки.Вставить("Authorization", "Bearer " + НастройкиSmartRoute["APIКлюч"]);
+    Запрос.УстановитьТелоИзСтроки(СтрокаJSON, "UTF-8");
+
+    Попытка
+        Ответ = HTTPСоединение.ВызватьHTTPМетод("POST", Запрос);
+    Исключение
+        Возврат "❌ Нет связи с SmartRoute (" + Хост + "). Проверьте сеть. " + ОписаниеОшибки();
+    КонецПопытки;
+
+    ТелоОтвета = Ответ.ПолучитьТелоКакСтроку("UTF-8");
+
+    Если Ответ.КодСостояния = 200 Тогда
+        ЧтениеJSON = Новый ЧтениеJSON;
+        ЧтениеJSON.УстановитьСтроку(ТелоОтвета);
+        Данные = ПрочитатьJSON(ЧтениеJSON, Истина);
+        Рез = Данные["data"];
+        Возврат СтрШаблон(
+            "✅ Отправлено %1 заявок. Магазины найдены: %2. Дата: %3",
+            Рез["created"], Рез["matched"],
+            Формат(ДатаДоставки, "ДЛФ=D")
+        );
+    ИначеЕсли Ответ.КодСостояния = 401 Тогда
+        Возврат "❌ Неверный API-ключ. Проверьте настройки интеграции в SmartRoute.";
+    ИначеЕсли Ответ.КодСостояния = 403 Тогда
+        Возврат "❌ Нет прав. Ключ должен иметь разрешение orders:write.";
+    ИначеЕсли Ответ.КодСостояния = 422 Тогда
+        Возврат "❌ Ошибка формата данных: " + Лев(ТелоОтвета, 300);
+    ИначеЕсли Ответ.КодСостояния = 429 Тогда
+        Возврат "⚠️ Слишком много запросов. Подождите минуту и повторите.";
+    Иначе
+        Возврат "❌ Ошибка сервера (HTTP " + Ответ.КодСостояния + "): " + Лев(ТелоОтвета, 200);
+    КонецЕсли;
+КонецФункции
+
+// Проверить соединение со SmartRoute
+Функция ПроверитьСоединение() Экспорт
+    ИнициализироватьНастройки();
+    URLСервера = НастройкиSmartRoute["URL"];
+    Если Прав(URLСервера, 1) = "/" Тогда
+        URLСервера = Лев(URLСервера, СтрДлина(URLСервера) - 1);
+    КонецЕсли;
+    ЗащитаSSL = ?(НРег(Лев(URLСервера, 5)) = "https", Новый ЗащищённоеСоединениеOpenSSL(), Неопределено);
+    ЧастиURL = СтрРазделить(СтрЗаменить(СтрЗаменить(URLСервера, "https://", ""), "http://", ""), "/");
+    Хост = ЧастиURL[0];
+    Попытка
+        Соед = Новый HTTPСоединение(Хост, , , , , 10, ЗащитаSSL);
+        Запрос = Новый HTTPЗапрос("/api/healthz");
+        Запрос.Заголовки.Вставить("Authorization", "Bearer " + НастройкиSmartRoute["APIКлюч"]);
+        Ответ = Соед.Получить(Запрос);
+        Если Ответ.КодСостояния = 200 Тогда
+            Возврат "✅ Соединение успешно. SmartRoute доступен.";
+        Иначе
+            Возврат "❌ Сервер ответил кодом " + Ответ.КодСостояния;
+        КонецЕсли;
+    Исключение
+        Возврат "❌ Нет связи: " + ОписаниеОшибки();
+    КонецПопытки;
+КонецФункции
+
+#КонецОбласти
+
+// ============================================================
+// РЕГЛАМЕНТНОЕ ЗАДАНИЕ (раскомментируйте для автозапуска)
+// ============================================================
+// Процедура ВыполнитьРегламентноеЗадание() Экспорт
+//     Результат = ОтправитьЗаявкиВSmartRoute();
+//     ЗаписьЖурналаРегистрации(
+//         "SmartRoute.Синхронизация",
+//         УровеньЖурналаРегистрации.Информация,
+//         , , Результат
+//     );
+// КонецПроцедуры
+'''
+
+
+class IntegrationCreate(BaseModel):
+    type: str = "1c"
+    name: str = "1C Интеграция"
+    config: dict = {}
+
+
+class IntegrationUpdate(BaseModel):
+    name: Optional[str] = None
+    config: Optional[dict] = None
+    status: Optional[str] = None
+
+
+def _integration_row_to_dict(row: dict) -> dict:
+    """Normalize an integration DB row to API response shape."""
+    config = row.get("config") or {}
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except Exception:
+            config = {}
+    return {
+        "id": row["id"],
+        "type": row["type"],
+        "name": row["name"],
+        "status": row["status"] or "setup",
+        "config": config,
+        "last_sync_at": row["last_sync_at"].isoformat() if row.get("last_sync_at") else None,
+        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+    }
+
+
+def _record_integration_sync(request: Request, orders_received: int,
+                              stores_matched: int, stores_unmatched: int,
+                              errors_count: int, error_detail: str = "") -> None:
+    """When /api/v1/orders/batch is called via API key, write a sync log
+    if that key is associated with an integration."""
+    username = getattr(request.state, "username", "")
+    if not username.startswith("api_key:"):
+        return
+    try:
+        key_id_str = username.split(":")[1]
+        key_id = int(key_id_str)
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # Find integration linked to this API key
+        cur.execute(
+            "SELECT id FROM integrations WHERE (config->>'api_key_id')::int = %s AND status != 'disabled'",
+            (key_id,)
+        )
+        row = cur.fetchone()
+        if row:
+            integration_id = row["id"]
+            if errors_count > 0 and orders_received == 0:
+                status = "error"
+            elif errors_count > 0:
+                status = "partial"
+            else:
+                status = "success"
+            cur.execute("""
+                INSERT INTO integration_sync_logs
+                    (integration_id, started_at, finished_at, duration_ms, status,
+                     orders_received, stores_matched, stores_unmatched, errors_count, error_detail)
+                VALUES (%s, NOW(), NOW(), 0, %s, %s, %s, %s, %s, %s)
+            """, (integration_id, status, orders_received, stores_matched,
+                  stores_unmatched, errors_count, error_detail[:500]))
+            cur.execute(
+                "UPDATE integrations SET last_sync_at=NOW(), status=%s WHERE id=%s",
+                (status if status != "partial" else "active", integration_id),
+            )
+            conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        logger.warning("_record_integration_sync error: %s", exc)
+
+
+@app.get("/api/integrations")
+def list_integrations(request: Request):
+    """Список интеграций текущего пользователя."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        "SELECT id, type, name, status, config, last_sync_at, created_at "
+        "FROM integrations WHERE owner_id=%s ORDER BY created_at DESC",
+        (uid,)
+    )
+    rows = [_integration_row_to_dict(dict(r)) for r in cur.fetchall()]
+    cur.close(); conn.close()
+    return rows
+
+
+@app.post("/api/integrations")
+def create_integration(request: Request, body: IntegrationCreate):
+    """Создать интеграцию."""
+    uid = get_user_id(request)
+    if body.type not in ("1c", "moysklad", "bitrix24", "google_sheets"):
+        raise HTTPException(status_code=400, detail="Неизвестный тип интеграции")
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """INSERT INTO integrations (owner_id, type, name, status, config)
+           VALUES (%s, %s, %s, 'setup', %s) RETURNING id, type, name, status, config, last_sync_at, created_at""",
+        (uid, body.type, body.name, json.dumps(body.config))
+    )
+    row = dict(cur.fetchone())
+    conn.commit(); cur.close(); conn.close()
+    return _integration_row_to_dict(row)
+
+
+@app.get("/api/integrations/{integration_id}")
+def get_integration(request: Request, integration_id: int):
+    """Получить одну интеграцию с агрегированной статистикой."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        "SELECT id, type, name, status, config, last_sync_at, created_at "
+        "FROM integrations WHERE id=%s AND owner_id=%s",
+        (integration_id, uid)
+    )
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        raise HTTPException(status_code=404, detail="Интеграция не найдена")
+    result = _integration_row_to_dict(dict(row))
+    # Aggregate stats from sync logs
+    cur.execute("""
+        SELECT
+            COUNT(*)                           AS total_syncs,
+            COALESCE(SUM(orders_received), 0)  AS total_orders,
+            COALESCE(SUM(stores_matched), 0)   AS total_matched,
+            COALESCE(SUM(errors_count), 0)     AS total_errors,
+            MAX(started_at)                    AS last_sync
+        FROM integration_sync_logs WHERE integration_id=%s
+    """, (integration_id,))
+    stats_row = cur.fetchone()
+    cur.close(); conn.close()
+    result["stats"] = {
+        "total_syncs": int(stats_row["total_syncs"] or 0),
+        "total_orders": int(stats_row["total_orders"] or 0),
+        "total_matched": int(stats_row["total_matched"] or 0),
+        "total_errors": int(stats_row["total_errors"] or 0),
+    }
+    return result
+
+
+@app.put("/api/integrations/{integration_id}")
+def update_integration(request: Request, integration_id: int, body: IntegrationUpdate):
+    """Обновить настройки интеграции."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        "SELECT id, config FROM integrations WHERE id=%s AND owner_id=%s",
+        (integration_id, uid)
+    )
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        raise HTTPException(status_code=404, detail="Интеграция не найдена")
+    # Merge config
+    existing_config = row["config"] or {}
+    if isinstance(existing_config, str):
+        try:
+            existing_config = json.loads(existing_config)
+        except Exception:
+            existing_config = {}
+    if body.config is not None:
+        existing_config.update(body.config)
+    fields = []
+    params = []
+    if body.name is not None:
+        fields.append("name=%s"); params.append(body.name)
+    if body.status is not None:
+        allowed = {"setup", "active", "error", "disabled"}
+        if body.status not in allowed:
+            raise HTTPException(status_code=400, detail="Недопустимый статус")
+        fields.append("status=%s"); params.append(body.status)
+    fields.append("config=%s"); params.append(json.dumps(existing_config))
+    params.extend([integration_id, uid])
+    cur.execute(
+        f"UPDATE integrations SET {', '.join(fields)} WHERE id=%s AND owner_id=%s "
+        "RETURNING id, type, name, status, config, last_sync_at, created_at",
+        params,
+    )
+    updated = dict(cur.fetchone())
+    conn.commit(); cur.close(); conn.close()
+    return _integration_row_to_dict(updated)
+
+
+@app.delete("/api/integrations/{integration_id}")
+def delete_integration(request: Request, integration_id: int):
+    """Удалить интеграцию и все её логи."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM integrations WHERE id=%s AND owner_id=%s",
+        (integration_id, uid)
+    )
+    deleted = cur.rowcount
+    conn.commit(); cur.close(); conn.close()
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="Интеграция не найдена")
+    return {"ok": True}
+
+
+@app.post("/api/integrations/{integration_id}/test")
+def test_integration(request: Request, integration_id: int):
+    """Проверить API-ключ, привязанный к интеграции."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        "SELECT config FROM integrations WHERE id=%s AND owner_id=%s",
+        (integration_id, uid)
+    )
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Интеграция не найдена")
+    config = row["config"] or {}
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except Exception:
+            config = {}
+    api_key_id = config.get("api_key_id")
+    if not api_key_id:
+        return {"ok": False, "message": "API-ключ не настроен. Завершите настройку интеграции."}
+    # Verify the key still exists and is active
+    conn2 = get_db()
+    cur2 = conn2.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur2.execute(
+        "SELECT id, name, is_active, expires_at, scopes FROM api_keys WHERE id=%s AND owner_id=%s",
+        (api_key_id, uid)
+    )
+    key_row = cur2.fetchone()
+    cur2.close(); conn2.close()
+    if not key_row:
+        return {"ok": False, "message": "❌ API-ключ не найден. Создайте новый ключ в Настройках → API."}
+    if not key_row["is_active"]:
+        return {"ok": False, "message": "❌ API-ключ отозван. Создайте новый ключ в Настройках → API."}
+    expires_at = key_row.get("expires_at")
+    if expires_at and expires_at < datetime.utcnow():
+        return {"ok": False, "message": "❌ API-ключ истёк. Создайте новый ключ в Настройках → API."}
+    scopes = key_row.get("scopes") or []
+    if "orders:write" not in scopes:
+        return {"ok": False, "message": f"❌ Ключ '{key_row['name']}' не имеет разрешения orders:write."}
+    return {"ok": True, "message": f"✅ Соединение успешно. Ключ «{key_row['name']}» активен."}
+
+
+@app.post("/api/integrations/{integration_id}/sync")
+def sync_integration(request: Request, integration_id: int):
+    """Создать запись о ручной синхронизации (для тестирования)."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        "SELECT id, status FROM integrations WHERE id=%s AND owner_id=%s",
+        (integration_id, uid)
+    )
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        raise HTTPException(status_code=404, detail="Интеграция не найдена")
+    # Check last received orders count for context
+    cur.execute(
+        "SELECT COUNT(*) as cnt FROM daily_orders WHERE owner_id=%s AND created_at > NOW() - INTERVAL '1 hour'",
+        (uid,)
+    )
+    recent = cur.fetchone()
+    recent_count = int(recent["cnt"] or 0)
+    # Write a manual sync log entry
+    cur.execute("""
+        INSERT INTO integration_sync_logs
+            (integration_id, started_at, finished_at, duration_ms, status,
+             orders_received, stores_matched, stores_unmatched, errors_count, error_detail)
+        VALUES (%s, NOW(), NOW(), 0, 'success', %s, %s, 0, 0, 'Ручная проверка')
+        RETURNING id
+    """, (integration_id, recent_count, recent_count))
+    if row["status"] == "setup":
+        cur.execute("UPDATE integrations SET status='active' WHERE id=%s", (integration_id,))
+    conn.commit(); cur.close(); conn.close()
+    return {"ok": True, "orders_checked": recent_count}
+
+
+@app.get("/api/integrations/{integration_id}/logs")
+def get_integration_logs(
+    request: Request,
+    integration_id: int,
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Журнал синхронизаций интеграции."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        "SELECT id FROM integrations WHERE id=%s AND owner_id=%s",
+        (integration_id, uid)
+    )
+    if not cur.fetchone():
+        cur.close(); conn.close()
+        raise HTTPException(status_code=404, detail="Интеграция не найдена")
+    cur.execute("""
+        SELECT id, started_at, finished_at, duration_ms, status,
+               orders_received, stores_matched, stores_unmatched, errors_count, error_detail
+        FROM integration_sync_logs
+        WHERE integration_id=%s
+        ORDER BY started_at DESC
+        LIMIT %s
+    """, (integration_id, limit))
+    logs = []
+    for r in cur.fetchall():
+        d = dict(r)
+        d["started_at"] = d["started_at"].isoformat() if d.get("started_at") else None
+        d["finished_at"] = d["finished_at"].isoformat() if d.get("finished_at") else None
+        logs.append(d)
+    cur.close(); conn.close()
+    return logs
+
+
+@app.get("/api/integrations/{integration_id}/download-module")
+def download_integration_module(request: Request, integration_id: int):
+    """Скачать готовый BSL-модуль для 1С с заполненными настройками (base64)."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        "SELECT config FROM integrations WHERE id=%s AND owner_id=%s",
+        (integration_id, uid)
+    )
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Интеграция не найдена")
+    config = row["config"] or {}
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except Exception:
+            config = {}
+    # Get the API key prefix for display; full key is never stored
+    base_url = config.get("base_url", "https://YOUR-SMARTROUTE-URL")
+    api_key_placeholder = "sr_live_ВАШИ_ДАННЫЕ_ИЗ_SMARTROUTE"
+
+    bsl_content = _1C_BSL_MODULE.replace("{{BASE_URL}}", base_url)
+    bsl_content = bsl_content.replace("{{API_KEY}}", api_key_placeholder)
+
+    import base64 as _b64
+    encoded = _b64.b64encode(bsl_content.encode("utf-8-sig")).decode("ascii")
+    return {"data": encoded, "filename": "SmartRoute_1C_Integration.bsl"}
+
+
 @app.get("/api/analytics/summary")
 def get_analytics_summary(request: Request):
     uid = get_user_id(request)
@@ -8406,6 +9028,11 @@ def v1_orders_batch(request: Request, body: WebhookIngestRequest):
         except Exception as exc:
             errors.append({"store": item.store_name, "error": str(exc)})
     conn.commit(); cur.close(); conn.close()
+    # Log this sync if the API key is linked to an integration
+    _record_integration_sync(request, created, matched,
+                              len(body.orders) - created - skipped,
+                              len(errors),
+                              "; ".join(e.get("error", "") for e in errors[:3]))
     return _v1_response(
         {"created": created, "matched": matched, "skipped": skipped, "errors": errors[:20]},
         request,
