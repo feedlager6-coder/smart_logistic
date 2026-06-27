@@ -17,11 +17,11 @@ print(f"OR-Tools available: {M.ORTOOLS_AVAILABLE}")
 print(f"ORTOOLS_TIME_LIMIT_SECONDS: {M.ORTOOLS_TIME_LIMIT_SECONDS}")
 print()
 
-# Depot: Mahachkala
+# Depot: тестовый репрезентативный российский город
 DEPOT = (42.9849, 47.5046)
 
 def gen_coords(n, seed=42):
-    """Generate n synthetic store coordinates near Mahachkala depot."""
+    """Generate n synthetic store coordinates near test depot."""
     import random
     random.seed(seed)
     coords = [DEPOT]

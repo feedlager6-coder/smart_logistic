@@ -77,8 +77,11 @@ def run_build_route(body, label=""):
             print("  ❌ No stores with coordinates!")
             return False, 0, None
         
-        depot_lat = body.depot_lat or 42.9849
-        depot_lon = body.depot_lon or 47.5046
+        if not body.depot_lat or not body.depot_lon:
+            print("  ❌ depot_lat/depot_lon not set — skipping (required since Stable 1.0)")
+            return False, 0, None
+        depot_lat = body.depot_lat
+        depot_lon = body.depot_lon
         num_vehicles = len(body.vehicles)
         
         all_coords = [(depot_lat, depot_lon)] + [(s["lat"], s["lon"]) for s in store_list]

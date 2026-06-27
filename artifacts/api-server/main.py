@@ -3586,24 +3586,24 @@ def download_stores_template():
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center")
 
-    # Example row 1: with Yandex URL
+    # Example row 1: with Yandex URL (no city-specific data)
     ws.append([
-        "Супермаркет Каспий",
-        "https://yandex.ru/maps/?whatshere[point]=47.5046,42.9849",
+        "Супермаркет Центральный",
+        "https://yandex.ru/maps/?whatshere[point]=37.6173,55.7558",
         "",
         "",
-        "+7 928 000-00-00",
-        "ООО Каспий-Торг",
+        "+7 900 000-00-00",
+        "ООО Торг-Центр",
         15, "09:00", "18:00",
     ])
     # Example row 2: with address + city
     ws.append([
-        "Магазин Горный",
+        "Магазин на Ленина",
         "",
         "ул. Ленина 15",
-        "Махачкала",
-        "+7 928 111-11-11",
-        "ИП Магомедов",
+        "Ваш город",
+        "+7 900 111-11-11",
+        "ИП Иванов",
         20, "10:00", "17:00",
     ])
 
@@ -5038,7 +5038,7 @@ def _match_store_to_db(raw_name: str, raw_address: str, db_stores: list[dict]) -
             if db_addr_norm == norm_addr:
                 return s
             # City-prefix tolerance: bulk-create prepends city to the address
-            # (e.g. "Махачкала, ул. Гагарина, 24" in DB vs "ул. Гагарина, 24"
+            # (e.g. "Москва, ул. Гагарина, 24" in DB vs "ул. Гагарина, 24"
             # in the order).  Strip the first comma-segment and retry.
             if "," in db_addr:
                 db_addr_stripped = _normalize_for_dedup(db_addr.split(",", 1)[1])

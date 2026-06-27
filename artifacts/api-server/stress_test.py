@@ -3,7 +3,7 @@ SmartRoute — Stress Test & Before/After Comparison
 ===================================================
 Запуск: cd artifacts/api-server && python3 stress_test.py
 
-Генерирует синтетические координаты вокруг Махачкалы,
+Генерирует синтетические координаты вокруг тестового депо,
 запускает solve_vrp и выводит подробные метрики.
 """
 
@@ -30,14 +30,14 @@ logging.disable(logging.NOTSET)
 logging.basicConfig(level=logging.WARNING)
 
 
-# ── Махачкала depot ────────────────────────────────────────────────────────────
+# ── Тестовый депо (репрезентативный российский город) ──────────────────────────
 DEPOT_LAT = 42.9849
 DEPOT_LON = 47.5046
 RANDOM_SEED = 42
 
 
 def gen_coords(n_stores: int, seed: int = RANDOM_SEED) -> list:
-    """Generate n_stores random coords around Makhachkala depot (±0.15°)."""
+    """Generate n_stores random coords around test depot (±0.15°)."""
     rng = random.Random(seed)
     coords = [(DEPOT_LAT, DEPOT_LON)]
     for _ in range(n_stores):
@@ -118,7 +118,7 @@ if __name__ == "__main__":
     ]
 
     print("\n=== SmartRoute Stress Test ===")
-    print(f"Depot: Makhachkala ({DEPOT_LAT}, {DEPOT_LON})")
+    print(f"Depot: ({DEPOT_LAT}, {DEPOT_LON})")
     print(f"Seed: {RANDOM_SEED}  |  Matrix: Haversine (local, no network)\n")
 
     results = []

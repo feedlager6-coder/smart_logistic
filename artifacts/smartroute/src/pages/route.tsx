@@ -606,7 +606,7 @@ export function RoutePage() {
                   <Input
                     value={depotAddress}
                     onChange={(e) => setDepotAddress(e.target.value)}
-                    placeholder="Адрес склада (пусто = центр Махачкалы)"
+                    placeholder="Адрес склада или ссылка Яндекс Карт"
                     onKeyDown={(e) => e.key === "Enter" && handleGeocodeDepot()}
                     className="flex-1 text-sm h-9"
                   />

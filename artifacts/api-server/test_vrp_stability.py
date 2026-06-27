@@ -31,10 +31,10 @@ except ImportError as e:
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
-DEPOT = (42.9849, 47.5046)  # Махачкала
+DEPOT = (42.9849, 47.5046)  # тестовый депо (репрезентативный российский город)
 
-def make_makhachkala_coords(n: int):
-    """Generate n store coordinates around Mahachkala depot."""
+def make_test_coords(n: int):
+    """Generate n store coordinates around the test depot (±0.15°)."""
     import random
     random.seed(42)
     coords = [DEPOT]
@@ -43,6 +43,9 @@ def make_makhachkala_coords(n: int):
         lon = DEPOT[1] + random.uniform(-0.15, 0.15)
         coords.append((lat, lon))
     return coords
+
+# Backward-compatible alias
+make_makhachkala_coords = make_test_coords
 
 def make_time_windows(n: int, tight: bool = False):
     """Generate n time-window tuples (tw_from_min, tw_to_min, service_min)."""

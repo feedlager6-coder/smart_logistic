@@ -109,7 +109,7 @@ UPDATE users SET password_hash = '$2b$12$...<new hash>...' WHERE username = 'adm
 
 При первом подключении к пустой PostgreSQL базе:
 1. `init_db()` создаёт таблицы (`CREATE TABLE IF NOT EXISTS`), включая `users`
-2. `seed_demo_data()` добавляет 8 демо-магазинов Махачкалы
+2. `seed_demo_data()` добавляет демо-данные аналитики (магазины не добавляются — пользователь начинает с онбординга)
 3. `seed_admin_user()` создаёт пользователя `admin` с паролем из `ADMIN_PASSWORD`
 
 Если база уже содержит данные (≥3 магазинов) — сидирование пропускается.

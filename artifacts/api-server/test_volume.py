@@ -381,7 +381,7 @@ def test_cluster_sweep_stress():
     random.seed(42)
     n = 50
     num_v = 5
-    depot = (42.9849, 47.5046)
+    depot = (42.9849, 47.5046)  # тестовый депо
 
     def rand_coord():
         return (depot[0] + random.uniform(-0.3, 0.3),
