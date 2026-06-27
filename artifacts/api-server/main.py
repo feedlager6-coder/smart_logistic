@@ -203,7 +203,8 @@ def _api_rate_limit(key: str, max_calls: int, window_seconds: int) -> None:
 
 
 # Paths that do NOT require authentication
-_AUTH_PUBLIC_PATHS = {"/api/healthz", "/api/auth/login"}
+_AUTH_PUBLIC_PATHS = {"/api/healthz", "/api/auth/login",
+                      "/api/v1/openapi.json", "/api/v1/docs"}
 # Webhook ingest paths use token-in-URL auth (checked inside the handler)
 _AUTH_WEBHOOK_PREFIX = "/api/v1/webhooks/ingest/"
 
@@ -4623,8 +4624,8 @@ def bulk_delete_stores(request: Request, body: BulkDeleteRequest):
     uid = get_user_id(request)
     if not body.ids:
         return {"deleted": 0}
-    if len(body.ids) > 500:
-        raise HTTPException(status_code=422, detail="Максимум 500 магазинов за один запрос")
+    if len(body.ids) > 5000:
+        raise HTTPException(status_code=422, detail="Максимум 5000 магазинов за один запрос")
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
@@ -7375,6 +7376,66 @@ def admin_clear_geocode_cache(request: Request):
     return {"ok": True, "deleted_count": count}
 
 
+@app.post("/api/admin/cleanup-test-data", status_code=200)
+def admin_cleanup_test_data(request: Request, user_id: int | None = Query(None)):
+    """Delete all test data for a specific user (or all users if user_id=None).
+
+    Removes stores, daily_orders, route_sessions (cascade) that were created
+    during integration testing. Use ONLY in dev/staging — not in production.
+
+    Admin cookie required. API keys cannot access this endpoint.
+    """
+    require_admin(request)
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        uid_filter = "AND owner_id = %s" if user_id else ""
+        uid_args = (user_id,) if user_id else ()
+
+        # Route sessions → cascade removes route_session_stores
+        if user_id:
+            cur.execute(
+                "DELETE FROM route_session_stores WHERE session_id IN "
+                "(SELECT id FROM route_sessions WHERE owner_id = %s)", uid_args
+            )
+            cur.execute("DELETE FROM route_sessions WHERE owner_id = %s", uid_args)
+        else:
+            cur.execute("DELETE FROM route_session_stores")
+            cur.execute("DELETE FROM route_sessions")
+        routes_deleted = cur.rowcount
+
+        # Daily orders
+        if user_id:
+            cur.execute("DELETE FROM daily_orders WHERE owner_id = %s", uid_args)
+        else:
+            cur.execute("DELETE FROM daily_orders")
+        orders_deleted = cur.rowcount
+
+        # Stores
+        if user_id:
+            cur.execute("DELETE FROM stores WHERE owner_id = %s", uid_args)
+        else:
+            cur.execute("DELETE FROM stores")
+        stores_deleted = cur.rowcount
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close(); conn.close()
+
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "deleted": {
+            "stores": stores_deleted,
+            "orders": orders_deleted,
+            "route_sessions": routes_deleted,
+        },
+    }
+
+
 # ── API Key management endpoints ─────────────────────────────────────────────
 
 class ApiKeyCreate(BaseModel):
@@ -7411,7 +7472,7 @@ def create_api_key(request: Request, body: ApiKeyCreate):
     _VALID_SCOPES = {
         "stores:read", "stores:write",
         "orders:read", "orders:write",
-        "routes:build", "routes:read",
+        "routes:read", "routes:build", "routes:write",
         "analytics:read",
         "settings:read", "settings:write",
         "webhooks:receive",
@@ -7623,7 +7684,7 @@ import uuid as _uuid
 _V1_VALID_SCOPES = {
     "stores:read", "stores:write",
     "orders:read", "orders:write",
-    "routes:read", "routes:build",
+    "routes:read", "routes:build", "routes:write",
     "analytics:read",
     "settings:read", "settings:write",
     "webhooks:receive",
@@ -8119,6 +8180,39 @@ def v1_batch_stores(request: Request, body: V1StoreBatchRequest):
         {"created": created, "updated": updated, "errors": errors, "ids": result_ids},
         request, status_code=200,
     )
+
+
+class V1BulkDeleteRequest(BaseModel):
+    ids: list[int]
+
+
+@app.post("/api/v1/stores/bulk-delete",
+          summary="Удалить магазины пакетом",
+          tags=["v1-stores"])
+def v1_bulk_delete_stores(request: Request, body: V1BulkDeleteRequest):
+    """Удалить несколько магазинов за один запрос.
+
+    Удаляет только магазины текущего пользователя (по Bearer-ключу).
+    IDs чужих магазинов молча игнорируются.
+
+    **Auth**: `stores:write`
+    """
+    _v1_require_scope(request, "stores:write")
+    uid = get_user_id(request)
+    if not body.ids:
+        return _v1_response({"deleted": 0}, request)
+    if len(body.ids) > 5000:
+        raise _v1_err("VALIDATION_ERROR", "Максимум 5000 ID за один запрос", 422,
+                      {"limit": 5000, "received": len(body.ids)})
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM stores WHERE id = ANY(%s) AND owner_id = %s",
+        (body.ids, uid),
+    )
+    deleted = cur.rowcount
+    conn.commit(); cur.close(); conn.close()
+    return _v1_response({"deleted": deleted, "requested": len(body.ids)}, request)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

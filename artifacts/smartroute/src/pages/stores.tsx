@@ -352,18 +352,29 @@ export function StoresPage() {
     if (selectedIds.size === 0) return;
     setBulkDeleting(true);
     try {
-      const res = await fetch("/api/stores/bulk-delete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ids: Array.from(selectedIds) }),
-      });
-      if (!res.ok) throw new Error("Ошибка удаления");
-      const data = await res.json();
+      const allIds = Array.from(selectedIds);
+      const CHUNK = 1000;
+      let totalDeleted = 0;
+      for (let i = 0; i < allIds.length; i += CHUNK) {
+        const chunk = allIds.slice(i, i + CHUNK);
+        const res = await fetch("/api/stores/bulk-delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: chunk }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || "Ошибка удаления");
+        }
+        const data = await res.json();
+        totalDeleted += data.deleted ?? 0;
+      }
       queryClient.invalidateQueries({ queryKey: getListStoresQueryKey() });
       setSelectedIds(new Set());
-      toast({ title: `Удалено ${data.deleted} магазин${data.deleted < 5 ? (data.deleted === 1 ? "" : "а") : "ов"}` });
-    } catch {
-      toast({ title: "Ошибка массового удаления", variant: "destructive" });
+      toast({ title: `Удалено ${totalDeleted} магазин${totalDeleted < 5 ? (totalDeleted === 1 ? "" : "а") : "ов"}` });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Ошибка массового удаления";
+      toast({ title: msg, variant: "destructive" });
     } finally {
       setBulkDeleting(false);
       setBulkDeleteConfirm(false);
