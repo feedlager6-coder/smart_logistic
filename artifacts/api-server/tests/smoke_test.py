@@ -322,10 +322,15 @@ if created_store_ids:
 s, od, _ = api("DELETE", f"/api/v1/orders?date={today}", BH)
 check("DELETE /api/v1/orders today", s == 200, str(od.get("error", "")))
 
-# Delete API key
-api("DELETE", f"/api/auth/api-keys/{KEY_ID}", TCH)
+# Delete API key — first revoke (soft), then hard-delete permanently
+api("DELETE", f"/api/auth/api-keys/{KEY_ID}", TCH)  # soft revoke
+s, hd, _ = api("DELETE", f"/api/auth/api-keys/{KEY_ID}?permanent=true", TCH)
+check("Hard-delete revoked API key (?permanent=true)", s in (200, 404), f"status={s}")
+# Purge any other revoked keys (should return 0 or more)
+s, pr, _ = api("DELETE", "/api/auth/api-keys", TCH)
+check("Purge revoked keys endpoint responds ok", s == 200, f"status={s}, body={pr}")
 
-# Delete test user (admin)
+# Delete test user (admin) — cascade should also remove any remaining api_keys
 if TEST_UID:
     s, _, _ = api("DELETE", f"/api/admin/users/{TEST_UID}", ACH)
     check(f"Delete test user (id={TEST_UID})", s == 200, f"status={s}")

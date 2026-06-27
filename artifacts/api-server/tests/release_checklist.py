@@ -271,7 +271,15 @@ if created_ids["stores"]:
     check("Cleanup", f"Bulk delete {len(created_ids['stores'])} created stores",
           d == len(created_ids["stores"]), f"deleted={d}/{len(created_ids['stores'])}")
 
-api("DELETE", f"/api/auth/api-keys/{KEY_ID}", ACH)
+# API key cleanup: soft revoke → verify still listed → hard delete → verify gone
+api("DELETE", f"/api/auth/api-keys/{KEY_ID}", ACH)  # soft revoke
+s2, klist, _ = api("GET", "/api/auth/api-keys", ACH)
+revoked_in_list = any(k.get("id") == KEY_ID and not k.get("is_active") for k in (klist if isinstance(klist, list) else []))
+check("APIKeys", "Revoked key still in list (audit trail)", revoked_in_list, f"KEY_ID={KEY_ID}")
+s3, _, _ = api("DELETE", f"/api/auth/api-keys/{KEY_ID}?permanent=true", ACH)
+check("APIKeys", "Hard-delete revoked key (?permanent=true) → 200", s3 == 200, f"status={s3}")
+s4, pr, _ = api("DELETE", "/api/auth/api-keys", ACH)
+check("APIKeys", "Purge revoked endpoint → 200", s4 == 200, f"status={s4}, body={pr}")
 
 # Final DB state check
 s, stores_after, _ = api("GET", "/api/stores", ACH)

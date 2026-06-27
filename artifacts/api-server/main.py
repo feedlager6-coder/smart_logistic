@@ -7376,6 +7376,30 @@ def admin_clear_geocode_cache(request: Request):
     return {"ok": True, "deleted_count": count}
 
 
+@app.delete("/api/admin/api-keys/cleanup-test", status_code=200)
+def admin_cleanup_test_api_keys(request: Request):
+    """Hard-delete API keys whose name looks like a test key.
+
+    Matches: names starting with 'test_', 'smoke_', 'rc_', 'fin', 'release_check',
+    'rl', 'rl2', 'rl3', 'final_adm', 'limited', 'u2', 'iso', or containing '_test'.
+    Admin cookie required.
+    """
+    require_admin(request)
+    _TEST_PATTERNS = [
+        "test_%", "smoke_%", "rc_%", "release_%", "rl_%",
+        "%_test%", "%_final%", "fin", "final_adm", "limited", "u2",
+        "iso%", "rl", "rl2", "rl3", "rl_final",
+    ]
+    conn = get_db()
+    cur = conn.cursor()
+    total = 0
+    for pattern in _TEST_PATTERNS:
+        cur.execute("DELETE FROM api_keys WHERE name ILIKE %s", (pattern,))
+        total += cur.rowcount
+    conn.commit(); cur.close(); conn.close()
+    return {"ok": True, "deleted": total}
+
+
 @app.post("/api/admin/cleanup-test-data", status_code=200)
 def admin_cleanup_test_data(request: Request, user_id: int | None = Query(None)):
     """Delete all test data for a specific user (or all users if user_id=None).
@@ -7502,20 +7526,49 @@ def create_api_key(request: Request, body: ApiKeyCreate):
 
 
 @app.delete("/api/auth/api-keys/{key_id}", status_code=200)
-def revoke_api_key(key_id: int, request: Request):
-    """Revoke (deactivate) an API key. Keeps record for audit trail."""
+def revoke_api_key(key_id: int, request: Request, permanent: bool = Query(False)):
+    """Revoke (deactivate) an API key.
+
+    By default keeps the record for audit trail (is_active=False).
+    Pass ?permanent=true to hard-delete the record entirely.
+    Only the key owner can revoke/delete their own keys.
+    """
     uid = get_user_id(request)
     conn = get_db()
     cur = conn.cursor()
-    cur.execute(
-        "UPDATE api_keys SET is_active = FALSE WHERE id = %s AND owner_id = %s",
-        (key_id, uid)
-    )
+    if permanent:
+        cur.execute(
+            "DELETE FROM api_keys WHERE id = %s AND owner_id = %s",
+            (key_id, uid)
+        )
+    else:
+        cur.execute(
+            "UPDATE api_keys SET is_active = FALSE WHERE id = %s AND owner_id = %s",
+            (key_id, uid)
+        )
     if cur.rowcount == 0:
         cur.close(); conn.close()
         raise HTTPException(status_code=404, detail="Ключ не найден")
     conn.commit(); cur.close(); conn.close()
-    return {"ok": True}
+    return {"ok": True, "permanent": permanent}
+
+
+@app.delete("/api/auth/api-keys", status_code=200)
+def purge_revoked_api_keys(request: Request):
+    """Hard-delete all revoked (is_active=False) API keys for the current user.
+
+    Active keys are NOT affected. Use to clean up the audit-trail list.
+    """
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM api_keys WHERE owner_id = %s AND is_active = FALSE",
+        (uid,)
+    )
+    deleted = cur.rowcount
+    conn.commit(); cur.close(); conn.close()
+    return {"ok": True, "deleted": deleted}
 
 
 @app.post("/api/auth/api-keys/{key_id}/rotate", status_code=201)

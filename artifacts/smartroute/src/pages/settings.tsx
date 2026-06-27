@@ -47,6 +47,7 @@ const SCOPE_LABELS: Record<string, string> = {
   "orders:write": "Заявки: запись",
   "routes:build": "Маршруты: построение",
   "routes:read": "Маршруты: чтение",
+  "routes:write": "Маршруты: удаление",
   "analytics:read": "Аналитика",
   "settings:read": "Настройки: чтение",
   "settings:write": "Настройки: запись",
@@ -66,6 +67,8 @@ function ApiKeysPanel() {
   const [newlyCreatedKey, setNewlyCreatedKey] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState(false);
   const [revokeId, setRevokeId] = useState<number | null>(null);
+  const [deleteId, setDeleteId] = useState<number | null>(null);
+  const [purgeRevokedConfirm, setPurgeRevokedConfirm] = useState(false);
   const [rotateId, setRotateId] = useState<number | null>(null);
 
   async function loadKeys() {
@@ -108,12 +111,36 @@ function ApiKeysPanel() {
   async function handleRevoke(id: number) {
     try {
       await fetch(`/api/auth/api-keys/${id}`, { method: "DELETE", credentials: "include" });
-      setKeys(k => k.filter(x => x.id !== id));
+      setKeys(k => k.map(x => x.id === id ? { ...x, is_active: false } : x));
       toast({ title: "Ключ отозван" });
     } catch {
       toast({ title: "Не удалось отозвать ключ", variant: "destructive" });
     }
     setRevokeId(null);
+  }
+
+  async function handleDeleteKey(id: number) {
+    try {
+      const res = await fetch(`/api/auth/api-keys/${id}?permanent=true`, { method: "DELETE", credentials: "include" });
+      if (!res.ok) throw new Error();
+      setKeys(k => k.filter(x => x.id !== id));
+      toast({ title: "Ключ удалён" });
+    } catch {
+      toast({ title: "Не удалось удалить ключ", variant: "destructive" });
+    }
+    setDeleteId(null);
+  }
+
+  async function handlePurgeRevoked() {
+    try {
+      const res = await fetch("/api/auth/api-keys", { method: "DELETE", credentials: "include" });
+      const data = await res.json();
+      setKeys(k => k.filter(x => x.is_active));
+      toast({ title: `Удалено отозванных ключей: ${data.deleted ?? 0}` });
+    } catch {
+      toast({ title: "Не удалось очистить отозванные ключи", variant: "destructive" });
+    }
+    setPurgeRevokedConfirm(false);
   }
 
   async function handleRotate(id: number) {
@@ -177,16 +204,24 @@ function ApiKeysPanel() {
       )}
 
       {/* Header + create button */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-sm text-muted-foreground">
             Используйте API-ключи для интеграции с 1С, МойСклад, Bitrix24 и другими системами через Webhook.
           </p>
         </div>
-        <Button size="sm" onClick={() => setShowCreate(v => !v)} className="gap-2 shrink-0">
-          <Plus className="w-4 h-4" />
-          Создать ключ
-        </Button>
+        <div className="flex gap-2 shrink-0">
+          {keys.some(k => !k.is_active) && (
+            <Button size="sm" variant="outline" onClick={() => setPurgeRevokedConfirm(true)} className="gap-2 text-destructive hover:text-destructive">
+              <Trash2 className="w-4 h-4" />
+              <span className="hidden sm:inline">Удалить отозванные</span>
+            </Button>
+          )}
+          <Button size="sm" onClick={() => setShowCreate(v => !v)} className="gap-2">
+            <Plus className="w-4 h-4" />
+            Создать ключ
+          </Button>
+        </div>
       </div>
 
       {/* Create form */}
@@ -262,28 +297,40 @@ function ApiKeysPanel() {
                   </div>
                   <code className="text-xs text-muted-foreground font-mono">{k.key_prefix}…</code>
                 </div>
-                {k.is_active && (
-                  <div className="flex gap-1.5 shrink-0">
-                    <Button
-                      variant="ghost" size="sm"
-                      className="h-8 gap-1.5 text-xs"
-                      onClick={() => setRotateId(k.id)}
-                      title="Обновить ключ"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      <span className="hidden sm:inline">Обновить</span>
-                    </Button>
+                <div className="flex gap-1.5 shrink-0">
+                  {k.is_active ? (
+                    <>
+                      <Button
+                        variant="ghost" size="sm"
+                        className="h-8 gap-1.5 text-xs"
+                        onClick={() => setRotateId(k.id)}
+                        title="Обновить ключ"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">Обновить</span>
+                      </Button>
+                      <Button
+                        variant="ghost" size="sm"
+                        className="h-8 gap-1.5 text-xs text-destructive hover:text-destructive"
+                        onClick={() => setRevokeId(k.id)}
+                        title="Отозвать ключ"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">Отозвать</span>
+                      </Button>
+                    </>
+                  ) : (
                     <Button
                       variant="ghost" size="sm"
                       className="h-8 gap-1.5 text-xs text-destructive hover:text-destructive"
-                      onClick={() => setRevokeId(k.id)}
-                      title="Отозвать ключ"
+                      onClick={() => setDeleteId(k.id)}
+                      title="Удалить ключ навсегда"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
-                      <span className="hidden sm:inline">Отозвать</span>
+                      <span className="hidden sm:inline">Удалить</span>
                     </Button>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {(k.scopes || []).map(s => (
@@ -338,13 +385,49 @@ Content-Type: application/json
           <AlertDialogHeader>
             <AlertDialogTitle>Отозвать API-ключ?</AlertDialogTitle>
             <AlertDialogDescription>
-              Все интеграции, использующие этот ключ, перестанут работать. Действие необратимо.
+              Все интеграции, использующие этот ключ, перестанут работать. Ключ останется в истории — его можно будет удалить насовсем позже.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Отмена</AlertDialogCancel>
             <AlertDialogAction onClick={() => revokeId && handleRevoke(revokeId)} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
               Отозвать
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Hard delete revoked key dialog */}
+      <AlertDialog open={deleteId !== null} onOpenChange={o => !o && setDeleteId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Удалить ключ навсегда?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Запись об этом ключе будет удалена из базы данных полностью — без возможности восстановления.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Отмена</AlertDialogCancel>
+            <AlertDialogAction onClick={() => deleteId && handleDeleteKey(deleteId)} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+              Удалить навсегда
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Purge all revoked dialog */}
+      <AlertDialog open={purgeRevokedConfirm} onOpenChange={o => !o && setPurgeRevokedConfirm(false)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Удалить все отозванные ключи?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Все ключи со статусом «Отозван» будут удалены из базы данных навсегда. Активные ключи не затронуты.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Отмена</AlertDialogCancel>
+            <AlertDialogAction onClick={handlePurgeRevoked} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+              Удалить отозванные
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
