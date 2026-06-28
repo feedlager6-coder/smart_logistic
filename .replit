@@ -84,4 +84,3 @@ externalPort = 3000
 
 [userenv.shared]
 BASE_PATH = "/"
-JWT_SECRET = "9fe1d6f54045c9187e830941d97a317cfb4e80fd54aa07e3789262559f295550"
