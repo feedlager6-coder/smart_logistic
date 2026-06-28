@@ -319,17 +319,22 @@ Content-Type: application/json
 {
   "orders": [
     {
-      "store_name":    "Магазин №1",
-      "address":       "ул. Ленина, 10",
-      "delivery_date": "2026-06-28",
-      "weight_kg":     150.5,
-      "quantity":      12,
-      "products":      "Молоко 1л × 10 шт; Кефир × 2 шт",
-      "amount_rub":    4500.00,
-      "order_number":  "ЗП-000123"
+      "store_name":        "Магазин №1",
+      "counterparty_code": "000000042",
+      "address":           "ул. Ленина, 10",
+      "city":              "Махачкала",
+      "phone":             "+7 988 123-45-67",
+      "delivery_date":     "2026-06-28",
+      "weight_kg":         150.5,
+      "quantity":          12,
+      "products":          "Молоко 1л × 10 шт; Кефир × 2 шт",
+      "amount_rub":        4500.00,
+      "order_number":      "ЗП-000123",
+      "external_id":       "ЗП-000123"
     }
   ],
-  "replace_date": true
+  "replace_date":       true,
+  "auto_create_stores": true
 }`}</pre>
           </div>
 
@@ -347,14 +352,18 @@ Content-Type: application/json
                 </thead>
                 <tbody className="divide-y">
                   {[
-                    ["store_name", "string", "✅", "Название магазина (должно совпадать со справочником)"],
-                    ["address", "string", "✅", "Адрес доставки"],
+                    ["store_name", "string", "✅", "Название торговой точки"],
+                    ["counterparty_code", "string", "★", "Код контрагента в 1С → автосинхронизация точки доставки"],
+                    ["address", "string", "★", "Адрес доставки (нужен для автосоздания магазина)"],
+                    ["city", "string", "—", "Город (используется при создании точки доставки)"],
+                    ["phone", "string", "—", "Телефон точки доставки"],
                     ["delivery_date", "string", "✅", "Дата в формате YYYY-MM-DD"],
                     ["weight_kg", "number", "—", "Вес в кг"],
                     ["quantity", "number", "—", "Количество мест/единиц"],
                     ["products", "string", "—", "Список товаров (для маршрутного листа)"],
                     ["amount_rub", "number", "—", "Сумма заказа в рублях"],
-                    ["order_number", "string", "—", "Номер документа в 1С"],
+                    ["order_number", "string", "—", "Номер документа в 1С (читаемый)"],
+                    ["external_id", "string", "—", "ID заказа в источнике (идемпотентность)"],
                   ].map(([field, type, req, desc]) => (
                     <tr key={field} className="hover:bg-muted/20">
                       <td className="px-3 py-2 font-mono">{field}</td>
@@ -369,11 +378,11 @@ Content-Type: application/json
           </div>
 
           <div>
-            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">replace_date</p>
-            <p className="text-muted-foreground text-xs">
-              <code className="bg-muted px-1 rounded">true</code> — перезаписывает все заказы за указанную дату (рекомендуется для ежедневных выгрузок).<br />
-              <code className="bg-muted px-1 rounded">false</code> — добавляет к существующим.
-            </p>
+            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Параметры запроса</p>
+            <div className="space-y-2 text-xs text-muted-foreground">
+              <p><code className="bg-muted px-1 rounded font-mono">replace_date: true</code> — перезаписывает все заказы за указанную дату (рекомендуется для ежедневных выгрузок). <code className="bg-muted px-1 rounded">false</code> — добавляет к существующим.</p>
+              <p><code className="bg-muted px-1 rounded font-mono">auto_create_stores: true</code> — <strong>автоматически создаёт магазины</strong> для незнакомых точек доставки (используя <code>address</code> + <code>counterparty_code</code>). Геокодирование выполняется в фоне. Рекомендуется оставить включённым.</p>
+            </div>
           </div>
 
           <div>
@@ -381,7 +390,7 @@ Content-Type: application/json
             <div className="space-y-2 text-xs text-muted-foreground">
               <div className="flex gap-2 items-start">
                 <Badge className="bg-emerald-100 text-emerald-800 border-emerald-200 shrink-0">200</Badge>
-                <span>Успешно. Поле <code>sync_log_id</code> — ID записи в журнале синхронизации.</span>
+                <span>Успешно. Ответ: <code className="text-xs bg-muted px-1 rounded">{`{"data":{"created":47,"matched":44,"skipped":0,"auto_created_stores":3,"errors":[]}}`}</code>.<br/><code>auto_created_stores</code> — сколько точек доставки создано автоматически в SmartRoute.</span>
               </div>
               <div className="flex gap-2 items-start">
                 <Badge className="bg-red-100 text-red-800 border-red-200 shrink-0">401</Badge>
@@ -433,9 +442,14 @@ Content-Type: application/json
                 "API-ключ недействителен или был заменён. Перейдите в SmartRoute → Интеграции → Управление подключением → Пересоздать файл подключения. Скачайте новый архив и обновите настройки в 1С.",
             },
             {
-              title: "Магазины не найдены (stores_unmatched > 0)",
+              title: "auto_created_stores > 0 — появились новые точки",
               content:
-                "Название магазина в поле store_name не совпадает со справочником SmartRoute. Проверьте названия в SmartRoute → Магазины. Алгоритм сравнения нечёткий (Jaccard ≥ 0.85), но порядок слов влияет.",
+                "Это нормальная работа при первой выгрузке: SmartRoute автоматически создал точки доставки из заказов. Каждая новая точка появится в SmartRoute → Магазины со статусом геокодирования «Ожидает». Координаты будут получены автоматически. Если counterparty_code передан — при следующей выгрузке эти точки найдутся мгновенно по коду контрагента.",
+            },
+            {
+              title: "Точка доставки не создаётся автоматически",
+              content:
+                "Для авто-создания нужно хотя бы одно из двух: address (адрес доставки) или counterparty_code (код контрагента). Без этих полей SmartRoute не может создать полезную точку. Убедитесь что SQL-запрос выбирает поле адреса доставки (не юридический адрес контрагента).",
             },
             {
               title: "Ошибка «Не удалось подключиться к серверу»",

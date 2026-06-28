@@ -42,3 +42,4 @@
 - [Integrations pattern](integrations-pattern.md) — tables integrations+sync_logs; config JSONB stores api_key_id; _record_integration_sync hooks into v1_orders_batch; BSL module served as base64.
 - [1C integration format decision](1c-integration-format.md) — EPF binary not generatable from Python (V8 container); BSL+ZIP is the correct universal approach.
 - [quick-setup key rotation](quick-setup-key-rotation.md) — quick-setup atomically revokes old api_key_id before creating new key; ZIP package_b64 returned once in response.
+- [1C auto-store-sync design](1c-auto-store-sync.md) — counterparty_code→stores.external_id naming asymmetry; _auto_create_store_if_missing priority; db_stores mutated in-place per batch.

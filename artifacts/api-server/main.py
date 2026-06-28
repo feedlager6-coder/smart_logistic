@@ -1958,6 +1958,9 @@ def init_db():
     cur.execute("ALTER TABLE stores ADD COLUMN IF NOT EXISTS city TEXT DEFAULT ''")
     cur.execute("ALTER TABLE stores ADD COLUMN IF NOT EXISTS phone TEXT DEFAULT ''")
     cur.execute("ALTER TABLE stores ADD COLUMN IF NOT EXISTS client TEXT DEFAULT ''")
+    cur.execute("ALTER TABLE stores ADD COLUMN IF NOT EXISTS external_id TEXT DEFAULT ''")
+    cur.execute("ALTER TABLE stores ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual'")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_stores_ext_owner ON stores(owner_id, external_id) WHERE external_id != ''")
     # ── Import history ─────────────────────────────────────────────────────────
     cur.execute("""
         CREATE TABLE IF NOT EXISTS order_import_history (
@@ -8461,7 +8464,8 @@ def rotate_api_key(key_id: int, request: Request):
 class WebhookOrderItem(BaseModel):
     store_name: str
     address: str | None = None
-    delivery_date: str  # YYYY-MM-DD
+    city: str = ""               # Город (используется при авто-создании магазина)
+    delivery_date: str           # YYYY-MM-DD
     weight_kg: float = 0.0
     volume_m3: float = 0.0
     quantity: float = 0.0
@@ -8473,13 +8477,88 @@ class WebhookOrderItem(BaseModel):
     time_window_to: str | None = None
     latitude: float | None = None
     longitude: float | None = None
-    external_id: str = ""   # ID в системе-источнике (для идемпотентности)
-    source: str = "webhook" # "moysklad" | "bitrix24" | "excel" | "api" | ...
+    external_id: str = ""        # ID заказа в источнике (идемпотентность)
+    source: str = "webhook"      # "1c" | "moysklad" | "bitrix24" | "api" | ...
+    counterparty_code: str = ""  # Код контрагента в 1С → stores.external_id
+    phone: str = ""              # Телефон точки доставки
 
 
 class WebhookIngestRequest(BaseModel):
     orders: list[WebhookOrderItem]
-    replace_date: bool = False  # if True — delete existing orders for dates in batch first
+    replace_date: bool = False       # if True — delete existing orders for dates in batch first
+    auto_create_stores: bool = True  # Авто-создавать магазины из незнакомых заказов
+
+
+def _auto_create_store_if_missing(
+    uid: int,
+    store_name: str,
+    address: str,
+    counterparty_code: str,
+    phone: str,
+    city: str,
+    db_stores: list[dict],
+    cur,
+    auto_create: bool = True,
+) -> tuple:
+    """Match or auto-create a store. Returns (store_id, was_auto_created).
+
+    Priority:
+    1. Match by external_id (counterparty_code) — fastest, most reliable for 1C
+    2. Fuzzy name match (_match_store_to_db)
+    3. Auto-create with geocode_status='pending' if auto_create=True and enough data
+
+    Modifies db_stores in-place when creating so subsequent orders in the same
+    batch find the newly created store.
+    """
+    # 1. Match by counterparty_code (external_id)
+    if counterparty_code:
+        ext_match = next(
+            (s for s in db_stores if s.get("external_id") == counterparty_code),
+            None,
+        )
+        if ext_match:
+            return ext_match["id"], False
+
+    # 2. Fuzzy name match
+    name_match = _match_store_to_db(store_name, address, db_stores)
+    if name_match:
+        # Backfill external_id if we now have one and the store doesn't
+        if counterparty_code and not name_match.get("external_id"):
+            try:
+                cur.execute(
+                    "UPDATE stores SET external_id=%s, source='1c' WHERE id=%s AND owner_id=%s",
+                    (counterparty_code, name_match["id"], uid),
+                )
+                name_match["external_id"] = counterparty_code
+            except Exception:
+                pass
+        return name_match["id"], False
+
+    # 3. Auto-create
+    if not auto_create or not store_name.strip():
+        return None, False
+    if not address and not counterparty_code:
+        return None, False  # not enough data to create a useful store
+
+    try:
+        resolved_city = city.strip()
+        if not resolved_city and address and "," in address:
+            resolved_city = address.split(",", 1)[0].strip()
+
+        cur.execute(
+            """INSERT INTO stores
+               (owner_id, name, address, city, phone, external_id, source, geocode_status)
+               VALUES (%s, %s, %s, %s, %s, %s, '1c', 'pending')
+               RETURNING id, name, address, city, phone, external_id""",
+            (uid, store_name.strip(), address or "",
+             resolved_city, phone or "", counterparty_code or ""),
+        )
+        new_store = dict(cur.fetchone())
+        db_stores.append(new_store)
+        return new_store["id"], True
+    except Exception as exc:
+        logger.warning("auto-create store failed for '%s': %s", store_name, exc)
+        return None, False
 
 
 @app.post("/api/v1/webhooks/ingest/{token}")
@@ -8514,8 +8593,8 @@ def webhook_ingest(token: str, body: WebhookIngestRequest, request: Request):
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-    # Load stores for matching
-    cur.execute("SELECT id, name, address, city FROM stores WHERE owner_id = %s", (uid,))
+    # Load stores for matching (include external_id for 1C counterparty matching)
+    cur.execute("SELECT id, name, address, city, phone, external_id FROM stores WHERE owner_id = %s", (uid,))
     db_stores = [dict(r) for r in cur.fetchall()]
 
     # Optional: delete existing orders for replaced dates
@@ -8527,7 +8606,7 @@ def webhook_ingest(token: str, body: WebhookIngestRequest, request: Request):
                 (uid, d)
             )
 
-    created = matched = skipped = 0
+    created = matched = skipped = auto_created = 0
     errors = []
 
     for item in body.orders:
@@ -8536,16 +8615,17 @@ def webhook_ingest(token: str, body: WebhookIngestRequest, request: Request):
                 skipped += 1
                 continue
 
-            # Attempt store matching
-            store_id = None
-            matched_store = _match_store_to_db(item.store_name, item.address or "", db_stores)
-            if matched_store:
-                store_id = matched_store["id"]
-                matched += 1
-
-            # Use provided coordinates if given (bypass geocoding)
-            lat = item.latitude
-            lon = item.longitude
+            # Match or auto-create store
+            store_id, was_created = _auto_create_store_if_missing(
+                uid, item.store_name, item.address or "",
+                item.counterparty_code, item.phone, item.city,
+                db_stores, cur, auto_create=body.auto_create_stores,
+            )
+            if store_id is not None:
+                if was_created:
+                    auto_created += 1
+                else:
+                    matched += 1
 
             cur.execute(
                 """INSERT INTO daily_orders
@@ -8564,7 +8644,10 @@ def webhook_ingest(token: str, body: WebhookIngestRequest, request: Request):
             logger.error("webhook_ingest row error: %s", exc)
 
     conn.commit(); cur.close(); conn.close()
-    return {"created": created, "matched": matched, "skipped": skipped, "errors": errors[:20]}
+    return {
+        "created": created, "matched": matched, "skipped": skipped,
+        "auto_created_stores": auto_created, "errors": errors[:20],
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -9222,25 +9305,30 @@ def v1_orders_batch(request: Request, body: WebhookIngestRequest):
 
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT id, name, address, city FROM stores WHERE owner_id=%s", (uid,))
+    cur.execute("SELECT id, name, address, city, phone, external_id FROM stores WHERE owner_id=%s", (uid,))
     db_stores = [dict(r) for r in cur.fetchall()]
 
     if body.replace_date:
         for d in {item.delivery_date for item in body.orders}:
             cur.execute("DELETE FROM daily_orders WHERE owner_id=%s AND delivery_date=%s", (uid, d))
 
-    created = matched = skipped = 0
+    created = matched = skipped = auto_created = 0
     errors: list = []
     for item in body.orders:
         try:
             if not item.store_name.strip():
                 skipped += 1
                 continue
-            store_id = None
-            ms = _match_store_to_db(item.store_name, item.address or "", db_stores)
-            if ms:
-                store_id = ms["id"]
-                matched += 1
+            store_id, was_created = _auto_create_store_if_missing(
+                uid, item.store_name, item.address or "",
+                item.counterparty_code, item.phone, item.city,
+                db_stores, cur, auto_create=body.auto_create_stores,
+            )
+            if store_id is not None:
+                if was_created:
+                    auto_created += 1
+                else:
+                    matched += 1
             cur.execute(
                 """INSERT INTO daily_orders
                    (owner_id, store_id, store_name_raw, address_raw, delivery_date,
@@ -9255,13 +9343,13 @@ def v1_orders_batch(request: Request, body: WebhookIngestRequest):
         except Exception as exc:
             errors.append({"store": item.store_name, "error": str(exc)})
     conn.commit(); cur.close(); conn.close()
-    # Log this sync if the API key is linked to an integration
     _record_integration_sync(request, created, matched,
                               len(body.orders) - created - skipped,
                               len(errors),
                               "; ".join(e.get("error", "") for e in errors[:3]))
     return _v1_response(
-        {"created": created, "matched": matched, "skipped": skipped, "errors": errors[:20]},
+        {"created": created, "matched": matched, "skipped": skipped,
+         "auto_created_stores": auto_created, "errors": errors[:20]},
         request,
     )
 
