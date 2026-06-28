@@ -1,0 +1,7 @@
+{
+  "version": "1.0.0",
+  "status": "placeholder",
+  "min_1c_version": "8.3",
+  "build_date": null,
+  "note": "Replace SmartRoute.epf with the real file built in 1C Configurator. No code changes needed after replacement."
+}

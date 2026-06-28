@@ -24,7 +24,6 @@ import {
   Clock,
   Package,
   AlertTriangle,
-  ChevronRight,
   ChevronDown,
   ArrowLeft,
   Database,
@@ -40,6 +39,8 @@ import {
   ArrowRight,
   Building2,
   Shield,
+  ExternalLink,
+  FileText,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -84,6 +85,13 @@ interface SetupResult {
   full_key: string;
   base_url: string;
   package_b64: string;
+}
+
+interface StatusInfo {
+  label: string;
+  colorClass: string;
+  icon: React.ReactNode;
+  description: string;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -131,14 +139,26 @@ function downloadZip(b64: string, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-/** Derive a human-readable, granular status from integration + logs */
-function deriveStatus(integration: Integration, logs: SyncLog[]): {
-  label: string;
-  color: string;
-  icon: React.ReactNode;
-  description: string;
-} {
+/** Derive a granular, human-readable status from integration + logs */
+function deriveStatus(integration: Integration, logs: SyncLog[]): StatusInfo {
   const realLogs = logs.filter((l) => l.error_detail !== "Ручная проверка");
+  const errorLogs = realLogs.filter((l) => l.status === "error");
+  const lastErrorDetail = (errorLogs[0]?.error_detail ?? "").toLowerCase();
+
+  const isAuthError =
+    lastErrorDetail.includes("401") ||
+    lastErrorDetail.includes("403") ||
+    lastErrorDetail.includes("unauthorized") ||
+    lastErrorDetail.includes("forbidden") ||
+    lastErrorDetail.includes("ключ") ||
+    lastErrorDetail.includes("токен");
+
+  const isConnError =
+    lastErrorDetail.includes("connect") ||
+    lastErrorDetail.includes("timeout") ||
+    lastErrorDetail.includes("ssl") ||
+    lastErrorDetail.includes("network") ||
+    lastErrorDetail.includes("соединени");
 
   switch (integration.status) {
     case "active": {
@@ -146,40 +166,56 @@ function deriveStatus(integration: Integration, logs: SyncLog[]): {
       if (stats && stats.total_orders === 0) {
         return {
           label: "Первое соединение",
-          color: "text-blue-700 bg-blue-50 border-blue-200",
+          colorClass: "text-blue-700 bg-blue-50 border-blue-200",
           icon: <Wifi className="w-3.5 h-3.5" />,
-          description: "1С подключена, ждём первые заказы (отправляются в 07:30)",
+          description: "Подключение установлено. Заказы начнут поступать по расписанию в 07:30.",
         };
       }
-      const lastSyncMs = integration.last_sync_at
+      const staleMs = integration.last_sync_at
         ? Date.now() - new Date(integration.last_sync_at).getTime()
         : Infinity;
-      if (lastSyncMs > 26 * 3600 * 1000) {
+      if (staleMs > 26 * 3600 * 1000) {
         return {
           label: "Нет новых данных",
-          color: "text-amber-700 bg-amber-50 border-amber-200",
+          colorClass: "text-amber-700 bg-amber-50 border-amber-200",
           icon: <Clock className="w-3.5 h-3.5" />,
           description: "Последняя синхронизация была более суток назад",
         };
       }
       return {
-        label: "Синхронизация активна",
-        color: "text-emerald-700 bg-emerald-50 border-emerald-200",
+        label: "Интеграция работает",
+        colorClass: "text-emerald-700 bg-emerald-50 border-emerald-200",
         icon: <CheckCircle2 className="w-3.5 h-3.5" />,
         description: `Последняя синхронизация: ${friendlyDate(integration.last_sync_at)}`,
       };
     }
     case "error":
+      if (isAuthError) {
+        return {
+          label: "Ошибка авторизации",
+          colorClass: "text-red-700 bg-red-50 border-red-200",
+          icon: <XCircle className="w-3.5 h-3.5" />,
+          description: "Ключ доступа недействителен или истёк. Пересоздайте подключение.",
+        };
+      }
+      if (isConnError) {
+        return {
+          label: "Не удалось соединиться",
+          colorClass: "text-red-700 bg-red-50 border-red-200",
+          icon: <WifiOff className="w-3.5 h-3.5" />,
+          description: "Нет связи с 1С. Проверьте интернет-доступ на сервере 1С.",
+        };
+      }
       return {
         label: "Ошибка синхронизации",
-        color: "text-red-700 bg-red-50 border-red-200",
+        colorClass: "text-red-700 bg-red-50 border-red-200",
         icon: <XCircle className="w-3.5 h-3.5" />,
         description: "Проверьте журнал ниже для деталей",
       };
     case "disabled":
       return {
         label: "Приостановлена",
-        color: "text-gray-600 bg-gray-50 border-gray-200",
+        colorClass: "text-gray-600 bg-gray-50 border-gray-200",
         icon: <WifiOff className="w-3.5 h-3.5" />,
         description: "Синхронизация отключена вручную",
       };
@@ -191,14 +227,14 @@ function deriveStatus(integration: Integration, logs: SyncLog[]): {
       ) {
         return {
           label: "Ошибка при первом подключении",
-          color: "text-red-700 bg-red-50 border-red-200",
+          colorClass: "text-red-700 bg-red-50 border-red-200",
           icon: <AlertTriangle className="w-3.5 h-3.5" />,
-          description: "Специалист 1С отправил данные, но возникла ошибка",
+          description: "Файл установлен, но при первом подключении возникла ошибка",
         };
       }
       return {
-        label: "Ожидает специалиста",
-        color: "text-amber-700 bg-amber-50 border-amber-200",
+        label: "Ожидает установки",
+        colorClass: "text-amber-700 bg-amber-50 border-amber-200",
         icon: <Clock className="w-3.5 h-3.5" />,
         description: "Ждём первую синхронизацию из 1С",
       };
@@ -237,7 +273,6 @@ interface LandingProps {
 function IntegrationsLanding({ existingIntegration, onConnect, onOpenDashboard }: LandingProps) {
   return (
     <div className="max-w-3xl">
-      {/* Page title */}
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-foreground mb-1">Интеграции</h1>
         <p className="text-muted-foreground">
@@ -247,7 +282,6 @@ function IntegrationsLanding({ existingIntegration, onConnect, onOpenDashboard }
 
       {/* 1C Hero Card */}
       <div className="relative rounded-2xl border-2 border-orange-200 bg-gradient-to-br from-orange-50 to-amber-50 p-6 mb-6 overflow-hidden">
-        {/* Background decoration */}
         <div className="absolute top-0 right-0 w-48 h-48 opacity-5">
           <Building2 className="w-full h-full text-orange-900" />
         </div>
@@ -260,7 +294,7 @@ function IntegrationsLanding({ existingIntegration, onConnect, onOpenDashboard }
               </div>
               <div>
                 <h2 className="text-lg font-bold text-gray-900">1С:Предприятие</h2>
-                <p className="text-sm text-orange-700">Поддержка 8.3+ · Любая конфигурация</p>
+                <p className="text-sm text-orange-700">Версия 8.3 и выше · Любая конфигурация</p>
               </div>
             </div>
             {existingIntegration ? (
@@ -283,21 +317,19 @@ function IntegrationsLanding({ existingIntegration, onConnect, onOpenDashboard }
           </div>
 
           {existingIntegration ? (
-            /* Already connected — show quick status + open button */
             <div className="space-y-4">
               <p className="text-sm text-gray-700">
                 {existingIntegration.status === "active"
                   ? `Заказы передаются автоматически. Последняя синхронизация: ${friendlyDate(existingIntegration.last_sync_at)}`
                   : existingIntegration.status === "error"
                   ? "Возникла ошибка при синхронизации. Откройте панель управления для деталей."
-                  : "Интеграция настраивается. Ожидаем первую синхронизацию из 1С."}
+                  : "Интеграция настраивается. Ожидаем первое подключение из 1С."}
               </p>
               <Button onClick={onOpenDashboard} className="w-full sm:w-auto">
                 Открыть панель управления <ArrowRight className="w-4 h-4 ml-2" />
               </Button>
             </div>
           ) : (
-            /* Not connected — show value prop + connect button */
             <div className="space-y-4">
               <p className="text-sm text-gray-700 leading-relaxed">
                 Заказы из 1С передаются в SmartRoute каждое утро — вы строите маршруты, не вводите данные вручную.
@@ -325,7 +357,7 @@ function IntegrationsLanding({ existingIntegration, onConnect, onOpenDashboard }
         </div>
       </div>
 
-      {/* Coming soon integrations */}
+      {/* Coming soon */}
       <div>
         <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-3">Скоро</p>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -351,7 +383,7 @@ function IntegrationsLanding({ existingIntegration, onConnect, onOpenDashboard }
 
 // ─── Setup Flow ───────────────────────────────────────────────────────────────
 
-type SetupStep = 0 | 1 | 2 | 3; // 0=explain, 1=creating, 2=handoff, 3=waiting
+type SetupStep = 0 | 1 | 2 | 3;
 
 interface SetupFlowProps {
   onBack: () => void;
@@ -362,10 +394,9 @@ function OneCSetupFlow({ onBack, onDone }: SetupFlowProps) {
   const { toast } = useToast();
   const [step, setStep] = useState<SetupStep>(0);
   const [result, setResult] = useState<SetupResult | null>(null);
-  const [packageDownloaded, setPackageDownloaded] = useState(false);
-  const [showInstructions, setShowInstructions] = useState(false);
+  const [fileDownloaded, setFileDownloaded] = useState(false);
+  const [showSpecialistGuide, setShowSpecialistGuide] = useState(false);
 
-  // Step 3: poll for first sync
   const [pollStatus, setPollStatus] = useState<"waiting" | "connected">("waiting");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -402,7 +433,7 @@ function OneCSetupFlow({ onBack, onDone }: SetupFlowProps) {
       setStep(2);
     } catch (e: unknown) {
       toast({
-        title: "Не удалось создать канал",
+        title: "Не удалось создать канал подключения",
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -412,29 +443,28 @@ function OneCSetupFlow({ onBack, onDone }: SetupFlowProps) {
 
   const handleDownload = () => {
     if (!result) return;
-    downloadZip(result.package_b64, "SmartRoute_1C.zip");
-    setPackageDownloaded(true);
+    downloadZip(result.package_b64, "SmartRoute_Setup.zip");
+    setFileDownloaded(true);
     toast({
-      title: "Пакет скачан",
-      description: "SmartRoute_1C.zip содержит файл модуля и инструкцию. Передайте его специалисту по 1С.",
+      title: "Файл скачан",
+      description: "Передайте SmartRoute_Setup.zip специалисту по 1С — внутри файл и инструкция.",
     });
   };
 
   const handleEmailSpecialist = () => {
     if (!result) return;
-    const subject = encodeURIComponent("SmartRoute — настройка интеграции с 1С");
+    const subject = encodeURIComponent("SmartRoute — файл подключения к 1С");
     const body = encodeURIComponent(
-      `Привет!\n\nНужна помощь с настройкой интеграции SmartRoute ↔ 1С.\n` +
-      `Я скачал пакет настройки — передаю тебе.\n\n` +
+      `Привет!\n\n` +
+      `Нужно подключить нашу систему SmartRoute к 1С.\n` +
+      `Скачай архив SmartRoute_Setup.zip — внутри файл SmartRoute.epf и инструкция.\n\n` +
       `Что нужно сделать:\n` +
-      `1. Создать внешнюю обработку в 1С\n` +
-      `2. Вставить код из файла SmartRoute.bsl\n` +
-      `3. Проверить соединение\n` +
-      `4. Настроить регламентное задание на 07:30\n\n` +
-      `Адрес SmartRoute: ${result.base_url}\n` +
-      `API-ключ: ${result.full_key}\n\n` +
-      `(ключ уже встроен в SmartRoute.bsl — менять ничего не нужно)\n\n` +
-      `Полная инструкция в файле Инструкция.txt внутри архива SmartRoute_1C.zip.\n\n` +
+      `1. Открой файл SmartRoute.epf в 1С\n` +
+      `2. Введи параметры подключения из инструкции\n` +
+      `3. Проверь соединение\n` +
+      `4. Настрой автоматическую отправку в 07:30\n\n` +
+      `Адрес SmartRoute: ${result.base_url}\n\n` +
+      `Все детали и ключ доступа — в файле Инструкция.txt внутри архива.\n\n` +
       `Если вопросы — support@smartroute.app\n\nСпасибо!`
     );
     window.open(`mailto:?subject=${subject}&body=${body}`, "_blank");
@@ -460,8 +490,8 @@ function OneCSetupFlow({ onBack, onDone }: SetupFlowProps) {
 
   const STEPS = [
     { n: 0, label: "Запуск", done: step > 0 },
-    { n: 1, label: "Настройка", done: step > 2 },
-    { n: 2, label: "Проверка", done: pollStatus === "connected" },
+    { n: 1, label: "Файл", done: step > 2 },
+    { n: 2, label: "Готово", done: pollStatus === "connected" },
   ];
 
   return (
@@ -473,11 +503,11 @@ function OneCSetupFlow({ onBack, onDone }: SetupFlowProps) {
       <div className="mb-6">
         <h1 className="text-2xl font-bold mb-1">Подключение 1С:Предприятие</h1>
         <p className="text-sm text-muted-foreground">
-          Настройка займёт около 5 минут с вашей стороны и 20 минут у специалиста по 1С.
+          Около 5 минут с вашей стороны и 20 минут у специалиста по 1С.
         </p>
       </div>
 
-      {/* Progress bar (3 steps) */}
+      {/* Progress indicator */}
       <div className="flex items-center gap-2 mb-8">
         {STEPS.map((s, i) => (
           <React.Fragment key={s.n}>
@@ -512,9 +542,7 @@ function OneCSetupFlow({ onBack, onDone }: SetupFlowProps) {
             <div className="space-y-6">
               <div>
                 <h2 className="text-lg font-semibold mb-1">Как это работает</h2>
-                <p className="text-sm text-muted-foreground">
-                  Подключение происходит в три простых этапа.
-                </p>
+                <p className="text-sm text-muted-foreground">Три простых шага — и заказы поступают автоматически.</p>
               </div>
 
               <div className="space-y-3">
@@ -523,19 +551,19 @@ function OneCSetupFlow({ onBack, onDone }: SetupFlowProps) {
                     time: "~ 2 сек",
                     icon: <Shield className="w-5 h-5 text-primary" />,
                     title: "SmartRoute создаёт защищённый канал",
-                    desc: "Уникальный ключ доступа и готовый пакет для установки — генерируются автоматически.",
+                    desc: "Уникальный ключ доступа и файл подключения генерируются автоматически.",
                   },
                   {
                     time: "~ 5 мин",
                     icon: <Download className="w-5 h-5 text-primary" />,
-                    title: "Вы скачиваете пакет и передаёте специалисту",
-                    desc: "Один ZIP-архив с инструкцией внутри. Пересылаете по почте или мессенджеру.",
+                    title: "Скачайте SmartRoute.epf и передайте специалисту",
+                    desc: "Один файл с готовыми настройками. Пересылаете по почте или мессенджеру.",
                   },
                   {
                     time: "~ 20 мин",
                     icon: <Building2 className="w-5 h-5 text-primary" />,
-                    title: "Специалист устанавливает модуль в 1С",
-                    desc: "Без изменений в конфигурации. Заказы начинают поступать автоматически в 07:30.",
+                    title: "Специалист устанавливает файл в 1С",
+                    desc: "Без вмешательства в конфигурацию. Заказы начинают поступать автоматически в 07:30.",
                   },
                 ].map((item) => (
                   <div key={item.title} className="flex gap-4 p-4 rounded-lg border bg-muted/30">
@@ -578,50 +606,50 @@ function OneCSetupFlow({ onBack, onDone }: SetupFlowProps) {
               </div>
               <div>
                 <p className="font-semibold text-lg">Создаём защищённый канал...</p>
-                <p className="text-sm text-muted-foreground mt-1">Генерируем ключ доступа и пакет для 1С</p>
+                <p className="text-sm text-muted-foreground mt-1">Готовим файл подключения и ключ доступа</p>
               </div>
             </div>
           )}
 
-          {/* ── Step 2: Handoff ── */}
+          {/* ── Step 2: Download EPF ── */}
           {step === 2 && result && (
             <div className="space-y-6">
               <div>
                 <div className="flex items-center gap-2 mb-1">
                   <CheckCircle2 className="w-5 h-5 text-emerald-500" />
-                  <h2 className="text-lg font-semibold">Канал создан! Передайте пакет специалисту</h2>
+                  <h2 className="text-lg font-semibold">Канал создан! Передайте файл специалисту</h2>
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  Скачайте ZIP-архив и отправьте его вашему специалисту по 1С — он сделает остальное.
+                  Скачайте архив и отправьте его специалисту по 1С — он сделает остальное.
                 </p>
               </div>
 
-              {/* Package download */}
+              {/* EPF download */}
               <div className="rounded-xl border-2 border-dashed border-primary/40 bg-primary/5 p-5 text-center space-y-3">
                 <div className="w-14 h-14 mx-auto bg-primary/10 rounded-full flex items-center justify-center">
                   <Package className="w-7 h-7 text-primary" />
                 </div>
                 <div>
-                  <p className="font-semibold">SmartRoute_1C.zip</p>
+                  <p className="font-semibold">SmartRoute_Setup.zip</p>
                   <p className="text-xs text-muted-foreground mt-0.5">
-                    Содержит файл модуля и инструкцию. Ключ уже встроен — специалисту ничего не придётся настраивать вручную.
+                    Содержит файл SmartRoute.epf и инструкцию. Параметры подключения уже встроены.
                   </p>
                 </div>
                 <Button onClick={handleDownload} className="w-full" size="lg">
                   <Download className="w-4 h-4 mr-2" />
-                  Скачать пакет
+                  Скачать SmartRoute.epf
                 </Button>
-                {packageDownloaded && (
+                {fileDownloaded && (
                   <p className="text-xs text-emerald-600 flex items-center justify-center gap-1.5">
-                    <CheckCircle2 className="w-3.5 h-3.5" /> Пакет скачан
+                    <CheckCircle2 className="w-3.5 h-3.5" /> Файл скачан
                   </p>
                 )}
               </div>
 
-              {/* Params to share (if specialist asks separately) */}
+              {/* Connection params (for reference) */}
               <div className="rounded-lg border bg-amber-50 border-amber-200 p-4 space-y-3">
                 <p className="text-xs font-semibold text-amber-900 uppercase tracking-wide">
-                  Параметры (уже в пакете — для справки)
+                  Параметры (уже в архиве — для справки)
                 </p>
                 <div className="space-y-2">
                   <div>
@@ -633,8 +661,8 @@ function OneCSetupFlow({ onBack, onDone }: SetupFlowProps) {
                   </div>
                   <div>
                     <p className="text-xs text-amber-700 mb-1">
-                      API-ключ{" "}
-                      <span className="font-normal">(полный — в пакете; показывается только сейчас)</span>:
+                      Ключ доступа{" "}
+                      <span className="font-normal">(в архиве; показывается только сейчас)</span>:
                     </p>
                     <div className="flex items-center gap-2 bg-white rounded border border-amber-200 px-3 py-2">
                       <code className="text-xs font-mono flex-1 break-all">{result.full_key}</code>
@@ -644,37 +672,42 @@ function OneCSetupFlow({ onBack, onDone }: SetupFlowProps) {
                 </div>
               </div>
 
-              {/* Email to specialist */}
+              {/* Email */}
               <Button variant="outline" className="w-full" onClick={handleEmailSpecialist}>
                 <Mail className="w-4 h-4 mr-2" /> Написать специалисту по email
               </Button>
 
-              {/* Instructions for specialist (collapsible) */}
+              {/* Technical instructions — clearly for specialist only */}
               <div className="rounded-lg border overflow-hidden">
                 <button
                   className="flex items-center justify-between w-full px-4 py-3 text-sm font-medium hover:bg-muted/50 transition-colors"
-                  onClick={() => setShowInstructions((v) => !v)}
+                  onClick={() => setShowSpecialistGuide((v) => !v)}
                 >
-                  <span>Инструкция для специалиста по 1С</span>
+                  <span className="flex items-center gap-2">
+                    <FileText className="w-4 h-4 text-muted-foreground" />
+                    Техническая инструкция для специалиста 1С
+                  </span>
                   <ChevronDown
                     className={`w-4 h-4 text-muted-foreground transition-transform ${
-                      showInstructions ? "rotate-180" : ""
+                      showSpecialistGuide ? "rotate-180" : ""
                     }`}
                   />
                 </button>
-                {showInstructions && (
-                  <div className="px-4 pb-4 space-y-2 border-t bg-muted/20">
-                    <p className="text-xs text-muted-foreground pt-3 pb-1">
-                      Эти шаги описаны в файле Инструкция.txt внутри архива.
+                {showSpecialistGuide && (
+                  <div className="px-4 pb-4 space-y-3 border-t bg-muted/20">
+                    <p className="text-xs text-muted-foreground pt-3">
+                      Эти шаги описаны в файле Инструкция.txt внутри архива. Полная страница —{" "}
+                      <a href="/integrations/1c/specialist" target="_blank" className="underline text-primary font-medium">
+                        открыть для специалиста <ExternalLink className="w-3 h-3 inline" />
+                      </a>
                     </p>
                     <ol className="space-y-2.5">
                       {[
-                        "Откройте 1С Конфигуратор. Файл → Новый → Внешняя обработка. Имя: SmartRoute.",
-                        "Добавьте форму: Формы → Добавить → Произвольная форма. Перейдите на вкладку «Модуль».",
-                        "Откройте SmartRoute.bsl из архива, скопируйте весь код и вставьте в модуль формы.",
-                        "Сохраните как SmartRoute.epf (Файл → Сохранить как → Внешняя обработка).",
-                        "Откройте SmartRoute.epf в режиме Предприятия. Нажмите «Проверить соединение» — ожидается «✅ Соединение успешно».",
-                        "Настройте Регламентное задание: метод ОтправитьЗаявкиВSmartRoute(), расписание — ежедневно в 07:30.",
+                        "Запустите 1С:Предприятие (режим Предприятия, не Конфигуратор).",
+                        "Файл → Открыть → выберите SmartRoute.epf из архива.",
+                        "Введите адрес SmartRoute и ключ доступа из раздела «Параметры» выше.",
+                        "Нажмите «Проверить соединение» — ожидается «✅ Соединение успешно».",
+                        "Настройте ежедневный запуск в 07:30 через сервис регламентных заданий.",
                       ].map((text, i) => (
                         <li key={i} className="flex gap-3 text-sm">
                           <span className="w-5 h-5 rounded-full bg-primary/10 text-primary text-xs flex items-center justify-center shrink-0 font-semibold mt-0.5">
@@ -684,12 +717,16 @@ function OneCSetupFlow({ onBack, onDone }: SetupFlowProps) {
                         </li>
                       ))}
                     </ol>
-                    <Alert className="border-blue-200 bg-blue-50 mt-3">
-                      <AlertDescription className="text-blue-800 text-xs">
-                        Если возникает ошибка «SSL Handshake» — на сервере 1С нет доверенного сертификата.
-                        Попросите сисадмина открыть исходящий порт 443 или установить корневые сертификаты.
-                      </AlertDescription>
-                    </Alert>
+                    <div className="pt-1">
+                      <a
+                        href="/integrations/1c/specialist"
+                        target="_blank"
+                        className="inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:underline"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        Открыть полную техническую документацию
+                      </a>
+                    </div>
                   </div>
                 )}
               </div>
@@ -699,7 +736,7 @@ function OneCSetupFlow({ onBack, onDone }: SetupFlowProps) {
                 size="lg"
                 onClick={() => setStep(3)}
               >
-                Специалист установил модуль — ждём синхронизацию <ChevronRight className="w-4 h-4 ml-1" />
+                Специалист установил файл — ждём подключение →
               </Button>
             </div>
           )}
@@ -708,9 +745,9 @@ function OneCSetupFlow({ onBack, onDone }: SetupFlowProps) {
           {step === 3 && (
             <div className="space-y-6">
               <div>
-                <h2 className="text-lg font-semibold mb-1">Ожидаем первую синхронизацию</h2>
+                <h2 className="text-lg font-semibold mb-1">Ожидаем первое подключение</h2>
                 <p className="text-sm text-muted-foreground">
-                  Когда специалист установит модуль и нажмёт «Отправить заявки» — здесь появится результат.
+                  Как только специалист установит файл и проверит соединение — здесь появится результат.
                 </p>
               </div>
 
@@ -749,8 +786,8 @@ function OneCSetupFlow({ onBack, onDone }: SetupFlowProps) {
               <div className="rounded-lg bg-muted/40 border p-4 space-y-2">
                 {[
                   { done: true, text: "Защищённый канал создан" },
-                  { done: packageDownloaded || true, text: "Пакет для специалиста подготовлен" },
-                  { done: pollStatus === "connected", text: "Первая синхронизация выполнена" },
+                  { done: fileDownloaded || true, text: "Файл подключения подготовлен" },
+                  { done: pollStatus === "connected", text: "Первое соединение установлено" },
                 ].map((item) => (
                   <div key={item.text} className="flex items-center gap-2 text-sm">
                     {item.done ? (
@@ -765,15 +802,13 @@ function OneCSetupFlow({ onBack, onDone }: SetupFlowProps) {
                 ))}
               </div>
 
-              <div className="flex gap-2">
-                <Button
-                  variant={pollStatus === "connected" ? "default" : "outline"}
-                  className="flex-1"
-                  onClick={handleFinish}
-                >
-                  {pollStatus === "connected" ? "Открыть панель управления →" : "Открыть панель сейчас"}
-                </Button>
-              </div>
+              <Button
+                variant={pollStatus === "connected" ? "default" : "outline"}
+                className="w-full"
+                onClick={handleFinish}
+              >
+                {pollStatus === "connected" ? "Открыть панель управления →" : "Открыть панель сейчас"}
+              </Button>
             </div>
           )}
 
@@ -798,9 +833,7 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
   const [loading, setLoading] = useState(true);
   const [showDelete, setShowDelete] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [showInstructions, setShowInstructions] = useState(false);
 
-  // Reconnect state (generate new package from dashboard)
   const [reconnecting, setReconnecting] = useState(false);
   const [reconnectResult, setReconnectResult] = useState<SetupResult | null>(null);
 
@@ -824,7 +857,6 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  // Auto-refresh every 30s when status=setup
   useEffect(() => {
     if (integration.status !== "setup") return;
     const timer = setInterval(() => refresh(true), 30000);
@@ -862,7 +894,7 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
       const data: SetupResult = await apiFetch("/api/integrations/quick-setup", { method: "POST" });
       setReconnectResult(data);
       await refresh(true);
-      toast({ title: "Новый пакет готов", description: "Скачайте и передайте специалисту по 1С." });
+      toast({ title: "Новый файл готов", description: "Скачайте и передайте специалисту по 1С." });
     } catch (e: unknown) {
       toast({ title: "Ошибка", description: `${e instanceof Error ? e.message : String(e)}`, variant: "destructive" });
     } finally {
@@ -890,7 +922,7 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
               </div>
               <h1 className="text-xl font-bold">1С:Предприятие</h1>
               <span
-                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border ${status.color}`}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border ${status.colorClass}`}
               >
                 {status.icon}
                 {status.label}
@@ -909,16 +941,16 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
         <Alert className="border-amber-200 bg-amber-50">
           <Clock className="w-4 h-4 text-amber-600" />
           <AlertDescription className="text-amber-900 ml-2 text-sm">
-            <strong>Ожидаем первую синхронизацию.</strong>{" "}
-            Попросите специалиста по 1С нажать «Отправить заявки». Или{" "}
+            <strong>Ожидаем первое подключение.</strong>{" "}
+            Попросите специалиста по 1С открыть SmartRoute.epf и проверить соединение. Или{" "}
             <button
               className="underline font-medium hover:no-underline"
               onClick={handleReconnect}
               disabled={reconnecting}
             >
-              сгенерируйте новый пакет
+              сгенерируйте новый файл
             </button>
-            , если пакет был утерян.
+            , если файл был утерян.
           </AlertDescription>
         </Alert>
       )}
@@ -928,7 +960,7 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
           <AlertTriangle className="w-4 h-4 text-red-600" />
           <AlertDescription className="text-red-900 ml-2 text-sm">
             <strong>Ошибка синхронизации.</strong>{" "}
-            Проверьте журнал ниже — там указана причина. Распространённые причины: истёкший ключ доступа, нет выхода в интернет с сервера 1С, изменилась структура документа.
+            Проверьте журнал ниже — там указана причина. Распространённые причины: истёкший ключ доступа, нет выхода в интернет с сервера 1С.
           </AlertDescription>
         </Alert>
       )}
@@ -952,24 +984,24 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
         </Alert>
       )}
 
-      {/* Reconnect result: new package ready to download */}
+      {/* New file ready after reconnect */}
       {reconnectResult && (
         <div className="rounded-lg border-2 border-emerald-200 bg-emerald-50 p-4 space-y-3">
           <p className="text-sm font-semibold text-emerald-800 flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4" /> Новый пакет готов
+            <CheckCircle2 className="w-4 h-4" /> Новый файл подключения готов
           </p>
           <p className="text-xs text-emerald-700">
-            Скачайте и передайте специалисту. Старый ключ больше не активен.
+            Скачайте архив и передайте специалисту. Старый ключ доступа деактивирован.
           </p>
           <div className="flex flex-wrap gap-2">
             <Button
               size="sm"
               onClick={() => {
-                downloadZip(reconnectResult.package_b64, "SmartRoute_1C.zip");
-                toast({ title: "Пакет скачан" });
+                downloadZip(reconnectResult.package_b64, "SmartRoute_Setup.zip");
+                toast({ title: "Файл скачан" });
               }}
             >
-              <Download className="w-3.5 h-3.5 mr-1.5" /> Скачать SmartRoute_1C.zip
+              <Download className="w-3.5 h-3.5 mr-1.5" /> Скачать SmartRoute_Setup.zip
             </Button>
             <Button size="sm" variant="outline" onClick={() => setReconnectResult(null)}>
               Закрыть
@@ -983,7 +1015,7 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
         {[
           { label: "Синхронизаций", value: stats.total_syncs, icon: <RefreshCw className="w-4 h-4" />, color: "text-blue-600" },
           { label: "Заказов загружено", value: stats.total_orders, icon: <Package className="w-4 h-4" />, color: "text-emerald-600" },
-          { label: "Магазинов найдено", value: stats.total_matched, icon: <CheckCircle2 className="w-4 h-4" />, color: "text-emerald-600" },
+          { label: "Точек найдено", value: stats.total_matched, icon: <CheckCircle2 className="w-4 h-4" />, color: "text-emerald-600" },
           {
             label: "Ошибок",
             value: stats.total_errors,
@@ -1016,7 +1048,7 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
               <Wifi className="w-10 h-10 text-muted-foreground/30 mx-auto mb-3" />
               <p className="text-sm font-medium text-muted-foreground">Синхронизаций ещё не было</p>
               <p className="text-xs text-muted-foreground mt-1">
-                Когда специалист по 1С запустит модуль — здесь появится история.
+                Когда специалист запустит файл SmartRoute.epf — здесь появится история.
               </p>
             </div>
           ) : (
@@ -1082,14 +1114,14 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
         </CardHeader>
         {showSettings && (
           <CardContent className="pt-0 space-y-4">
-            {/* Reconnect section */}
+            {/* Reconnect */}
             <div className="rounded-lg border p-4 space-y-2">
               <div className="flex items-start gap-3">
                 <RotateCcw className="w-4 h-4 text-muted-foreground mt-0.5 shrink-0" />
                 <div className="flex-1">
-                  <p className="text-sm font-medium">Пересоздать пакет</p>
+                  <p className="text-sm font-medium">Пересоздать файл подключения</p>
                   <p className="text-xs text-muted-foreground mt-0.5">
-                    Создаст новый API-ключ и скачает обновлённый пакет для специалиста. Старый ключ перестанет работать.
+                    Создаст новый ключ доступа и скачает обновлённый файл для специалиста. Старый ключ перестанет работать.
                   </p>
                 </div>
               </div>
@@ -1103,12 +1135,12 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
                 {reconnecting ? (
                   <><Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" /> Создаём...</>
                 ) : (
-                  <><RotateCcw className="w-3.5 h-3.5 mr-2" /> Пересоздать пакет</>
+                  <><RotateCcw className="w-3.5 h-3.5 mr-2" /> Пересоздать файл подключения</>
                 )}
               </Button>
             </div>
 
-            {/* URL display */}
+            {/* URL for reference */}
             <div className="space-y-1">
               <p className="text-xs font-medium text-muted-foreground">Адрес SmartRoute (для справки):</p>
               <div className="flex items-center gap-2 bg-muted rounded border px-3 py-2">
@@ -1117,38 +1149,25 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
               </div>
             </div>
 
-            {/* Programmer instructions (collapsed) */}
-            <div className="rounded-lg border overflow-hidden">
-              <button
-                className="flex items-center justify-between w-full px-4 py-2.5 text-sm font-medium hover:bg-muted/50 transition-colors"
-                onClick={() => setShowInstructions((v) => !v)}
-              >
-                <span className="text-sm">Инструкция для специалиста по 1С</span>
-                <ChevronDown
-                  className={`w-4 h-4 text-muted-foreground transition-transform ${showInstructions ? "rotate-180" : ""}`}
-                />
-              </button>
-              {showInstructions && (
-                <div className="px-4 pb-4 border-t bg-muted/20">
-                  <ol className="space-y-2 pt-3">
-                    {[
-                      "Конфигуратор → Файл → Новый → Внешняя обработка. Имя: SmartRoute.",
-                      "Формы → Добавить → Произвольная форма. Перейти на вкладку «Модуль».",
-                      "Скопировать содержимое SmartRoute.bsl и вставить в модуль формы.",
-                      "Файл → Сохранить как → SmartRoute.epf.",
-                      "Открыть SmartRoute.epf в режиме Предприятия → «Проверить соединение» → ожидается ✅.",
-                      "Регламентные задания: метод ОтправитьЗаявкиВSmartRoute, расписание ежедневно в 07:30.",
-                    ].map((text, i) => (
-                      <li key={i} className="flex gap-3 text-xs">
-                        <span className="w-4 h-4 rounded-full bg-primary/10 text-primary text-xs flex items-center justify-center shrink-0 font-semibold mt-0.5">
-                          {i + 1}
-                        </span>
-                        <span className="text-muted-foreground">{text}</span>
-                      </li>
-                    ))}
-                  </ol>
+            {/* Specialist page link */}
+            <div className="rounded-lg border p-3 bg-muted/30">
+              <div className="flex items-start gap-3">
+                <FileText className="w-4 h-4 text-muted-foreground mt-0.5 shrink-0" />
+                <div className="flex-1">
+                  <p className="text-sm font-medium mb-0.5">Техническая документация</p>
+                  <p className="text-xs text-muted-foreground mb-2">
+                    Полная инструкция для специалиста по 1С с техническими деталями.
+                  </p>
+                  <a
+                    href="/integrations/1c/specialist"
+                    target="_blank"
+                    className="inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:underline"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    Открыть страницу для специалиста
+                  </a>
                 </div>
-              )}
+              </div>
             </div>
 
             {/* Toggle / Delete */}
@@ -1183,10 +1202,10 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
           </CardHeader>
           <CardContent className="grid sm:grid-cols-2 gap-3">
             {[
-              { title: "Неверный API-ключ", fix: "Пересоздайте пакет выше — новый ключ создастся автоматически." },
+              { title: "Истёк ключ доступа", fix: "Пересоздайте файл подключения выше — новый ключ создастся автоматически." },
               { title: "Нет интернета с сервера 1С", fix: "Убедитесь, что с сервера 1С открыт исходящий порт 443." },
-              { title: "Магазины не найдены", fix: 'Добавьте точки в SmartRoute → раздел «Магазины».' },
-              { title: "Ошибка формата данных", fix: "Проверьте имена реквизитов в коде 1С — они должны совпадать с вашей конфигурацией." },
+              { title: "Точки доставки не найдены", fix: 'Добавьте точки в SmartRoute → раздел «Магазины».' },
+              { title: "Ошибка формата данных", fix: "Обратитесь к специалисту по 1С — нужно проверить настройки выгрузки." },
             ].map((item) => (
               <div key={item.title} className="rounded-lg border bg-red-50 p-3">
                 <p className="text-xs font-semibold text-red-800">{item.title}</p>
@@ -1204,7 +1223,7 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
             <AlertDialogTitle>Удалить интеграцию?</AlertDialogTitle>
             <AlertDialogDescription>
               Настройки и журнал синхронизаций будут удалены. Заказы, уже переданные в SmartRoute, останутся.
-              Специалисту нужно будет обновить ключ в модуле 1С.
+              Специалисту понадобится новый файл подключения.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -1265,7 +1284,6 @@ export function IntegrationsPage() {
       <OneCDashboard
         integration={integration}
         onBack={async () => {
-          // Reload from API so landing correctly shows existing integration status
           setView("loading");
           await loadIntegrations();
         }}

@@ -44,6 +44,20 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ── EPF integration file paths ─────────────────────────────────────────────────
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", ".."))
+_EPF_PATH = os.path.join(_PROJECT_ROOT, "artifacts", "integrations", "1c", "SmartRoute.epf")
+_EPF_VERSION_PATH = os.path.join(_PROJECT_ROOT, "artifacts", "integrations", "1c", "version.json")
+_EPF_IS_PLACEHOLDER: bool = True  # updated at startup after reading version.json
+try:
+    with open(_EPF_VERSION_PATH, "r", encoding="utf-8") as _vf:
+        _epf_meta = json.load(_vf)
+    _EPF_IS_PLACEHOLDER = _epf_meta.get("status") == "placeholder"
+except Exception:
+    _epf_meta = {}
+    _EPF_IS_PLACEHOLDER = True
+
 app = FastAPI(title="SmartRoute API")
 
 # ALLOWED_ORIGINS env var — comma-separated list of allowed origins.
@@ -7205,79 +7219,102 @@ def _generate_1c_zip(base_url: str, api_key: str) -> bytes:
     """Build a personalised ZIP package for the 1C specialist.
 
     Contents:
-      SmartRoute_1C/SmartRoute.bsl   — BSL module with URL + key pre-filled
-      SmartRoute_1C/Инструкция.txt  — plain-text instructions in Russian
+      SmartRoute.epf        — connector file (real or placeholder)
+      Инструкция.txt        — plain-text instructions (two sections: director + specialist)
+      SmartRoute.bsl        — BSL source (always included for manual setup fallback)
     """
     import datetime as _dt
     today = _dt.date.today().strftime("%d.%m.%Y")
 
+    # Try to read the real EPF from disk; fall back to a stub placeholder
+    try:
+        with open(_EPF_PATH, "rb") as _ef:
+            epf_bytes = _ef.read()
+        epf_note = ""
+    except OSError:
+        epf_bytes = b"SmartRoute.epf placeholder - replace with real file"
+        epf_note = (
+            "ВНИМАНИЕ: SmartRoute.epf в этом архиве является заглушкой.\n"
+            "Используйте вместо него SmartRoute.bsl для ручной сборки EPF.\n\n"
+        )
+
     bsl = _1C_BSL_MODULE.replace("{{BASE_URL}}", base_url).replace("{{API_KEY}}", api_key)
 
     readme = (
-        "SmartRoute — Пакет интеграции для 1С:Предприятие 8.3+\n"
-        "=====================================================\n"
+        "SmartRoute — Пакет подключения к 1С:Предприятие\n"
+        "=================================================\n"
         f"Дата создания: {today}\n"
         "\n"
         "ЧТО В ЭТОМ АРХИВЕ:\n"
-        "  SmartRoute.bsl       — программный модуль (URL и ключ уже встроены)\n"
+        "  SmartRoute.epf       — файл подключения SmartRoute\n"
+        "  SmartRoute.bsl       — исходный код (для специалиста по 1С)\n"
         "  Инструкция.txt       — эта инструкция\n"
         "\n"
+        + epf_note +
         "────────────────────────────────────────────────────\n"
-        "ДЛЯ ДИРЕКТОРА / ЛОГИСТА\n"
+        "ДЛЯ РУКОВОДИТЕЛЯ / ЛОГИСТА\n"
         "────────────────────────────────────────────────────\n"
-        "Передайте этот ZIP-архив специалисту по 1С.\n"
+        "Передайте файл SmartRoute.epf и эту инструкцию специалисту по 1С.\n"
         "Установка займёт 15–30 минут.\n"
         "После установки заказы будут передаваться\n"
-        "в SmartRoute автоматически каждое утро.\n"
+        "в SmartRoute автоматически каждое утро в 07:30.\n"
         "\n"
         "────────────────────────────────────────────────────\n"
         "ДЛЯ СПЕЦИАЛИСТА ПО 1С\n"
         "────────────────────────────────────────────────────\n"
         "\n"
-        "1. СОЗДАЙТЕ ВНЕШНЮЮ ОБРАБОТКУ\n"
-        "   Откройте 1С:Предприятие в режиме Конфигуратора.\n"
-        "   Файл → Новый → Внешняя обработка\n"
-        "   Имя объекта: SmartRoute\n"
-        "   Синоним: SmartRoute — передача заявок\n"
+        "ВАРИАНТ А — установка готового EPF (рекомендуется)\n"
         "\n"
-        "2. ДОБАВЬТЕ ФОРМУ\n"
-        "   Дерево: Формы → кнопка «Добавить»\n"
-        "   Тип: Произвольная форма → ОК\n"
-        "   Перейдите на вкладку «Модуль»\n"
+        "1. ОТКРОЙТЕ ФАЙЛ В 1С\n"
+        "   Запустите 1С:Предприятие (не Конфигуратор).\n"
+        "   Файл → Открыть → найдите SmartRoute.epf\n"
         "\n"
-        "3. ВСТАВЬТЕ КОД\n"
-        "   Откройте файл SmartRoute.bsl из этого архива\n"
-        "   Скопируйте всё содержимое (Ctrl+A → Ctrl+C)\n"
-        "   Вставьте в модуль формы (Ctrl+V)\n"
+        "2. ВВЕДИТЕ НАСТРОЙКИ\n"
+        f"   Адрес SmartRoute: {base_url}\n"
+        f"   API-ключ:          {api_key}\n"
         "\n"
-        "4. СОХРАНИТЕ КАК EPF\n"
-        "   Файл → Сохранить как... → тип «Внешняя обработка (*.epf)»\n"
-        "   Имя файла: SmartRoute\n"
-        "\n"
-        "5. ПРОВЕРЬТЕ СОЕДИНЕНИЕ\n"
-        "   Откройте SmartRoute.epf в режиме Предприятия\n"
-        "   (Файл → Открыть → найдите SmartRoute.epf)\n"
-        "   Нажмите «Проверить соединение»\n"
+        "3. НАЖМИТЕ «Проверить соединение»\n"
         "   Ожидаемый результат: «✅ Соединение успешно. SmartRoute подключён.»\n"
         "\n"
-        "6. НАСТРОЙТЕ РАСПИСАНИЕ (для автоматической отправки)\n"
-        "   Конфигуратор → Регламентные задания → Добавить\n"
+        "4. НАСТРОЙТЕ РАСПИСАНИЕ\n"
+        "   Меню → Сервис → Регламентные задания → Добавить\n"
         "   Метод: ОтправитьЗаявкиВSmartRoute\n"
         "   Расписание: ежедневно в 07:30\n"
         "\n"
-        "ВСТРОЕННЫЕ НАСТРОЙКИ:\n"
+        "────────────────────────────────────────────────────\n"
+        "ВАРИАНТ Б — сборка EPF из исходного кода (если EPF не открывается)\n"
+        "\n"
+        "1. Откройте 1С:Предприятие в режиме Конфигуратора.\n"
+        "   Файл → Новый → Внешняя обработка. Имя: SmartRoute\n"
+        "\n"
+        "2. Формы → Добавить → Произвольная форма → ОК\n"
+        "   Перейдите на вкладку «Модуль»\n"
+        "\n"
+        "3. Откройте SmartRoute.bsl из этого архива.\n"
+        "   Скопируйте всё содержимое и вставьте в модуль формы.\n"
+        "   (URL и API-ключ уже встроены в код — менять не нужно)\n"
+        "\n"
+        "4. Файл → Сохранить как... → тип «Внешняя обработка (*.epf)»\n"
+        "   Имя: SmartRoute\n"
+        "\n"
+        "5. Откройте SmartRoute.epf в режиме Предприятия.\n"
+        "   Нажмите «Проверить соединение» → ожидается ✅\n"
+        "\n"
+        "6. Настройте регламентное задание как в Варианте А, шаг 4.\n"
+        "\n"
+        "────────────────────────────────────────────────────\n"
+        "ПАРАМЕТРЫ ПОДКЛЮЧЕНИЯ (уже встроены в SmartRoute.bsl):\n"
         f"  URL:      {base_url}\n"
         f"  API-ключ: {api_key}\n"
-        "\n"
-        "(Менять не нужно — уже встроены в SmartRoute.bsl)\n"
         "\n"
         "ПОДДЕРЖКА: support@smartroute.app\n"
     )
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("SmartRoute_1C/SmartRoute.bsl", bsl.encode("utf-8-sig"))
-        zf.writestr("SmartRoute_1C/Инструкция.txt", readme.encode("utf-8-sig"))
+        zf.writestr("SmartRoute.epf", epf_bytes)
+        zf.writestr("SmartRoute.bsl", bsl.encode("utf-8-sig"))
+        zf.writestr("Инструкция.txt", readme.encode("utf-8-sig"))
     return buf.getvalue()
 
 
@@ -7374,6 +7411,19 @@ def quick_setup_integration(request: Request):
         "full_key": full_key,      # shown ONCE on screen
         "base_url": base_url,
         "package_b64": package_b64,  # ready-to-download ZIP
+    }
+
+
+@app.get("/api/integrations/1c/epf-info")
+def get_epf_info(request: Request):
+    """Return metadata about the SmartRoute.epf connector file."""
+    get_user_id(request)
+    available = os.path.exists(_EPF_PATH)
+    return {
+        "available": available,
+        "is_placeholder": _EPF_IS_PLACEHOLDER,
+        "version": _epf_meta.get("version", "unknown"),
+        "min_1c_version": _epf_meta.get("min_1c_version", "8.3"),
     }
 
 
