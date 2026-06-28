@@ -59,6 +59,7 @@ interface Integration {
     total_matched: number;
     total_errors: number;
   };
+  pending_stores?: number;
 }
 
 interface SyncLog {
@@ -961,6 +962,19 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
           <AlertDescription className="text-red-900 ml-2 text-sm">
             <strong>Ошибка синхронизации.</strong>{" "}
             Проверьте журнал ниже — там указана причина. Распространённые причины: истёкший ключ доступа, нет выхода в интернет с сервера 1С.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {(integration.pending_stores ?? 0) > 0 && (
+        <Alert className="border-amber-200 bg-amber-50">
+          <AlertTriangle className="w-4 h-4 text-amber-600" />
+          <AlertDescription className="text-amber-900 ml-2 text-sm">
+            <strong>{integration.pending_stores} {(integration.pending_stores ?? 0) === 1 ? "новый магазин создан" : "новых магазина создано"} автоматически из 1С</strong> — без координат.{" "}
+            Маршруты для них будут неточными.{" "}
+            <a href="/stores" className="underline font-medium hover:no-underline">
+              Перейти в раздел Магазины → геокодировать
+            </a>
           </AlertDescription>
         </Alert>
       )}
