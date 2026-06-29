@@ -6131,8 +6131,10 @@ def build_route(request: Request, body: RouteRequest):
     all_coords = [(depot_lat, depot_lon)] + [(s["lat"], s["lon"]) for s in store_list]
 
     # ── Daily orders: look up weight / volume per store ───────────────────────
-    # Loaded for today's date; used both for VRP capacity demands (when vehicle
-    # capacity_kg is set) and for annotating result stores with actual load data.
+    # Loaded for the requested delivery_date (falls back to today when not set).
+    # Used both for VRP capacity demands (when vehicle capacity_kg is set) and
+    # for annotating result stores with actual load data.
+    _orders_date = body.delivery_date if body.delivery_date else str(date.today())
     _store_weights: dict = {}
     _store_volumes: dict = {}
     try:
@@ -6143,7 +6145,7 @@ def build_route(request: Request, body: RouteRequest):
                  FROM daily_orders
                 WHERE owner_id = %s AND delivery_date = %s AND store_id IS NOT NULL
                 GROUP BY store_id""",
-            (uid, str(date.today()))
+            (uid, _orders_date)
         )
         for _r in _cur_w.fetchall():
             _store_weights[int(_r[0])] = float(_r[1])

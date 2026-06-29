@@ -60,6 +60,17 @@ function getNavSegments(route: VehicleRouteWithUrls): string[] {
 // Per-segment copy state key: `${routeIndex}-${segmentIndex}`
 type CopiedSegKey = `${number}-${number}`;
 
+// Strips unnecessary ×1 suffixes from a products string so items that appear
+// only once don't show a redundant multiplier.  E.g. "Хлеб×1, Молоко×3" → "Хлеб, Молоко×3".
+function formatProductsString(s: string): string {
+  if (!s) return s;
+  return s
+    .split(",")
+    .map((p) => p.trim().replace(/^(.+?)×1$/, "$1"))
+    .filter(Boolean)
+    .join(", ");
+}
+
 // Aggregates "Молоко×4, Сахар×16" strings from all stops into one summary string.
 // Parses "Item×N" pattern, sums quantities by name, returns compact list.
 function aggregateProducts(stops: Array<Record<string, unknown>>): string {
@@ -81,7 +92,7 @@ function aggregateProducts(stops: Array<Record<string, unknown>>): string {
   }
   if (totals.size === 0) return "";
   return Array.from(totals.entries())
-    .map(([name, qty]) => `${name}×${Math.round(qty)}`)
+    .map(([name, qty]) => qty > 1 ? `${name}×${Math.round(qty)}` : name)
     .join(", ");
 }
 
@@ -182,7 +193,7 @@ export function ResultPage() {
         ? products.map((pr) => `
           <div class="prow">
             <span class="pname">${pr.name}</span>
-            <span class="pqty">${pr.qty !== null ? `× ${pr.qty} шт.` : ""}</span>
+            <span class="pqty">${pr.qty !== null && pr.qty > 1 ? `× ${pr.qty} шт.` : ""}</span>
           </div>`).join("")
         : `<div class="prow" style="color:#94a3b8;font-style:italic">Нет данных о товарах</div>`;
       return `
@@ -389,7 +400,7 @@ export function ResultPage() {
                 {(stop as any).products && (
                   <p className="text-sm text-muted-foreground mt-1.5 leading-snug">
                     <span className="text-xs">📦</span>{" "}
-                    <span>{(stop as any).products}</span>
+                    <span>{formatProductsString((stop as any).products)}</span>
                     {(stop as any).weight_kg > 0 && (
                       <span className="text-xs text-muted-foreground/70 ml-1">· {(stop as any).weight_kg} кг</span>
                     )}
@@ -614,7 +625,7 @@ export function ResultPage() {
                           Порядок: {stop.order}<br />
                           Авто: {route.vehicle_name}
                           {(stop as any).products && (
-                            <><br />📦 {(stop as any).products}</>
+                            <><br />📦 {formatProductsString((stop as any).products)}</>
                           )}
                         </Popup>
                       </Marker>
@@ -704,7 +715,7 @@ export function ResultPage() {
                     <td style={{ border: '1px solid #bbb', padding: '4px 5px', fontSize: '10px', lineHeight: '1.35', verticalAlign: 'top' }}>
                       {(stop as any).products ? (
                         <>
-                          <span style={{ display: 'block', wordBreak: 'break-word' }}>{(stop as any).products}</span>
+                          <span style={{ display: 'block', wordBreak: 'break-word' }}>{formatProductsString((stop as any).products)}</span>
                           {((stop as any).quantity ?? 0) > 0 && (
                             <span style={{ display: 'block', color: '#666', marginTop: '1px' }}>
                               итого {Math.round((stop as any).quantity)} шт.
@@ -887,7 +898,7 @@ export function ResultPage() {
                             {(stop as any).products && (
                               <p className="text-xs text-sky-700/80 mt-1 leading-snug">
                                 <span>📦</span>{" "}
-                                <span>{(stop as any).products}</span>
+                                <span>{formatProductsString((stop as any).products)}</span>
                                 {(stop as any).weight_kg > 0 && (
                                   <span className="text-muted-foreground/60 ml-1">· {(stop as any).weight_kg} кг</span>
                                 )}
