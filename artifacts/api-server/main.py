@@ -3986,13 +3986,16 @@ def _normalize_for_dedup(s) -> str:
 
 
 # ── Extended keyword lists (SmartRoute + 1C terms) ─────────────────────────
-_KWORDS_NAME    = ["контрагент", "клиент", "покупатель", "store name", "назван", "name", "store_name"]
+_KWORDS_NAME    = ["покупатель", "store name", "назван", "name", "store_name", "магазин"]
 _KWORDS_ADDRESS = ["адрес доставки", "адрес", "address"]
 _KWORDS_CITY    = ["город", "city"]
 _KWORDS_YANDEX  = ["ссылка яндекс", "яндекс", "yandex", "ссылка"]
 _KWORDS_UNLOAD  = ["разгрузка", "unload"]
 _KWORDS_FROM    = ["время с", "open_time", "с (", "time_from"]
 _KWORDS_TO      = ["время до", "close_time", "до (", "time_to"]
+_KWORDS_PHONE   = ["телефон", "phone", "тел.", "тел "]
+# "контрагент" / "клиент" listed here but NOT in _KWORDS_NAME to avoid same-column clash
+_KWORDS_CLIENT  = ["контрагент", "клиент", "client", "заказчик"]
 
 
 def _detect_col(header_lower: list, candidates: list) -> Optional[int]:
@@ -4000,6 +4003,63 @@ def _detect_col(header_lower: list, candidates: list) -> Optional[int]:
         for i, h in enumerate(header_lower):
             if kw in h:
                 return i
+    return None
+
+
+def _col_content_warning(col_idx: Optional[int], data_rows: list, field: str) -> Optional[str]:
+    """Return a warning string if the column's sample data looks wrong for the given field.
+    Samples up to 20 non-empty values from data_rows at col_idx."""
+    if col_idx is None:
+        return None
+    samples = []
+    for row in data_rows[:50]:
+        v = str(row[col_idx]).strip() if col_idx < len(row) and row[col_idx] is not None else ""
+        if v:
+            samples.append(v)
+        if len(samples) >= 20:
+            break
+    if not samples:
+        return "Колонка пустая — нет данных для импорта"
+
+    def _is_numeric(s: str) -> bool:
+        return s.replace(" ", "").replace(",", "").replace(".", "").replace("-", "").replace("+", "").isdigit()
+
+    numeric_count = sum(1 for s in samples if _is_numeric(s))
+    numeric_ratio = numeric_count / len(samples)
+
+    if field == "city":
+        if numeric_ratio >= 0.5:
+            return "Похоже, в этой колонке числа, а не названия городов"
+        avg_len = sum(len(s) for s in samples) / len(samples)
+        if avg_len > 35:
+            return "Значения слишком длинные для города — возможно, это адреса"
+        if avg_len < 2:
+            return "Значения слишком короткие для названия города"
+
+    elif field == "address":
+        if numeric_ratio >= 0.7:
+            return "Похоже, в этой колонке числа, а не адреса"
+        avg_len = sum(len(s) for s in samples) / len(samples)
+        if avg_len < 4:
+            return "Значения слишком короткие для адресов"
+
+    elif field == "name":
+        if numeric_ratio >= 0.8:
+            return "Похоже, в этой колонке числа, а не названия"
+
+    elif field == "unload":
+        non_numeric = sum(1 for s in samples if not _is_numeric(s))
+        if non_numeric / len(samples) > 0.5:
+            return "Ожидаются числа (минуты), но большинство значений — не числа"
+
+    elif field == "phone":
+        def _looks_like_phone(s: str) -> bool:
+            digits = sum(c.isdigit() for c in s)
+            return digits >= 7
+        bad = sum(1 for s in samples if not _looks_like_phone(s))
+        if bad / len(samples) > 0.5:
+            return "Значения не похожи на номера телефонов"
+
     return None
 
 
@@ -4049,12 +4109,21 @@ async def preview_import(request: Request, file: UploadFile = File(...)):
     c_unload  = _detect_col(header_lower, _KWORDS_UNLOAD)
     c_from    = _detect_col(header_lower, _KWORDS_FROM)
     c_to      = _detect_col(header_lower, _KWORDS_TO)
+    c_phone   = _detect_col(header_lower, _KWORDS_PHONE)
+    c_client  = _detect_col(header_lower, _KWORDS_CLIENT)
 
     # Positional fallback for unrecognised headers (old SmartRoute template)
     if c_name is None:
         c_name = 0
     if c_address is None and c_yandex is None and len(columns) > 1:
         c_address = 1
+
+    # ── Conflict resolution: no two fields may share the same column index ────
+    # When "контрагент" matches both name and client, prefer name (primary key).
+    if c_client is not None and c_client == c_name:
+        c_client = None
+    if c_phone is not None and c_phone in (c_name, c_address, c_city):
+        c_phone = None
 
     # Count unique points after dedup (name + address) for info display
     seen: set = set()
@@ -4170,6 +4239,7 @@ async def preview_import(request: Request, file: UploadFile = File(...)):
         "existing_count": existing_count,
         "new_count": new_count,
         "matches": matches,
+        "column_warnings": column_warnings,
         "mapping": {
             "name":    c_name,
             "address": c_address,
@@ -4178,6 +4248,8 @@ async def preview_import(request: Request, file: UploadFile = File(...)):
             "unload":  c_unload,
             "tw_from": c_from,
             "tw_to":   c_to,
+            "phone":   c_phone,
+            "client":  c_client,
         },
     }
 
@@ -4210,6 +4282,8 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
         c_unload    = mapping.get("unload")
         c_from      = mapping.get("tw_from")
         c_to        = mapping.get("tw_to")
+        c_phone     = mapping.get("phone")
+        c_client    = mapping.get("client")
         default_city = str(mapping.get("default_city") or "").strip()
         # lat/lon/mapurl always auto-detected (not exposed in mapping UI)
         c_lat    = _detect_col(header_row, ["широта", "lat", "latitude"])
@@ -4227,6 +4301,8 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
         c_unload = _detect_col(header_row, _KWORDS_UNLOAD)
         c_from   = _detect_col(header_row, _KWORDS_FROM)
         c_to     = _detect_col(header_row, _KWORDS_TO)
+        c_phone  = _detect_col(header_row, _KWORDS_PHONE)
+        c_client = _detect_col(header_row, _KWORDS_CLIENT)
 
     if c_name is None:
         c_name = 0
@@ -4294,6 +4370,8 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
         address    = f"{city}, {raw_addr}" if city and city not in raw_addr else raw_addr
         if not address:
             address = city
+        phone      = str(_get(row, c_phone, "")).strip() if c_phone is not None else ""
+        client     = str(_get(row, c_client, "")).strip() if c_client is not None else ""
 
         if not name or (not yandex_url and not address):
             failed += 1
@@ -4438,17 +4516,20 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
             if existing_store_id and import_mode == "update":
                 # Update existing store in-place
                 cur2.execute(
-                    """UPDATE stores SET name=%s, address=%s, city=%s, lat=%s, lon=%s, map_url=%s,
+                    """UPDATE stores SET name=%s, address=%s, city=%s, phone=%s, client=%s,
+                       lat=%s, lon=%s, map_url=%s,
                        geocode_status=%s, time_window_from=%s, time_window_to=%s, unload_minutes=%s
                        WHERE id=%s AND owner_id=%s RETURNING *""",
-                    (name, address, city, lat, lon, final_map_url, status, tw_from, tw_to, unload,
-                     existing_store_id, owner_id),
+                    (name, address, city, phone, client, lat, lon, final_map_url, status,
+                     tw_from, tw_to, unload, existing_store_id, owner_id),
                 )
             else:
                 cur2.execute(
-                    """INSERT INTO stores (name, address, city, lat, lon, map_url, geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
-                    (name, address, city, lat, lon, final_map_url, status, tw_from, tw_to, unload, owner_id),
+                    """INSERT INTO stores (name, address, city, phone, client, lat, lon, map_url,
+                       geocode_status, time_window_from, time_window_to, unload_minutes, owner_id)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+                    (name, address, city, phone, client, lat, lon, final_map_url,
+                     status, tw_from, tw_to, unload, owner_id),
                 )
 
             db_row = cur2.fetchone()

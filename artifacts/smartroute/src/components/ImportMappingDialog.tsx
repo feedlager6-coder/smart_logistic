@@ -20,6 +20,8 @@ interface MappingState {
   unload: number | null;
   tw_from: number | null;
   tw_to: number | null;
+  phone: number | null;
+  client: number | null;
 }
 
 interface MatchEntry {
@@ -41,6 +43,52 @@ interface PreviewData {
   new_count: number;
   matches: MatchEntry[];
   mapping: MappingState;
+  column_warnings: Record<string, string>;
+}
+
+// ── Client-side column quality heuristics ────────────────────────────────────
+// Runs against the 5-row preview sample so warnings update instantly when the
+// user remaps a column — no extra backend round-trip needed.
+function getColumnWarning(
+  field: keyof MappingState,
+  colIdx: number | null,
+  rows: string[][]
+): string | null {
+  if (colIdx === null) return null;
+  const samples = rows.map((r) => (r[colIdx] ?? "").trim()).filter(Boolean);
+  if (samples.length === 0) return "Колонка пустая — нет данных для импорта";
+
+  const isNumericOnly = (s: string) =>
+    /^[\d\s,.+\-()\[\]\/\\]+$/.test(s) && /\d/.test(s);
+  const numericRatio =
+    samples.filter(isNumericOnly).length / samples.length;
+
+  if (field === "city") {
+    if (numericRatio >= 0.5)
+      return "Похоже, в этой колонке числа, а не названия городов";
+    const avgLen = samples.reduce((s, v) => s + v.length, 0) / samples.length;
+    if (avgLen > 35)
+      return "Значения слишком длинные для города — возможно, это адреса";
+    if (avgLen < 2) return "Значения слишком короткие для названия города";
+  } else if (field === "address") {
+    if (numericRatio >= 0.7)
+      return "Похоже, в этой колонке числа, а не адреса";
+    const avgLen = samples.reduce((s, v) => s + v.length, 0) / samples.length;
+    if (avgLen < 4) return "Значения слишком короткие для адресов";
+  } else if (field === "name") {
+    if (numericRatio >= 0.8)
+      return "Похоже, в этой колонке числа, а не названия";
+  } else if (field === "unload") {
+    const bad = samples.filter((s) => !/^\d+$/.test(s)).length;
+    if (bad / samples.length > 0.5)
+      return "Ожидаются числа (минуты), но большинство значений — не числа";
+  } else if (field === "phone") {
+    const looksLikePhone = (s: string) => (s.match(/\d/g) ?? []).length >= 7;
+    const bad = samples.filter((s) => !looksLikePhone(s)).length;
+    if (bad / samples.length > 0.5)
+      return "Значения не похожи на номера телефонов";
+  }
+  return null;
 }
 
 const REASON_META: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
@@ -72,6 +120,8 @@ const FIELD_LABELS: { key: keyof MappingState; label: string; required: boolean 
   { key: "address", label: "Адрес",                   required: false },
   { key: "city",    label: "Город (колонка)",          required: false },
   { key: "yandex",  label: "Ссылка Яндекс",           required: false },
+  { key: "phone",   label: "Телефон",                 required: false },
+  { key: "client",  label: "Клиент / Контрагент",     required: false },
   { key: "unload",  label: "Время разгрузки (мин)",   required: false },
   { key: "tw_from", label: "Временное окно — с",      required: false },
   { key: "tw_to",   label: "Временное окно — до",     required: false },
@@ -143,7 +193,7 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
   const [preview, setPreview] = useState<PreviewData | null>(null);
   const [mapping, setMapping] = useState<MappingState>({
     name: null, address: null, city: null, yandex: null,
-    unload: null, tw_from: null, tw_to: null,
+    unload: null, tw_from: null, tw_to: null, phone: null, client: null,
   });
   const [defaultCity, setDefaultCity] = useState<string>(() => {
     try { return localStorage.getItem(LS_CITY_KEY) ?? ""; } catch { return ""; }
@@ -430,19 +480,28 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
 
             {/* Mapping selects */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {FIELD_LABELS.map(({ key, label, required }) => (
-                <div key={key} className="space-y-1">
-                  <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                    {label}
-                    {required && <span className="text-destructive ml-1">*</span>}
-                  </Label>
-                  <ColSelect
-                    value={mapping[key]}
-                    columns={preview.columns}
-                    onChange={(v) => setField(key, v)}
-                  />
-                </div>
-              ))}
+              {FIELD_LABELS.map(({ key, label, required }) => {
+                const warn = getColumnWarning(key, mapping[key], preview.rows);
+                return (
+                  <div key={key} className="space-y-1">
+                    <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                      {label}
+                      {required && <span className="text-destructive ml-1">*</span>}
+                    </Label>
+                    <ColSelect
+                      value={mapping[key]}
+                      columns={preview.columns}
+                      onChange={(v) => setField(key, v)}
+                    />
+                    {warn && (
+                      <p className="flex items-start gap-1 text-[11px] text-amber-700 leading-snug">
+                        <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0 text-amber-500" />
+                        {warn}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
             </div>
 
             {/* Default city input */}
