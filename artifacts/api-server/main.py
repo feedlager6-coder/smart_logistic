@@ -3986,7 +3986,7 @@ def _normalize_for_dedup(s) -> str:
 
 
 # ── Extended keyword lists (SmartRoute + 1C terms) ─────────────────────────
-_KWORDS_NAME    = ["покупатель", "store name", "назван", "name", "store_name", "магазин"]
+_KWORDS_NAME    = ["контрагент", "покупатель", "store name", "назван", "name", "store_name", "магазин"]
 _KWORDS_ADDRESS = ["адрес доставки", "адрес", "address"]
 _KWORDS_CITY    = ["город", "city"]
 _KWORDS_YANDEX  = ["ссылка яндекс", "яндекс", "yandex", "ссылка"]
