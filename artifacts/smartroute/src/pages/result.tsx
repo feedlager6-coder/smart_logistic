@@ -152,79 +152,115 @@ export function ResultPage() {
 
   // Generates a loading sheet (загрузочный лист) in a new window with stops in REVERSE order.
   // Reverse order = last delivery stop loaded first (deepest in truck), first delivery stop last (by door).
+  // Products field ("Item×N, Item2×N2") is source-agnostic — works with Excel import and 1C integration alike.
   const handlePrintLoading = () => {
     if (!result) return;
     const date = new Date().toLocaleDateString("ru-RU");
-    const rows = (stops: RouteResult["routes"][number]["stores"]) =>
-      [...stops].reverse().map((stop, idx) => {
-        const products = (stop as any).products as string | undefined;
-        const qty = (stop as any).quantity as number | undefined;
-        const weight = (stop as any).weight_kg as number | undefined;
-        return `<tr>
-          <td class="c" style="font-weight:700;color:#1e3a5f">${idx + 1}</td>
-          <td style="font-weight:600">${stop.store_name}</td>
-          <td style="color:#444">${stop.address}</td>
-          <td style="font-size:10px;line-height:1.4">${
-            products
-              ? `${products}${qty && qty > 0 ? `<br><span style="color:#666">итого ${Math.round(qty)} шт.</span>` : ""}`
-              : "&nbsp;"
-          }</td>
-          <td class="c">${weight && weight > 0 ? weight : "&nbsp;"}</td>
-          <td>&nbsp;</td>
-        </tr>`;
-      }).join("");
+
+    // Parse "Молоко 1л×24, Масло×12" → [{name, qty}]. Forward-compatible with 1C data.
+    const parseProducts = (s: string): Array<{ name: string; qty: number | null }> => {
+      if (!s.trim()) return [];
+      return s.split(",").map((p) => {
+        const m = p.trim().match(/^(.+?)×(\d+(?:\.\d+)?)$/);
+        if (m) return { name: m[1].trim(), qty: Math.round(parseFloat(m[2])) };
+        return { name: p.trim(), qty: null };
+      }).filter((x) => x.name);
+    };
+
+    const stopBlock = (
+      stop: RouteResult["routes"][number]["stores"][number],
+      loadSeq: number,
+      totalStops: number
+    ) => {
+      const products = parseProducts((stop as any).products ?? "");
+      const weight = (stop as any).weight_kg as number | undefined;
+      const qty = (stop as any).quantity as number | undefined;
+      const isFirst = loadSeq === 1;
+      const isLast = loadSeq === totalStops;
+      const labelText = isFirst ? "← грузится первой (в глубину кузова)" : isLast ? "← грузится последней (у двери)" : "";
+      const productRows = products.length > 0
+        ? products.map((pr) => `
+          <div class="prow">
+            <span class="pname">${pr.name}</span>
+            <span class="pqty">${pr.qty !== null ? `× ${pr.qty} шт.` : ""}</span>
+          </div>`).join("")
+        : `<div class="prow" style="color:#94a3b8;font-style:italic">Нет данных о товарах</div>`;
+      return `
+        <div class="stop" style="page-break-inside:avoid">
+          <div class="stop-head">
+            <div class="seq">${loadSeq}</div>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:14px;font-weight:700;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${stop.store_name}</div>
+              <div style="font-size:11px;color:#64748b;margin-top:1px">${stop.address}</div>
+            </div>
+            ${labelText ? `<div style="font-size:9px;color:#94a3b8;white-space:nowrap;align-self:flex-end">${labelText}</div>` : ""}
+            <div class="chk-wrap"><span style="font-size:9px;color:#94a3b8;display:block;text-align:center;margin-bottom:2px">Загружено</span><div class="chk"></div></div>
+          </div>
+          <div class="stop-body">${productRows}</div>
+          ${weight || (qty && qty > 0) ? `
+          <div class="stop-foot">
+            <span></span>
+            <span>${qty && qty > 0 ? `Итого: ${Math.round(qty)} шт.` : ""}${weight && weight > 0 ? `${qty && qty > 0 ? " · " : ""}${weight} кг` : ""}</span>
+          </div>` : ""}
+        </div>`;
+    };
 
     const pages = result.routes.map((route, i) => {
       const summary = aggregateProducts(route.stores as unknown as Array<Record<string, unknown>>);
       const totalQty = route.stores.reduce((s, st) => s + ((st as any).quantity ?? 0), 0);
       const totalWeight = (route as any).total_weight_kg as number | undefined;
-      return `<div${i > 0 ? ' style="page-break-before:always;padding-top:16px"' : ""}>
-        <div class="hdr">
-          <div>
-            <div class="lbl">Загрузочный лист</div>
-            <div style="font-size:20px;font-weight:700">${route.vehicle_name}</div>
-            ${summary ? `<div class="sumbox"><strong>Загрузка:</strong> ${summary}${totalQty > 0 ? ` — итого ${Math.round(totalQty)} шт.` : ""}</div>` : ""}
+      const reversed = [...route.stores].reverse();
+      const blocks = reversed.map((stop, idx) => stopBlock(stop, idx + 1, reversed.length)).join("");
+      return `
+        <div${i > 0 ? ' style="page-break-before:always;padding-top:16px"' : ""}>
+          <div class="hdr">
+            <div>
+              <div class="lbl">Загрузочный лист</div>
+              <div style="font-size:22px;font-weight:700;color:#0f172a">${route.vehicle_name}</div>
+              ${summary ? `<div class="sumbox"><strong>Всего в машине:</strong> ${summary}${totalQty > 0 ? ` — ${Math.round(totalQty)} шт.` : ""}</div>` : ""}
+            </div>
+            <div style="text-align:right;font-size:11px;color:#555">
+              <div>Дата: <strong>${date}</strong></div>
+              <div style="margin-top:2px">${route.stores.length} точек · ${Math.round(route.total_km)} км</div>
+              ${totalWeight && totalWeight > 0 ? `<div style="font-weight:700;margin-top:2px">Вес: ${totalWeight} кг</div>` : ""}
+              <div style="margin-top:6px;font-size:10px;color:#94a3b8;border:1px solid #e2e8f0;border-radius:4px;padding:2px 6px">
+                № 1 — в кузов (первым) &nbsp;·&nbsp; № ${route.stores.length} — у двери (последним)
+              </div>
+            </div>
           </div>
-          <div style="text-align:right;font-size:11px;color:#555">
-            <div>Дата: <strong>${date}</strong></div>
-            <div style="margin-top:2px">${route.stores.length} точек · ${Math.round(route.total_km)} км</div>
-            ${totalWeight && totalWeight > 0 ? `<div style="font-weight:600;margin-top:2px">Вес: ${totalWeight} кг</div>` : ""}
-            <div style="font-size:10px;color:#999;margin-top:3px">↑ кабина · кузов ↓ (порядок загрузки)</div>
+          <div class="stops">${blocks}</div>
+          <div class="foot">
+            <span>Кладовщик: ________________________&nbsp; Подпись: ____________</span>
+            <span>Водитель: _________________________&nbsp; Подпись: ____________</span>
           </div>
-        </div>
-        <table>
-          <thead><tr>
-            <th class="c" style="width:36px">Загр.</th>
-            <th style="width:22%">Магазин</th>
-            <th style="width:22%">Адрес</th>
-            <th>Товар / кол-во</th>
-            <th class="c" style="width:55px">Вес, кг</th>
-            <th class="c" style="width:44px">✓</th>
-          </tr></thead>
-          <tbody>${rows(route.stores)}</tbody>
-        </table>
-        <div class="foot">
-          <span>Кладовщик: ________________________&nbsp; Подпись: ____________</span>
-          <span>Водитель: _________________________&nbsp; Подпись: ____________</span>
-        </div>
-      </div>`;
+        </div>`;
     }).join("");
+
+    const css = `
+      *{box-sizing:border-box;margin:0;padding:0}
+      body{font-family:Arial,sans-serif;font-size:12px;color:#111;padding:16px;background:#fff}
+      .lbl{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.6px;margin-bottom:3px}
+      .hdr{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #1e3a5f;padding-bottom:10px;margin-bottom:14px;gap:12px}
+      .sumbox{background:#eef4fb;border:1px solid #bfdbfe;border-radius:5px;padding:4px 9px;display:inline-block;margin-top:5px;color:#1e40af;font-size:10px}
+      .stops{display:flex;flex-direction:column;gap:8px}
+      .stop{border:1.5px solid #cbd5e1;border-radius:7px;overflow:hidden}
+      .stop-head{display:flex;align-items:center;gap:10px;padding:8px 12px;background:#f1f5f9;border-bottom:1px solid #e2e8f0}
+      .seq{width:36px;height:36px;border-radius:50%;background:#1e3a5f;color:#fff;font-size:16px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+      .chk-wrap{margin-left:8px;flex-shrink:0;display:flex;flex-direction:column;align-items:center}
+      .chk{width:22px;height:22px;border:2px solid #94a3b8;border-radius:4px}
+      .stop-body{padding:8px 12px}
+      .prow{display:flex;justify-content:space-between;align-items:baseline;padding:4px 0;border-bottom:1px dotted #e2e8f0;gap:8px}
+      .prow:last-child{border-bottom:none}
+      .pname{color:#1e293b;font-size:12px}
+      .pqty{font-weight:700;color:#1e3a5f;white-space:nowrap;font-size:12px}
+      .stop-foot{display:flex;justify-content:space-between;padding:5px 12px;background:#f8fafc;border-top:1px solid #e2e8f0;font-size:10px;color:#64748b;font-weight:600}
+      .foot{display:flex;gap:48px;margin-top:16px;font-size:11px;color:#333;padding-top:12px;border-top:1px solid #e2e8f0}
+      @media print{body{padding:8px}@page{margin:12mm}}
+    `;
 
     const html = `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
       <title>Загрузочный лист — SmartRoute</title>
-      <style>
-        body{font-family:Arial,sans-serif;font-size:11px;color:#111;margin:0;padding:16px}
-        .lbl{font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px}
-        .hdr{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #1e3a5f;padding-bottom:8px;margin-bottom:10px}
-        .sumbox{background:#eef4fb;border:1px solid #c5d9ee;border-radius:4px;padding:3px 7px;display:inline-block;margin-top:4px;color:#1e3a5f;font-size:10px}
-        table{width:100%;border-collapse:collapse;font-size:11px}
-        th{background:#e8edf2;border:1px solid #bbb;padding:5px 6px;text-align:left}
-        td{border:1px solid #bbb;padding:5px 6px;vertical-align:top}
-        .c{text-align:center}
-        tr:nth-child(even) td{background:#f7f9fb}
-        .foot{display:flex;gap:48px;margin-top:14px;font-size:11px;color:#333}
-        @media print{body{margin:0;padding:8px}}
-      </style></head>
+      <style>${css}</style></head>
       <body>${pages}</body></html>`;
 
     const w = window.open("", "_blank", "width=960,height=720");
