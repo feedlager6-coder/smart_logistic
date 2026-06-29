@@ -60,6 +60,31 @@ function getNavSegments(route: VehicleRouteWithUrls): string[] {
 // Per-segment copy state key: `${routeIndex}-${segmentIndex}`
 type CopiedSegKey = `${number}-${number}`;
 
+// Aggregates "Молоко×4, Сахар×16" strings from all stops into one summary string.
+// Parses "Item×N" pattern, sums quantities by name, returns compact list.
+function aggregateProducts(stops: Array<Record<string, unknown>>): string {
+  const totals = new Map<string, number>();
+  for (const stop of stops) {
+    const p = stop.products as string | undefined;
+    if (!p) continue;
+    for (const part of p.split(",")) {
+      const trimmed = part.trim();
+      const m = trimmed.match(/^(.+?)×(\d+(?:\.\d+)?)$/);
+      if (m) {
+        const name = m[1].trim();
+        const qty = parseFloat(m[2]);
+        totals.set(name, (totals.get(name) ?? 0) + qty);
+      } else if (trimmed) {
+        totals.set(trimmed, (totals.get(trimmed) ?? 0) + 1);
+      }
+    }
+  }
+  if (totals.size === 0) return "";
+  return Array.from(totals.entries())
+    .map(([name, qty]) => `${name}×${Math.round(qty)}`)
+    .join(", ");
+}
+
 export function ResultPage() {
   const [, setLocation] = useLocation();
   const params = useParams<{ id?: string }>();
@@ -236,6 +261,15 @@ export function ResultPage() {
                       </TooltipContent>
                     </Tooltip>
                   </TooltipProvider>
+                )}
+                {(stop as any).products && (
+                  <p className="text-sm text-muted-foreground mt-1.5 leading-snug">
+                    <span className="text-xs">📦</span>{" "}
+                    <span>{(stop as any).products}</span>
+                    {(stop as any).weight_kg > 0 && (
+                      <span className="text-xs text-muted-foreground/70 ml-1">· {(stop as any).weight_kg} кг</span>
+                    )}
+                  </p>
                 )}
               </div>
             </div>
@@ -451,6 +485,9 @@ export function ResultPage() {
                           {stop.address}<br />
                           Порядок: {stop.order}<br />
                           Авто: {route.vehicle_name}
+                          {(stop as any).products && (
+                            <><br />📦 {(stop as any).products}</>
+                          )}
                         </Popup>
                       </Marker>
                     );
@@ -661,6 +698,21 @@ export function ResultPage() {
                       </div>
                     );
                   })()}
+                  {/* Cargo loading summary — shown when at least one stop has products */}
+                  {(() => {
+                    const summary = aggregateProducts(route.stores as unknown as Array<Record<string, unknown>>);
+                    const totalQty = route.stores.reduce((s, st) => s + ((st as any).quantity ?? 0), 0);
+                    if (!summary) return null;
+                    return (
+                      <div className="mt-3 rounded-md bg-sky-50 border border-sky-100 px-3 py-2 text-xs text-sky-900">
+                        <span className="font-semibold mr-1">Загрузка:</span>
+                        <span className="leading-relaxed">{summary}</span>
+                        {totalQty > 0 && (
+                          <span className="ml-1 text-sky-700/70">— итого {Math.round(totalQty)} шт.</span>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </CardHeader>
                 <CardContent className="p-0 flex-1">
                   <ScrollArea className="h-[300px]">
@@ -689,6 +741,15 @@ export function ResultPage() {
                                   </TooltipContent>
                                 </Tooltip>
                               </TooltipProvider>
+                            )}
+                            {(stop as any).products && (
+                              <p className="text-xs text-sky-700/80 mt-1 leading-snug">
+                                <span>📦</span>{" "}
+                                <span>{(stop as any).products}</span>
+                                {(stop as any).weight_kg > 0 && (
+                                  <span className="text-muted-foreground/60 ml-1">· {(stop as any).weight_kg} кг</span>
+                                )}
+                              </p>
                             )}
                           </div>
                         </div>
