@@ -1307,7 +1307,7 @@ export function OrdersPage() {
                             <Input
                               value={r.products}
                               onChange={(e) => updateField(r.id, "products", e.target.value)}
-                              placeholder="Товары (необязательно)"
+                              placeholder="Товары"
                               className="text-xs min-w-[160px]"
                             />
                             {r.quantity > 0 && (
@@ -1476,9 +1476,8 @@ export function OrdersPage() {
               <CardDescription>Строки файла объединены в точки по названию + адресу · Зелёные строки сопоставлены с базой · «Товары» и «Кол-во» — справочно, в расчёт маршрута не идут</CardDescription>
             </CardHeader>
             <CardContent className="p-0">
-              <ScrollArea className="h-72">
-                <div className="overflow-x-auto min-w-full">
-                  <table className="text-xs whitespace-nowrap">
+              <div className="overflow-auto h-72">
+                <table className="text-xs whitespace-nowrap w-full">
                     {(() => {
                       const hasCity = preview.points.some(p => p.city);
                       return (
@@ -1530,8 +1529,7 @@ export function OrdersPage() {
                       );
                     })()}
                   </table>
-                </div>
-              </ScrollArea>
+              </div>
             </CardContent>
           </Card>
 
