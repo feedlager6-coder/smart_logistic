@@ -534,10 +534,24 @@ export function ResultPage() {
               <div>
                 <div style={{ fontSize: '11px', color: '#666', marginBottom: '2px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Маршрутный лист</div>
                 <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#111' }}>{route.vehicle_name}</div>
+                {(() => {
+                  const summary = aggregateProducts(route.stores as unknown as Array<Record<string, unknown>>);
+                  const totalQty = route.stores.reduce((s, st) => s + ((st as any).quantity ?? 0), 0);
+                  if (!summary) return null;
+                  return (
+                    <div style={{ marginTop: '4px', fontSize: '10px', color: '#1e3a5f', background: '#eef4fb', border: '1px solid #c5d9ee', borderRadius: '4px', padding: '3px 7px', display: 'inline-block' }}>
+                      <strong>Загрузка:</strong> {summary}
+                      {totalQty > 0 && <span style={{ color: '#555' }}> — итого {Math.round(totalQty)} шт.</span>}
+                    </div>
+                  );
+                })()}
               </div>
               <div style={{ textAlign: 'right', fontSize: '11px', color: '#555' }}>
                 <div>Дата: <strong>{new Date().toLocaleDateString('ru-RU')}</strong></div>
                 <div style={{ marginTop: '2px' }}>{route.stores.length} точек &nbsp;·&nbsp; {Math.round(route.total_km)} км &nbsp;·&nbsp; ~{Math.floor((route.estimated_minutes ?? 0) / 60)} ч {(route.estimated_minutes ?? 0) % 60} мин</div>
+                {(route as any).total_weight_kg > 0 && (
+                  <div style={{ marginTop: '2px', fontWeight: 600 }}>Вес: {(route as any).total_weight_kg} кг</div>
+                )}
               </div>
             </div>
 
@@ -546,9 +560,9 @@ export function ResultPage() {
               <thead>
                 <tr style={{ background: '#e8edf2' }}>
                   <th style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'center', width: '30px' }}>№</th>
-                  <th style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'left', width: '26%' }}>Магазин</th>
-                  <th style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'left' }}>Адрес</th>
-                  <th style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'center', width: '80px' }}>Кол-во товара</th>
+                  <th style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'left', width: '22%' }}>Магазин</th>
+                  <th style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'left', width: '25%' }}>Адрес</th>
+                  <th style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'left' }}>Товар / кол-во</th>
                   <th style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'center', width: '55px' }}>Прибытие</th>
                   <th style={{ border: '1px solid #bbb', padding: '5px 6px', textAlign: 'center', width: '50px' }}>Отметка</th>
                 </tr>
