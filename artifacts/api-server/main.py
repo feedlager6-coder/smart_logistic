@@ -4112,12 +4112,6 @@ async def preview_import(request: Request, file: UploadFile = File(...)):
     c_phone   = _detect_col(header_lower, _KWORDS_PHONE)
     c_client  = _detect_col(header_lower, _KWORDS_CLIENT)
 
-    # Positional fallback for unrecognised headers (old SmartRoute template)
-    if c_name is None:
-        c_name = 0
-    if c_address is None and c_yandex is None and len(columns) > 1:
-        c_address = 1
-
     # ── Conflict resolution: no two fields may share the same column index ────
     # When "контрагент" matches both name and client, prefer name (primary key).
     if c_client is not None and c_client == c_name:
@@ -4302,11 +4296,6 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
         c_to     = _detect_col(header_row, _KWORDS_TO)
         c_phone  = _detect_col(header_row, _KWORDS_PHONE)
         c_client = _detect_col(header_row, _KWORDS_CLIENT)
-
-    if c_name is None:
-        c_name = 0
-    if c_addr is None and c_yandex is None:
-        c_addr = 1
 
     def _get(row, idx, default=""):
         if idx is None or idx >= len(row):

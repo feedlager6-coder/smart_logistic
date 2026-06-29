@@ -217,7 +217,21 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
           const saved = localStorage.getItem(LS_KEY);
           if (saved) {
             const parsed = JSON.parse(saved) as Partial<MappingState>;
-            merged = { ...merged, ...parsed };
+            // Only apply a saved index when:
+            // 1. The backend did NOT auto-detect that field (value is null), AND
+            // 2. The saved column index is within bounds for this file.
+            // Never let stale indices from a previous file override a successful detection.
+            for (const k of Object.keys(parsed) as (keyof MappingState)[]) {
+              const savedIdx = parsed[k];
+              if (
+                merged[k] === null &&
+                savedIdx !== null &&
+                savedIdx !== undefined &&
+                (savedIdx as number) < data.columns.length
+              ) {
+                merged[k] = savedIdx;
+              }
+            }
           }
         } catch {}
         setMapping(merged);
