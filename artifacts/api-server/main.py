@@ -4239,7 +4239,6 @@ async def preview_import(request: Request, file: UploadFile = File(...)):
         "existing_count": existing_count,
         "new_count": new_count,
         "matches": matches,
-        "column_warnings": column_warnings,
         "mapping": {
             "name":    c_name,
             "address": c_address,

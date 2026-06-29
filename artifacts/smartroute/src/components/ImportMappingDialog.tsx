@@ -43,7 +43,6 @@ interface PreviewData {
   new_count: number;
   matches: MatchEntry[];
   mapping: MappingState;
-  column_warnings: Record<string, string>;
 }
 
 // ── Client-side column quality heuristics ────────────────────────────────────
