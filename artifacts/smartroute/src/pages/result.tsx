@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check, AlertTriangle, Printer, Info, Settings } from "lucide-react";
+import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check, AlertTriangle, Printer, Info, Settings, Package } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap } from "react-leaflet";
 import 'leaflet/dist/leaflet.css';
@@ -148,6 +148,94 @@ export function ResultPage() {
       toast({ title: "Ссылка скопирована", description: `Часть ${segIdx + 1} маршрута скопирована.` });
       setTimeout(() => setCopiedSeg(null), 2000);
     });
+  };
+
+  // Generates a loading sheet (загрузочный лист) in a new window with stops in REVERSE order.
+  // Reverse order = last delivery stop loaded first (deepest in truck), first delivery stop last (by door).
+  const handlePrintLoading = () => {
+    if (!result) return;
+    const date = new Date().toLocaleDateString("ru-RU");
+    const rows = (stops: RouteResult["routes"][number]["stores"]) =>
+      [...stops].reverse().map((stop, idx) => {
+        const products = (stop as any).products as string | undefined;
+        const qty = (stop as any).quantity as number | undefined;
+        const weight = (stop as any).weight_kg as number | undefined;
+        return `<tr>
+          <td class="c" style="font-weight:700;color:#1e3a5f">${idx + 1}</td>
+          <td style="font-weight:600">${stop.store_name}</td>
+          <td style="color:#444">${stop.address}</td>
+          <td style="font-size:10px;line-height:1.4">${
+            products
+              ? `${products}${qty && qty > 0 ? `<br><span style="color:#666">итого ${Math.round(qty)} шт.</span>` : ""}`
+              : "&nbsp;"
+          }</td>
+          <td class="c">${weight && weight > 0 ? weight : "&nbsp;"}</td>
+          <td>&nbsp;</td>
+        </tr>`;
+      }).join("");
+
+    const pages = result.routes.map((route, i) => {
+      const summary = aggregateProducts(route.stores as unknown as Array<Record<string, unknown>>);
+      const totalQty = route.stores.reduce((s, st) => s + ((st as any).quantity ?? 0), 0);
+      const totalWeight = (route as any).total_weight_kg as number | undefined;
+      return `<div${i > 0 ? ' style="page-break-before:always;padding-top:16px"' : ""}>
+        <div class="hdr">
+          <div>
+            <div class="lbl">Загрузочный лист</div>
+            <div style="font-size:20px;font-weight:700">${route.vehicle_name}</div>
+            ${summary ? `<div class="sumbox"><strong>Загрузка:</strong> ${summary}${totalQty > 0 ? ` — итого ${Math.round(totalQty)} шт.` : ""}</div>` : ""}
+          </div>
+          <div style="text-align:right;font-size:11px;color:#555">
+            <div>Дата: <strong>${date}</strong></div>
+            <div style="margin-top:2px">${route.stores.length} точек · ${Math.round(route.total_km)} км</div>
+            ${totalWeight && totalWeight > 0 ? `<div style="font-weight:600;margin-top:2px">Вес: ${totalWeight} кг</div>` : ""}
+            <div style="font-size:10px;color:#999;margin-top:3px">↑ кабина · кузов ↓ (порядок загрузки)</div>
+          </div>
+        </div>
+        <table>
+          <thead><tr>
+            <th class="c" style="width:36px">Загр.</th>
+            <th style="width:22%">Магазин</th>
+            <th style="width:22%">Адрес</th>
+            <th>Товар / кол-во</th>
+            <th class="c" style="width:55px">Вес, кг</th>
+            <th class="c" style="width:44px">✓</th>
+          </tr></thead>
+          <tbody>${rows(route.stores)}</tbody>
+        </table>
+        <div class="foot">
+          <span>Кладовщик: ________________________&nbsp; Подпись: ____________</span>
+          <span>Водитель: _________________________&nbsp; Подпись: ____________</span>
+        </div>
+      </div>`;
+    }).join("");
+
+    const html = `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
+      <title>Загрузочный лист — SmartRoute</title>
+      <style>
+        body{font-family:Arial,sans-serif;font-size:11px;color:#111;margin:0;padding:16px}
+        .lbl{font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px}
+        .hdr{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #1e3a5f;padding-bottom:8px;margin-bottom:10px}
+        .sumbox{background:#eef4fb;border:1px solid #c5d9ee;border-radius:4px;padding:3px 7px;display:inline-block;margin-top:4px;color:#1e3a5f;font-size:10px}
+        table{width:100%;border-collapse:collapse;font-size:11px}
+        th{background:#e8edf2;border:1px solid #bbb;padding:5px 6px;text-align:left}
+        td{border:1px solid #bbb;padding:5px 6px;vertical-align:top}
+        .c{text-align:center}
+        tr:nth-child(even) td{background:#f7f9fb}
+        .foot{display:flex;gap:48px;margin-top:14px;font-size:11px;color:#333}
+        @media print{body{margin:0;padding:8px}}
+      </style></head>
+      <body>${pages}</body></html>`;
+
+    const w = window.open("", "_blank", "width=960,height=720");
+    if (!w) {
+      toast({ title: "Браузер заблокировал окно", description: "Разрешите всплывающие окна для этого сайта." });
+      return;
+    }
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    setTimeout(() => w.print(), 400);
   };
 
   if (sessionId && sessionLoading) {
@@ -380,6 +468,10 @@ export function ResultPage() {
           <Button variant="outline" onClick={() => window.print()} className="gap-2">
             <Printer className="w-4 h-4" />
             <span className="hidden sm:inline">Маршрутный лист</span>
+          </Button>
+          <Button variant="outline" onClick={handlePrintLoading} className="gap-2">
+            <Package className="w-4 h-4" />
+            <span className="hidden sm:inline">Загрузочный лист</span>
           </Button>
           <Button className="gap-2" asChild>
             <Link href="/route">
