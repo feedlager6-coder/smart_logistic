@@ -122,7 +122,9 @@ if not _JWT_SECRET_ENV:
     )
 JWT_SECRET: str = _JWT_SECRET_ENV
 JWT_ALGORITHM: str = "HS256"
-JWT_TOKEN_TTL_HOURS: int = int(os.environ.get("JWT_TOKEN_TTL_HOURS", "24"))
+JWT_TOKEN_TTL_HOURS: int = int(os.environ.get("JWT_TOKEN_TTL_HOURS", "720"))  # 30 days default
+# Refresh threshold: reissue cookie if token expires within this many hours
+JWT_REFRESH_THRESHOLD_HOURS: int = int(os.environ.get("JWT_REFRESH_THRESHOLD_HOURS", "168"))  # 7 days
 JWT_COOKIE_NAME: str = "smartroute_token"
 # SameSite=none + Secure=true is required for cross-site iframe contexts (Replit canvas, embedded apps).
 # Default: none/true so dev preview works inside Replit's iframe-based editor.
@@ -3196,6 +3198,18 @@ def _decode_token(token: str) -> Optional[str]:
         return None
 
 
+def _decode_token_with_exp(token: str) -> tuple:
+    """Return (username, exp_datetime) or (None, None) if invalid/expired."""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        username = payload.get("sub")
+        exp_ts = payload.get("exp")
+        exp_dt = datetime.utcfromtimestamp(exp_ts) if exp_ts else None
+        return username, exp_dt
+    except JWTError:
+        return None, None
+
+
 def seed_admin_user() -> Optional[int]:
     """Create the admin user from ADMIN_PASSWORD env var if not exists.
     Sets is_admin=TRUE. Migrates legacy (NULL owner_id) data to admin.
@@ -3328,7 +3342,7 @@ async def auth_middleware(request: Request, call_next):
     # ── 1. Cookie JWT (browser sessions) ─────────────────────────────────────
     token = request.cookies.get(JWT_COOKIE_NAME)
     if token:
-        username = _decode_token(token)
+        username, token_exp = _decode_token_with_exp(token)
         if not username:
             return _auth_401("Токен недействителен или истёк. Войдите снова.")
         try:
@@ -3348,7 +3362,24 @@ async def auth_middleware(request: Request, call_next):
         request.state.user_id = _user_row["id"]
         request.state.is_admin = bool(_user_row.get("is_admin", False))
         request.state.api_key_scopes = None  # cookie auth = full access
-        return await call_next(request)
+
+        # ── Sliding session: silently refresh cookie when close to expiry ────
+        # If token expires within JWT_REFRESH_THRESHOLD_HOURS, issue a new one.
+        response = await call_next(request)
+        if token_exp:
+            hours_left = (token_exp - datetime.utcnow()).total_seconds() / 3600
+            if hours_left < JWT_REFRESH_THRESHOLD_HOURS:
+                new_token = _create_access_token(username)
+                response.set_cookie(
+                    key=JWT_COOKIE_NAME,
+                    value=new_token,
+                    httponly=True,
+                    samesite=COOKIE_SAMESITE,
+                    secure=COOKIE_SECURE,
+                    max_age=JWT_TOKEN_TTL_HOURS * 3600,
+                    path="/",
+                )
+        return response
 
     # ── 2. Bearer API Key (machine-to-machine) ────────────────────────────────
     auth_header = request.headers.get("Authorization", "")
