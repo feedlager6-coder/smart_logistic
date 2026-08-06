@@ -2018,10 +2018,12 @@ def init_db():
             lon DOUBLE PRECISION,
             products TEXT DEFAULT '',
             quantity DOUBLE PRECISION DEFAULT 0,
+            actual_qty DOUBLE PRECISION DEFAULT 0,
             arrive_by TEXT DEFAULT '',
             yandex_url TEXT DEFAULT '',
             status TEXT NOT NULL DEFAULT 'planned',
             payment_method TEXT NOT NULL DEFAULT 'none',
+            payment_status TEXT NOT NULL DEFAULT 'pending',
             driver_comment TEXT DEFAULT '',
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             delivered_at TIMESTAMP,
@@ -2037,12 +2039,26 @@ def init_db():
         ("lon", "DOUBLE PRECISION"),
         ("products", "TEXT DEFAULT ''"),
         ("quantity", "DOUBLE PRECISION DEFAULT 0"),
+        ("actual_qty", "DOUBLE PRECISION"),
         ("arrive_by", "TEXT DEFAULT ''"),
         ("yandex_url", "TEXT DEFAULT ''"),
+        ("payment_status", "TEXT DEFAULT 'pending'"),
     ):
         cur.execute(
             f"ALTER TABLE route_executions ADD COLUMN IF NOT EXISTS {_column} {_definition}"
         )
+    # Existing MVP executions had no actual quantity. Treat already delivered
+    # points as fully delivered and all other historical points as zero.
+    cur.execute(
+        """UPDATE route_executions
+           SET actual_qty = CASE WHEN status='delivered' THEN COALESCE(quantity, 0) ELSE 0 END
+           WHERE actual_qty IS NULL"""
+    )
+    cur.execute("UPDATE route_executions SET payment_status='pending' WHERE payment_status IS NULL")
+    cur.execute("ALTER TABLE route_executions ALTER COLUMN actual_qty SET DEFAULT 0")
+    cur.execute("ALTER TABLE route_executions ALTER COLUMN actual_qty SET NOT NULL")
+    cur.execute("ALTER TABLE route_executions ALTER COLUMN payment_status SET DEFAULT 'pending'")
+    cur.execute("ALTER TABLE route_executions ALTER COLUMN payment_status SET NOT NULL")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_assignments_owner ON route_assignments(owner_id, session_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_executions_assignment ON route_executions(assignment_id, visit_order)")
     # ── User plan & admin notes ────────────────────────────────────────────────
@@ -3074,6 +3090,7 @@ class CompanySettingsInput(BaseModel):
 
 EXECUTION_STATUSES = {"planned", "loaded", "on_route", "delivered", "partial", "failed", "rescheduled"}
 PAYMENT_METHODS = {"cash", "card", "transfer", "none"}
+PAYMENT_STATUSES = {"pending", "paid", "not_paid"}
 
 
 class AssignmentCreate(BaseModel):
@@ -3089,8 +3106,38 @@ class AssignmentUpdate(BaseModel):
 
 class ExecutionUpdate(BaseModel):
     status: str
-    payment_method: str = "none"
+    actual_qty: Optional[float] = None
+    payment_method: Optional[str] = None
+    payment_status: Optional[str] = None
     driver_comment: str = ""
+
+
+def _validate_execution_quantities(status: str, planned_qty: float, actual_qty: float) -> None:
+    """Keep delivered quantities bounded and status-consistent."""
+    if not math.isfinite(planned_qty) or not math.isfinite(actual_qty):
+        raise HTTPException(status_code=422, detail="Количество должно быть конечным числом")
+    if planned_qty < 0:
+        raise HTTPException(status_code=422, detail="Плановое количество не может быть отрицательным")
+    if actual_qty < 0 or actual_qty > planned_qty:
+        raise HTTPException(
+            status_code=422,
+            detail="Фактически доставленное количество должно быть от 0 до планового",
+        )
+    epsilon = 1e-9
+    if status == "delivered" and abs(actual_qty - planned_qty) > epsilon:
+        raise HTTPException(
+            status_code=422,
+            detail="Для статуса «Доставлено» фактическое количество должно совпадать с плановым",
+        )
+    if status == "partial" and (
+        planned_qty <= epsilon
+        or actual_qty <= epsilon
+        or actual_qty >= planned_qty - epsilon
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Для частичной доставки фактическое количество должно быть меньше планового",
+        )
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -7010,8 +7057,8 @@ def _load_assignment_for_token(token: str) -> tuple[dict, list[dict]]:
         raise HTTPException(status_code=404, detail="Ссылка водителя недействительна или отозвана")
     cur.execute(
         """SELECT id, store_id, visit_order, store_name, address, lat, lon,
-                  products, quantity, arrive_by, yandex_url, status,
-                  payment_method, driver_comment, updated_at, delivered_at
+                  products, quantity, actual_qty, arrive_by, yandex_url, status,
+                  payment_method, payment_status, driver_comment, updated_at, delivered_at
            FROM route_executions WHERE assignment_id=%s ORDER BY visit_order""",
         (assignment["id"],),
     )
@@ -7031,10 +7078,16 @@ def _serialize_execution(row: dict) -> dict:
         "lon": row.get("lon"),
         "products": row.get("products") or "",
         "quantity": float(row.get("quantity") or 0),
+        "actual_qty": float(row.get("actual_qty") or 0),
+        "shortfall_qty": max(
+            float(row.get("quantity") or 0) - float(row.get("actual_qty") or 0),
+            0,
+        ),
         "arrive_by": row.get("arrive_by") or "",
         "yandex_url": row.get("yandex_url") or "",
         "status": row.get("status") or "planned",
         "payment_method": row.get("payment_method") or "none",
+        "payment_status": row.get("payment_status") or "pending",
         "driver_comment": row.get("driver_comment") or "",
         "updated_at": str(row["updated_at"]) if row.get("updated_at") else None,
         "delivered_at": str(row["delivered_at"]) if row.get("delivered_at") else None,
@@ -7064,9 +7117,9 @@ def list_route_assignments(session_id: int, request: Request):
     if rows:
         cur.execute(
             """SELECT assignment_id, id, store_id, visit_order, store_name,
-                      address, lat, lon, products, quantity, arrive_by,
-                      yandex_url, status, payment_method, driver_comment,
-                      updated_at, delivered_at
+                      address, lat, lon, products, quantity, actual_qty, arrive_by,
+                      yandex_url, status, payment_method, payment_status,
+                      driver_comment, updated_at, delivered_at
                FROM route_executions
                WHERE assignment_id = ANY(%s)
                ORDER BY assignment_id, visit_order""",
@@ -7133,14 +7186,15 @@ def create_route_assignment(session_id: int, body: AssignmentCreate, request: Re
                 cur.execute(
                     """INSERT INTO route_executions
                        (assignment_id, store_id, visit_order, store_name, address, lat, lon,
-                        products, quantity, arrive_by, yandex_url)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        products, quantity, actual_qty, arrive_by, yandex_url,
+                        payment_status)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (
                         assignment["id"], stop.get("store_id"), stop.get("order", 0),
                         stop.get("store_name", ""), stop.get("address", ""),
                         stop.get("lat"), stop.get("lon"), stop.get("products", ""),
-                        stop.get("quantity", 0), stop.get("arrive_by", ""),
-                        stop.get("yandex_url", ""),
+                        stop.get("quantity", 0), 0, stop.get("arrive_by", ""),
+                        stop.get("yandex_url", ""), "pending",
                     ),
                 )
         conn.commit()
@@ -7222,22 +7276,40 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
     """Update one delivery point through the scoped driver link."""
     if body.status not in EXECUTION_STATUSES:
         raise HTTPException(status_code=422, detail="Недопустимый статус доставки")
-    if body.payment_method not in PAYMENT_METHODS:
+    assignment, executions = _load_assignment_for_token(token)
+    current = next((row for row in executions if int(row["id"]) == execution_id), None)
+    if not current:
+        raise HTTPException(status_code=404, detail="Точка рейса не найдена")
+    planned_qty = float(current.get("quantity") or 0)
+    actual_qty = float(
+        current.get("actual_qty") if body.actual_qty is None else body.actual_qty
+    )
+    _validate_execution_quantities(body.status, planned_qty, actual_qty)
+    payment_method = body.payment_method or current.get("payment_method") or "none"
+    payment_status = body.payment_status or current.get("payment_status") or "pending"
+    if payment_method not in PAYMENT_METHODS:
         raise HTTPException(status_code=422, detail="Недопустимый способ оплаты")
-    assignment, _ = _load_assignment_for_token(token)
+    if payment_status not in PAYMENT_STATUSES:
+        raise HTTPException(status_code=422, detail="Недопустимый статус оплаты")
+    if payment_status == "paid" and payment_method == "none":
+        raise HTTPException(
+            status_code=422,
+            detail="Для оплаченной доставки укажите способ оплаты",
+        )
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
         """UPDATE route_executions
-           SET status=%s, payment_method=%s, driver_comment=%s,
+           SET status=%s, actual_qty=%s, payment_method=%s, payment_status=%s,
+               driver_comment=%s,
                updated_at=NOW(),
                delivered_at=CASE WHEN %s IN ('delivered','partial','failed')
                                  THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END
            WHERE id=%s AND assignment_id=%s
            RETURNING id, store_id, visit_order, store_name, address, lat, lon,
-                     products, quantity, arrive_by, yandex_url, status,
-                     payment_method, driver_comment, updated_at, delivered_at""",
-        (body.status, body.payment_method, body.driver_comment.strip(),
+                     products, quantity, actual_qty, arrive_by, yandex_url, status,
+                     payment_method, payment_status, driver_comment, updated_at, delivered_at""",
+        (body.status, actual_qty, payment_method, payment_status, body.driver_comment.strip(),
          body.status, execution_id, assignment["id"]),
     )
     row = cur.fetchone()

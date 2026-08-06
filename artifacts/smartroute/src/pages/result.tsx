@@ -50,7 +50,11 @@ type Assignment = {
     visit_order: number;
     store_name: string;
     status: ExecutionStatus;
+    quantity: number;
+    actual_qty: number;
+    shortfall_qty: number;
     payment_method: string;
+    payment_status: string;
     driver_comment: string;
   }>;
 };
@@ -191,6 +195,7 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                     <div key={execution.id} className="flex items-center gap-2 rounded-md border px-2.5 py-2 text-xs">
                       <span className="font-semibold text-muted-foreground w-5">{execution.visit_order}</span>
                       <span className="truncate flex-1">{execution.store_name}</span>
+                      {execution.shortfall_qty > 0 && <span className="text-orange-700 whitespace-nowrap">−{execution.shortfall_qty} шт.</span>}
                       <span className={`rounded-full px-2 py-0.5 whitespace-nowrap ${executionStatusClass[execution.status]}`}>{executionStatusLabels[execution.status]}</span>
                     </div>
                   ))}

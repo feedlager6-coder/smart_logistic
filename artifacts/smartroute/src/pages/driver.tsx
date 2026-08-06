@@ -8,6 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 
 type Status = "planned" | "loaded" | "on_route" | "delivered" | "partial" | "failed" | "rescheduled";
 type Payment = "cash" | "card" | "transfer" | "none";
+type PaymentStatus = "pending" | "paid" | "not_paid";
 
 type Execution = {
   id: number;
@@ -16,9 +17,12 @@ type Execution = {
   address: string;
   products: string;
   quantity: number;
+  actual_qty: number;
+  shortfall_qty: number;
   arrive_by: string;
   status: Status;
   payment_method: Payment;
+  payment_status: PaymentStatus;
   driver_comment: string;
   yandex_url: string;
 };
@@ -52,12 +56,24 @@ const paymentLabels: Record<Payment, string> = {
   none: "Без оплаты",
 };
 
+const paymentStatusLabels: Record<PaymentStatus, string> = {
+  pending: "Ожидает оплаты",
+  paid: "Оплачено",
+  not_paid: "Не оплачено",
+};
+
 const terminalStatuses = new Set(["delivered", "partial", "failed", "rescheduled"]);
 
 export function DriverPage() {
   const { token = "" } = useParams<{ token: string }>();
   const [savingId, setSavingId] = useState<number | null>(null);
-  const [drafts, setDrafts] = useState<Record<number, { status: Status; payment_method: Payment; driver_comment: string }>>({});
+  const [drafts, setDrafts] = useState<Record<number, {
+    status: Status;
+    actual_qty: number;
+    payment_method: Payment;
+    payment_status: PaymentStatus;
+    driver_comment: string;
+  }>>({});
 
   const { data, isLoading, isError, refetch } = useQuery<DriverData>({
     queryKey: ["driver-assignment", token],
@@ -72,7 +88,9 @@ export function DriverPage() {
 
   const draftFor = (execution: Execution) => drafts[execution.id] ?? {
     status: execution.status,
+    actual_qty: execution.actual_qty,
     payment_method: execution.payment_method,
+    payment_status: execution.payment_status,
     driver_comment: execution.driver_comment,
   };
 
@@ -158,20 +176,39 @@ export function DriverPage() {
                     <CardTitle className="text-base">{execution.store_name}</CardTitle>
                     <p className="text-sm text-muted-foreground flex items-start gap-1 mt-1"><MapPin className="w-3.5 h-3.5 mt-0.5 shrink-0" />{execution.address}</p>
                     {execution.arrive_by && <p className="text-xs text-primary mt-1">Ориентир: {execution.arrive_by}</p>}
-                    {execution.products && <p className="text-xs text-muted-foreground mt-2">Груз: {execution.products}{execution.quantity ? ` · ${execution.quantity} шт.` : ""}</p>}
+                     {execution.products && <p className="text-xs text-muted-foreground mt-2">Груз: {execution.products}{execution.quantity ? ` · план ${execution.quantity} шт.` : ""}</p>}
+                     {execution.quantity > execution.actual_qty && <p className="text-xs text-orange-700 mt-1">Недовоз: {execution.shortfall_qty} шт.</p>}
                   </div>
                 </div>
               </CardHeader>
               <CardContent className="space-y-3">
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <label className="text-xs text-muted-foreground">Статус
-                    <select className="mt-1 w-full h-10 rounded-md border bg-background px-2 text-sm" value={draft.status} onChange={(event) => setDrafts((current) => ({ ...current, [execution.id]: { ...draft, status: event.target.value as Status } }))}>
+                    <select className="mt-1 w-full h-10 rounded-md border bg-background px-2 text-sm" value={draft.status} onChange={(event) => {
+                      const status = event.target.value as Status;
+                      setDrafts((current) => ({
+                        ...current,
+                        [execution.id]: {
+                          ...draft,
+                          status,
+                          actual_qty: status === "delivered" ? execution.quantity : draft.actual_qty,
+                        },
+                      }));
+                    }}>
                       {Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                     </select>
                   </label>
-                  <label className="text-xs text-muted-foreground">Оплата
+                  <label className="text-xs text-muted-foreground">Фактически доставлено
+                    <input type="number" min={0} max={execution.quantity} step="any" className="mt-1 w-full h-10 rounded-md border bg-background px-2 text-sm" value={draft.actual_qty} onChange={(event) => setDrafts((current) => ({ ...current, [execution.id]: { ...draft, actual_qty: Number(event.target.value) } }))} />
+                  </label>
+                  <label className="text-xs text-muted-foreground">Способ оплаты
                     <select className="mt-1 w-full h-10 rounded-md border bg-background px-2 text-sm" value={draft.payment_method} onChange={(event) => setDrafts((current) => ({ ...current, [execution.id]: { ...draft, payment_method: event.target.value as Payment } }))}>
                       {Object.entries(paymentLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                    </select>
+                  </label>
+                  <label className="text-xs text-muted-foreground">Статус оплаты
+                    <select className="mt-1 w-full h-10 rounded-md border bg-background px-2 text-sm" value={draft.payment_status} onChange={(event) => setDrafts((current) => ({ ...current, [execution.id]: { ...draft, payment_status: event.target.value as PaymentStatus } }))}>
+                      {Object.entries(paymentStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                     </select>
                   </label>
                 </div>
