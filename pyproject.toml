@@ -5,7 +5,6 @@ description = "Add your description here"
 requires-python = ">=3.11"
 dependencies = [
     "aiofiles>=23.1",
-    "bcrypt>=5.0.0",
     "fastapi>=0.136",
     "openpyxl>=3.1",
     "ortools>=9.10",
