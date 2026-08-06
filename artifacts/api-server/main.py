@@ -2066,12 +2066,13 @@ def init_db():
            SET expires_at = COALESCE(expires_at, COALESCE(token_created_at, NOW()) + INTERVAL '48 hours')
            WHERE expires_at IS NULL"""
     )
-    # The first MVP stored zero for every planned point. Planned actual quantity
-    # is now initialized from the immutable planned quantity.
+    # Planned points have not been delivered yet. Older MVP rows incorrectly
+    # copied the planned quantity into actual_qty, which made the dispatcher
+    # show a false delivered amount before the driver started.
     cur.execute(
         """UPDATE route_executions
-           SET actual_qty = COALESCE(quantity, 0)
-           WHERE status = 'planned' AND COALESCE(actual_qty, 0) = 0"""
+           SET actual_qty = 0
+           WHERE status = 'planned' AND COALESCE(actual_qty, 0) <> 0"""
     )
     cur.execute(
         "UPDATE route_executions SET status='planned' WHERE status IN ('loaded', 'on_route')"
@@ -3030,6 +3031,18 @@ def whatsapp_url(vehicle_name: str, stores: list, total_km: float, yandex_urls: 
             lines.append(f"🗺 Маршрут {idx}: {url}")
     text = "\n".join(lines)
     return f"https://wa.me/?text={urllib.parse.quote(text)}"
+
+
+def whatsapp_assignment_url(vehicle_name: str, route_url: str, driver_url: str) -> str:
+    """Share both navigation and the token-scoped execution page."""
+    lines = [
+        f"SmartRoute: рейс {vehicle_name}",
+        f"🗺 Навигация: {route_url}" if route_url else "",
+        f"✅ Исполнение доставок: {driver_url}",
+    ]
+    return "https://wa.me/?text=" + urllib.parse.quote(
+        "\n".join(line for line in lines if line)
+    )
 
 
 def store_row_to_dict(row) -> dict:
@@ -7110,6 +7123,8 @@ def _serialize_execution(row: dict) -> dict:
     status = row.get("status") or "planned"
     if status in {"loaded", "on_route"}:
         status = "planned"
+    if status == "planned":
+        actual_qty = 0
     return {
         "id": row["id"],
         "store_id": row.get("store_id"),
@@ -7279,8 +7294,10 @@ def create_route_assignment(session_id: int, body: AssignmentCreate, request: Re
             "total_points": len(route.get("stores") or []),
             "completed_points": 0,
             "driver_url": driver_url,
-            "whatsapp_url": "https://wa.me/?text=" + urllib.parse.quote(
-                f"SmartRoute: маршрут водителя {driver_url}"
+            "whatsapp_url": whatsapp_assignment_url(
+                vehicle_name,
+                route.get("yandex_url") or "",
+                driver_url,
             ),
         })
         return assignment
@@ -7385,8 +7402,8 @@ def create_rescheduled_order(
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
         cur.execute(
-            """SELECT e.id, e.store_id, e.store_name, e.address, e.products, e.quantity,
-                      e.status
+            """SELECT e.id, e.store_id, e.store_name, e.address, e.products,
+                      e.quantity, e.actual_qty, e.status
                  FROM route_executions e
                  JOIN route_assignments a ON a.id=e.assignment_id
                 WHERE e.id=%s AND e.assignment_id=%s AND a.owner_id=%s""",
@@ -7423,7 +7440,11 @@ def create_rescheduled_order(
                     execution["store_name"] or "",
                     execution["address"] or "",
                     body.delivery_date,
-                    float(execution["quantity"] or 0),
+                    max(
+                        float(execution["quantity"] or 0)
+                        - float(execution["actual_qty"] or 0),
+                        0,
+                    ),
                     execution["products"] or "",
                     "Создано из переноса доставки",
                 ),
@@ -7440,6 +7461,76 @@ def create_rescheduled_order(
         updated = dict(cur.fetchone())
         conn.commit()
         return {"order": order, "execution": updated}
+    except HTTPException:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.post("/api/route/assignments/{assignment_id}/executions/{execution_id}/remaining-order", status_code=201)
+def create_remaining_order(
+    assignment_id: int,
+    execution_id: int,
+    body: DispatcherCreateRescheduledOrder,
+    request: Request,
+):
+    """Create a daily order containing only the quantity not delivered."""
+    uid = get_user_id(request)
+    try:
+        datetime.strptime(body.delivery_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Дата должна быть в формате YYYY-MM-DD")
+
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            """SELECT e.id, e.store_id, e.store_name, e.address, e.products,
+                      e.quantity, e.actual_qty, e.status
+                 FROM route_executions e
+                 JOIN route_assignments a ON a.id=e.assignment_id
+                WHERE e.id=%s AND e.assignment_id=%s AND a.owner_id=%s""",
+            (execution_id, assignment_id, uid),
+        )
+        execution = cur.fetchone()
+        if not execution:
+            raise HTTPException(status_code=404, detail="Точка рейса не найдена")
+        if execution["status"] not in {"partial", "failed"}:
+            raise HTTPException(
+                status_code=422,
+                detail="Заявку на остаток можно создать только для частичной или недоставленной точки",
+            )
+        if not execution["store_id"]:
+            raise HTTPException(status_code=422, detail="У точки нет связанного магазина")
+
+        planned_qty = float(execution["quantity"] or 0)
+        actual_qty = float(execution["actual_qty"] or 0)
+        remaining_qty = max(planned_qty - actual_qty, 0)
+        if remaining_qty <= 0:
+            raise HTTPException(status_code=422, detail="У точки нет недоставленного количества")
+
+        cur.execute(
+            """INSERT INTO daily_orders
+                   (owner_id, store_id, store_name_raw, address_raw,
+                    delivery_date, quantity, products, notes)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+               RETURNING id, store_id, store_name_raw, delivery_date::text, quantity""",
+            (
+                uid,
+                execution["store_id"],
+                execution["store_name"] or "",
+                execution["address"] or "",
+                body.delivery_date,
+                remaining_qty,
+                execution["products"] or "",
+                "Создано из остатка исполнения доставки",
+            ),
+        )
+        order = dict(cur.fetchone())
+        conn.commit()
+        return {"order": order, "remaining_qty": remaining_qty}
     except HTTPException:
         conn.rollback()
         raise

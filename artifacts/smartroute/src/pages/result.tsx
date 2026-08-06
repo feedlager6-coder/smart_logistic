@@ -83,7 +83,9 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
   const [copiedAssignment, setCopiedAssignment] = useState<number | null>(null);
   const [issuedLinks, setIssuedLinks] = useState<Record<number, { driver_url: string; whatsapp_url: string }>>({});
   const [rescheduleDates, setRescheduleDates] = useState<Record<number, string>>({});
+  const [remainingDates, setRemainingDates] = useState<Record<number, string>>({});
   const [creatingRescheduledOrder, setCreatingRescheduledOrder] = useState<number | null>(null);
+  const [creatingRemainingOrder, setCreatingRemainingOrder] = useState<number | null>(null);
   const { data, isLoading, refetch } = useQuery<{ assignments: Assignment[] }>({
     queryKey: ["route-assignments", sessionId],
     queryFn: async () => {
@@ -119,7 +121,9 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
           ...current,
           [routeIndex]: {
             driver_url: driverUrl,
-            whatsapp_url: `https://wa.me/?text=${encodeURIComponent(`SmartRoute: маршрут водителя ${driverUrl}`)}`,
+            whatsapp_url: created.whatsapp_url
+              ? new URL(created.whatsapp_url, window.location.origin).toString()
+              : `https://wa.me/?text=${encodeURIComponent(`SmartRoute: исполнение доставок ${driverUrl}`)}`,
           },
         }));
       }
@@ -157,6 +161,27 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
       window.alert(error instanceof Error ? error.message : "Не удалось создать заявку на новую дату");
     } finally {
       setCreatingRescheduledOrder(null);
+    }
+  };
+
+  const createRemainingOrder = async (assignmentId: number, executionId: number) => {
+    const deliveryDate = remainingDates[executionId];
+    if (!deliveryDate) return;
+    setCreatingRemainingOrder(executionId);
+    try {
+      const response = await fetch(`/api/route/assignments/${assignmentId}/executions/${executionId}/remaining-order`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ delivery_date: deliveryDate }),
+      });
+      const payload = await response.json().catch(() => null) as { detail?: string } | null;
+      if (!response.ok) throw new Error(`HTTP ${response.status}: ${payload?.detail || "Не удалось создать заявку на остаток"}`);
+      await refetch();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Не удалось создать заявку на остаток");
+    } finally {
+      setCreatingRemainingOrder(null);
     }
   };
 
@@ -228,10 +253,9 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                     <div key={execution.id} className="flex flex-wrap items-center gap-2 rounded-md border px-2.5 py-2 text-xs">
                       <span className="font-semibold text-muted-foreground w-5">{execution.visit_order}</span>
                       <span className="truncate flex-1">{execution.store_name}</span>
-                      <span className="whitespace-nowrap text-muted-foreground">
-                        {execution.actual_qty ?? 0}/{execution.quantity ?? 0} шт.
-                      </span>
-                      {execution.shortfall_qty > 0 && <span className="text-orange-700 whitespace-nowrap">−{execution.shortfall_qty} шт.</span>}
+                       <span className="whitespace-nowrap text-muted-foreground">
+                         План: {execution.quantity ?? 0} · Доставлено: {execution.actual_qty ?? 0} · Остаток: {execution.shortfall_qty ?? 0} шт.
+                       </span>
                       <span className={`rounded-full px-2 py-0.5 whitespace-nowrap ${executionStatusClass[execution.status]}`}>{executionStatusLabels[execution.status]}</span>
                       <span className="whitespace-nowrap text-muted-foreground">
                         {execution.payment_method === "cash" ? "Наличные" :
@@ -242,6 +266,26 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                           execution.payment_status === "not_paid" ? "Не оплачено" : "Ожидает оплаты"}
                       </span>
                       {execution.driver_comment && <span className="text-muted-foreground truncate max-w-[180px]" title={execution.driver_comment}>«{execution.driver_comment}»</span>}
+                       {(execution.status === "partial" || execution.status === "failed") && execution.shortfall_qty > 0 && (
+                         <div className="basis-full flex flex-wrap items-center gap-2 pt-1">
+                           <input
+                             type="date"
+                             className="h-8 rounded-md border bg-background px-2"
+                             value={remainingDates[execution.id] ?? ""}
+                             onChange={(event) => setRemainingDates((current) => ({ ...current, [execution.id]: event.target.value }))}
+                           />
+                           <Button
+                             size="sm"
+                             variant="outline"
+                             disabled={!remainingDates[execution.id] || creatingRemainingOrder === execution.id}
+                             onClick={() => createRemainingOrder(assignment.id, execution.id)}
+                           >
+                             {creatingRemainingOrder === execution.id
+                               ? <Loader2 className="w-3 h-3 animate-spin" />
+                               : execution.status === "partial" ? "Создать заявку на остаток" : "Создать заявку на новую дату"}
+                           </Button>
+                         </div>
+                       )}
                       {execution.status === "rescheduled" && (
                         <div className="basis-full flex items-center gap-2 pt-1">
                           <input

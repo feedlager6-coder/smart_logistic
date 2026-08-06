@@ -61,6 +61,8 @@ const paymentStatusLabels: Record<PaymentStatus, string> = {
 };
 
 const terminalStatuses = new Set(["delivered", "partial", "failed", "rescheduled"]);
+const paymentMethods: Payment[] = ["cash", "card", "transfer"];
+const paymentStatuses: PaymentStatus[] = ["paid", "not_paid"];
 
 export function DriverPage() {
   const { token = "" } = useParams<{ token: string }>();
@@ -88,7 +90,7 @@ export function DriverPage() {
     status: execution.status,
     actual_qty: execution.actual_qty ?? execution.quantity,
     payment_method: execution.payment_method,
-    payment_status: execution.payment_status,
+    payment_status: execution.payment_status === "pending" ? "not_paid" : execution.payment_status,
     driver_comment: execution.driver_comment,
   };
 
@@ -197,8 +199,16 @@ export function DriverPage() {
                     <CardTitle className="text-base">{execution.store_name}</CardTitle>
                     <p className="text-sm text-muted-foreground flex items-start gap-1 mt-1"><MapPin className="w-3.5 h-3.5 mt-0.5 shrink-0" />{execution.address}</p>
                     {execution.arrive_by && <p className="text-xs text-primary mt-1">Ориентир: {execution.arrive_by}</p>}
-                     {execution.products && <p className="text-xs text-muted-foreground mt-2">Груз: {execution.products}{execution.quantity ? ` · план ${execution.quantity} шт.` : ""}</p>}
-                     {execution.quantity > execution.actual_qty && <p className="text-xs text-orange-700 mt-1">Недовоз: {execution.shortfall_qty} шт.</p>}
+                     {execution.products && <p className="text-xs text-muted-foreground mt-2">Груз: {execution.products}</p>}
+                     <div className="mt-2 rounded-md bg-muted/60 px-2.5 py-2 text-xs">
+                       <span className="font-medium">План: {execution.quantity}</span>
+                       <span className="mx-1.5 text-muted-foreground">·</span>
+                       <span className="font-medium">Доставлено: {execution.actual_qty}</span>
+                       <span className="mx-1.5 text-muted-foreground">·</span>
+                       <span className={execution.shortfall_qty > 0 ? "font-medium text-orange-700" : "font-medium text-emerald-700"}>
+                         Остаток: {execution.shortfall_qty}
+                       </span>
+                     </div>
                   </div>
                 </div>
               </CardHeader>
@@ -229,9 +239,9 @@ export function DriverPage() {
                       </Button>
                     ))}
                   </div>
-                  {draft.status !== "rescheduled" && (
+                  {(draft.status === "delivered" || draft.status === "partial") && (
                     <>
-                      <label className="text-xs text-muted-foreground">Фактически доставлено
+                      <label className="block text-xs text-muted-foreground">Фактически доставлено
                         <input
                           type="number"
                           min={0}
@@ -252,18 +262,46 @@ export function DriverPage() {
                           }}
                         />
                       </label>
-                      <label className="text-xs text-muted-foreground">Способ оплаты
-                        <select className="mt-1 w-full h-10 rounded-md border bg-background px-2 text-sm" value={draft.payment_method} onChange={(event) => setDrafts((current) => ({ ...current, [execution.id]: { ...draft, payment_method: event.target.value as Payment } }))}>
-                          {Object.entries(paymentLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                        </select>
-                      </label>
-                      <label className="text-xs text-muted-foreground">Статус оплаты
-                        <select className="mt-1 w-full h-10 rounded-md border bg-background px-2 text-sm" value={draft.payment_status} onChange={(event) => setDrafts((current) => ({ ...current, [execution.id]: { ...draft, payment_status: event.target.value as PaymentStatus } }))}>
-                          {Object.entries(paymentStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                        </select>
-                      </label>
                     </>
                   )}
+                  <div className="space-y-2">
+                    <span className="text-xs text-muted-foreground">Способ оплаты</span>
+                    <div className="grid grid-cols-3 gap-2">
+                      {paymentMethods.map((method) => (
+                        <Button
+                          key={method}
+                          type="button"
+                          variant={draft.payment_method === method ? "default" : "outline"}
+                          className="h-11 text-sm"
+                          onClick={() => setDrafts((current) => ({
+                            ...current,
+                            [execution.id]: { ...draft, payment_method: method },
+                          }))}
+                        >
+                          {paymentLabels[method]}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <span className="text-xs text-muted-foreground">Статус оплаты</span>
+                    <div className="grid grid-cols-2 gap-2">
+                      {paymentStatuses.map((paymentStatus) => (
+                        <Button
+                          key={paymentStatus}
+                          type="button"
+                          variant={draft.payment_status === paymentStatus ? "default" : "outline"}
+                          className="h-11 text-sm"
+                          onClick={() => setDrafts((current) => ({
+                            ...current,
+                            [execution.id]: { ...draft, payment_status: paymentStatus },
+                          }))}
+                        >
+                          {paymentStatusLabels[paymentStatus]}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
                 <Textarea
                   value={draft.driver_comment}
