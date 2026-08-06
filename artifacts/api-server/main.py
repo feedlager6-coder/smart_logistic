@@ -3127,6 +3127,10 @@ class DispatcherExecutionUpdate(BaseModel):
     rescheduled_date: Optional[str] = None
 
 
+class DispatcherCreateRescheduledOrder(BaseModel):
+    delivery_date: str
+
+
 class ExecutionUpdate(BaseModel):
     status: str
     actual_qty: Optional[float] = None
@@ -6988,6 +6992,7 @@ def build_route(request: Request, body: RouteRequest):
 
     result = {
         "routes": routes,
+        "delivery_date": body.delivery_date,
         "savings": savings,
         "total_km": round(total_km, 1),
         "matrix_source": matrix_source,
@@ -7181,7 +7186,7 @@ def create_route_assignment(session_id: int, body: AssignmentCreate, request: Re
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
         cur.execute(
-            "SELECT result_json FROM route_sessions WHERE id=%s AND owner_id=%s",
+            "SELECT result_json, date FROM route_sessions WHERE id=%s AND owner_id=%s",
             (session_id, uid),
         )
         session = cur.fetchone()
@@ -7192,6 +7197,26 @@ def create_route_assignment(session_id: int, body: AssignmentCreate, request: Re
         if body.route_index < 0 or body.route_index >= len(routes):
             raise HTTPException(status_code=422, detail="Указан неизвестный рейс маршрута")
         route = routes[body.route_index]
+        # Older route sessions did not persist the delivery date and some
+        # imported routes consequently lost quantity before the execution row
+        # was created. Recover quantities from the route first, then from the
+        # day's orders when the route carries a date.
+        quantities_by_store: dict[int, float] = {}
+        delivery_date = result.get("delivery_date") or (
+            str(session["date"]) if session.get("date") else None
+        )
+        if delivery_date:
+            cur.execute(
+                """SELECT store_id, COALESCE(SUM(quantity), 0) AS quantity
+                     FROM daily_orders
+                    WHERE owner_id=%s AND delivery_date=%s AND store_id IS NOT NULL
+                    GROUP BY store_id""",
+                (uid, delivery_date),
+            )
+            quantities_by_store = {
+                int(row["store_id"]): float(row["quantity"] or 0)
+                for row in cur.fetchall()
+            }
         raw_token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
         vehicle_name = body.vehicle_name.strip() or str(route.get("vehicle_name") or "")
@@ -7233,7 +7258,16 @@ def create_route_assignment(session_id: int, body: AssignmentCreate, request: Re
                         assignment["id"], stop.get("store_id"), stop.get("order", 0),
                         stop.get("store_name", ""), stop.get("address", ""),
                         stop.get("lat"), stop.get("lon"), stop.get("products", ""),
-                        stop.get("quantity", 0), stop.get("quantity", 0), stop.get("arrive_by", ""),
+                        (
+                            float(stop.get("quantity") or 0)
+                            or (
+                                quantities_by_store.get(int(stop["store_id"]), 0)
+                                if stop.get("store_id") is not None
+                                else 0
+                            )
+                        ),
+                        0,
+                        stop.get("arrive_by", ""),
                         stop.get("yandex_url", ""), "pending",
                     ),
                 )
@@ -7333,6 +7367,87 @@ def update_dispatcher_execution(
     return {"execution": _serialize_execution(dict(row))}
 
 
+@app.post("/api/route/assignments/{assignment_id}/executions/{execution_id}/rescheduled-order", status_code=201)
+def create_rescheduled_order(
+    assignment_id: int,
+    execution_id: int,
+    body: DispatcherCreateRescheduledOrder,
+    request: Request,
+):
+    """Create a new daily order after a driver explicitly reschedules a point."""
+    uid = get_user_id(request)
+    try:
+        datetime.strptime(body.delivery_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Дата должна быть в формате YYYY-MM-DD")
+
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            """SELECT e.id, e.store_id, e.store_name, e.address, e.products, e.quantity,
+                      e.status
+                 FROM route_executions e
+                 JOIN route_assignments a ON a.id=e.assignment_id
+                WHERE e.id=%s AND e.assignment_id=%s AND a.owner_id=%s""",
+            (execution_id, assignment_id, uid),
+        )
+        execution = cur.fetchone()
+        if not execution:
+            raise HTTPException(status_code=404, detail="Точка рейса не найдена")
+        if execution["status"] != "rescheduled":
+            raise HTTPException(status_code=422, detail="Создать новую заявку можно только для перенесённой точки")
+        if not execution["store_id"]:
+            raise HTTPException(status_code=422, detail="У точки нет связанного магазина")
+
+        cur.execute(
+            """SELECT id, store_id, store_name_raw, delivery_date::text
+                 FROM daily_orders
+                WHERE owner_id=%s AND store_id=%s AND delivery_date=%s
+                LIMIT 1""",
+            (uid, execution["store_id"], body.delivery_date),
+        )
+        existing = cur.fetchone()
+        if existing:
+            order = dict(existing)
+        else:
+            cur.execute(
+                """INSERT INTO daily_orders
+                       (owner_id, store_id, store_name_raw, address_raw,
+                        delivery_date, quantity, products, notes)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                   RETURNING id, store_id, store_name_raw, delivery_date::text""",
+                (
+                    uid,
+                    execution["store_id"],
+                    execution["store_name"] or "",
+                    execution["address"] or "",
+                    body.delivery_date,
+                    float(execution["quantity"] or 0),
+                    execution["products"] or "",
+                    "Создано из переноса доставки",
+                ),
+            )
+            order = dict(cur.fetchone())
+
+        cur.execute(
+            """UPDATE route_executions
+                  SET rescheduled_date=%s, updated_at=NOW()
+                WHERE id=%s AND assignment_id=%s
+            RETURNING id, rescheduled_date""",
+            (body.delivery_date, execution_id, assignment_id),
+        )
+        updated = dict(cur.fetchone())
+        conn.commit()
+        return {"order": order, "execution": updated}
+    except HTTPException:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
 @app.get("/api/driver/{token}")
 def get_driver_assignment(token: str):
     """Public, token-scoped driver view. No account or cookie is accepted."""
@@ -7364,10 +7479,22 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
     if not current:
         raise HTTPException(status_code=404, detail="Точка рейса не найдена")
     planned_qty = float(current.get("quantity") or 0)
+    quantity_required_statuses = {"delivered", "partial"}
+    if body.status in quantity_required_statuses and body.actual_qty is None:
+        raise HTTPException(status_code=422, detail="Укажите фактически доставленное количество")
     actual_qty = float(
-        current.get("actual_qty") if body.actual_qty is None else body.actual_qty
+        0 if body.actual_qty is None and body.status not in quantity_required_statuses
+        else current.get("actual_qty") or 0
+        if body.actual_qty is None
+        else body.actual_qty
     )
-    _validate_execution_quantities(body.status, planned_qty, actual_qty)
+    # A few legacy executions were created with quantity=0 even though the
+    # driver had a real order. Accept their first delivered quantity and
+    # repair the execution row instead of returning a misleading 422.
+    if body.status == "delivered" and planned_qty <= 0 and actual_qty > 0:
+        planned_qty = actual_qty
+    if body.status in quantity_required_statuses or body.actual_qty is not None:
+        _validate_execution_quantities(body.status, planned_qty, actual_qty)
     if body.status == "rescheduled" and not body.driver_comment.strip():
         raise HTTPException(status_code=422, detail="Для переноса укажите причину")
     payment_method = body.payment_method or current.get("payment_method") or "none"
@@ -7385,7 +7512,9 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
         """UPDATE route_executions
-           SET status=%s, actual_qty=%s, payment_method=%s, payment_status=%s,
+           SET status=%s, quantity=CASE WHEN quantity <= 0 AND %s='delivered'
+                                        THEN %s ELSE quantity END,
+               actual_qty=%s, payment_method=%s, payment_status=%s,
                driver_comment=%s,
                rescheduled_date=CASE WHEN %s='rescheduled' THEN rescheduled_date ELSE NULL END,
                updated_at=NOW(),
@@ -7396,7 +7525,7 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
                      products, quantity, actual_qty, arrive_by, yandex_url, status,
                      payment_method, payment_status, driver_comment, rescheduled_date,
                      updated_at, delivered_at""",
-        (body.status, actual_qty, payment_method, payment_status, body.driver_comment.strip(),
+        (body.status, body.status, planned_qty, actual_qty, payment_method, payment_status, body.driver_comment.strip(),
          body.status,
          body.status, execution_id, assignment["id"]),
     )

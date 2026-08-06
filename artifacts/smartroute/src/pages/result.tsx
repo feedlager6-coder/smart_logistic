@@ -83,7 +83,7 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
   const [copiedAssignment, setCopiedAssignment] = useState<number | null>(null);
   const [issuedLinks, setIssuedLinks] = useState<Record<number, { driver_url: string; whatsapp_url: string }>>({});
   const [rescheduleDates, setRescheduleDates] = useState<Record<number, string>>({});
-  const [savingReschedule, setSavingReschedule] = useState<number | null>(null);
+  const [creatingRescheduledOrder, setCreatingRescheduledOrder] = useState<number | null>(null);
   const { data, isLoading, refetch } = useQuery<{ assignments: Assignment[] }>({
     queryKey: ["route-assignments", sessionId],
     queryFn: async () => {
@@ -91,7 +91,8 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
       if (!response.ok) throw new Error("Не удалось загрузить исполнение маршрута");
       return response.json();
     },
-    refetchInterval: 10_000,
+    // MVP uses polling instead of WebSocket; keep dispatcher updates quick.
+    refetchInterval: 3_000,
   });
 
   const createAssignment = async (routeIndex: number) => {
@@ -138,24 +139,24 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
     window.setTimeout(() => setCopiedAssignment(null), 1800);
   };
 
-  const saveRescheduleDate = async (assignmentId: number, executionId: number) => {
+  const createRescheduledOrder = async (assignmentId: number, executionId: number) => {
     const rescheduledDate = rescheduleDates[executionId];
     if (!rescheduledDate) return;
-    setSavingReschedule(executionId);
+    setCreatingRescheduledOrder(executionId);
     try {
-      const response = await fetch(`/api/route/assignments/${assignmentId}/executions/${executionId}`, {
-        method: "PATCH",
+      const response = await fetch(`/api/route/assignments/${assignmentId}/executions/${executionId}/rescheduled-order`, {
+        method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rescheduled_date: rescheduledDate }),
+        body: JSON.stringify({ delivery_date: rescheduledDate }),
       });
       const payload = await response.json().catch(() => null) as { detail?: string } | null;
-      if (!response.ok) throw new Error(`HTTP ${response.status}: ${payload?.detail || "Не удалось сохранить дату"}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}: ${payload?.detail || "Не удалось создать заявку"}`);
       await refetch();
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : "Не удалось сохранить дату переноса");
+      window.alert(error instanceof Error ? error.message : "Не удалось создать заявку на новую дату");
     } finally {
-      setSavingReschedule(null);
+      setCreatingRescheduledOrder(null);
     }
   };
 
@@ -227,8 +228,19 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                     <div key={execution.id} className="flex flex-wrap items-center gap-2 rounded-md border px-2.5 py-2 text-xs">
                       <span className="font-semibold text-muted-foreground w-5">{execution.visit_order}</span>
                       <span className="truncate flex-1">{execution.store_name}</span>
+                      <span className="whitespace-nowrap text-muted-foreground">
+                        {execution.actual_qty ?? 0}/{execution.quantity ?? 0} шт.
+                      </span>
                       {execution.shortfall_qty > 0 && <span className="text-orange-700 whitespace-nowrap">−{execution.shortfall_qty} шт.</span>}
                       <span className={`rounded-full px-2 py-0.5 whitespace-nowrap ${executionStatusClass[execution.status]}`}>{executionStatusLabels[execution.status]}</span>
+                      <span className="whitespace-nowrap text-muted-foreground">
+                        {execution.payment_method === "cash" ? "Наличные" :
+                          execution.payment_method === "card" ? "Карта" :
+                            execution.payment_method === "transfer" ? "Перевод" : "Без оплаты"}
+                        {" · "}
+                        {execution.payment_status === "paid" ? "Оплачено" :
+                          execution.payment_status === "not_paid" ? "Не оплачено" : "Ожидает оплаты"}
+                      </span>
                       {execution.driver_comment && <span className="text-muted-foreground truncate max-w-[180px]" title={execution.driver_comment}>«{execution.driver_comment}»</span>}
                       {execution.status === "rescheduled" && (
                         <div className="basis-full flex items-center gap-2 pt-1">
@@ -241,10 +253,10 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                           <Button
                             size="sm"
                             variant="outline"
-                            disabled={!rescheduleDates[execution.id] || savingReschedule === execution.id}
-                            onClick={() => saveRescheduleDate(assignment.id, execution.id)}
+                            disabled={!rescheduleDates[execution.id] || creatingRescheduledOrder === execution.id}
+                            onClick={() => createRescheduledOrder(assignment.id, execution.id)}
                           >
-                            {savingReschedule === execution.id ? <Loader2 className="w-3 h-3 animate-spin" /> : "Сохранить дату"}
+                            {creatingRescheduledOrder === execution.id ? <Loader2 className="w-3 h-3 animate-spin" /> : "Создать заявку на новую дату"}
                           </Button>
                         </div>
                       )}

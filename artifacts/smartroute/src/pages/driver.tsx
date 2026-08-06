@@ -67,7 +67,7 @@ export function DriverPage() {
   const [savingId, setSavingId] = useState<number | null>(null);
   const [drafts, setDrafts] = useState<Record<number, {
     status: Status;
-    actual_qty: number;
+    actual_qty: number | "";
     payment_method: Payment;
     payment_status: PaymentStatus;
     driver_comment: string;
@@ -94,12 +94,27 @@ export function DriverPage() {
 
   const saveExecution = async (execution: Execution) => {
     const draft = draftFor(execution);
+    if (draft.status === "planned") {
+      window.alert("Выберите действие по доставке");
+      return;
+    }
+    const requestBody = {
+      status: draft.status,
+      // Quantity is meaningful only for delivered/partial. Omitting it for
+      // failed/rescheduled keeps those actions independent from quantity.
+      ...(draft.status === "delivered" || draft.status === "partial"
+        ? { actual_qty: draft.actual_qty === "" ? undefined : Number(draft.actual_qty) }
+        : {}),
+      payment_method: draft.payment_method,
+      payment_status: draft.payment_status,
+      driver_comment: draft.driver_comment,
+    };
     setSavingId(execution.id);
     try {
       const response = await fetch(`/api/driver/${encodeURIComponent(token)}/executions/${execution.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(draft),
+        body: JSON.stringify(requestBody),
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => null) as
@@ -188,22 +203,32 @@ export function DriverPage() {
                 </div>
               </CardHeader>
               <CardContent className="space-y-3">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <label className="text-xs text-muted-foreground">Статус
-                    <select className="mt-1 w-full h-10 rounded-md border bg-background px-2 text-sm" value={draft.status} onChange={(event) => {
-                      const status = event.target.value as Status;
-                      setDrafts((current) => ({
-                        ...current,
-                        [execution.id]: {
-                          ...draft,
-                          status,
-                          actual_qty: status === "delivered" ? execution.quantity : draft.actual_qty,
-                        },
-                      }));
-                    }}>
-                      {Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                    </select>
-                  </label>
+                <div className="space-y-2">
+                  <span className="text-xs text-muted-foreground">Действие по доставке</span>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(["delivered", "partial", "failed", "rescheduled"] as const).map((status) => (
+                      <Button
+                        key={status}
+                        type="button"
+                        variant={draft.status === status ? "default" : "outline"}
+                        className="h-12 text-sm font-semibold"
+                        onClick={() => setDrafts((current) => ({
+                          ...current,
+                          [execution.id]: {
+                            ...draft,
+                            status,
+                            actual_qty: status === "delivered"
+                              ? execution.quantity
+                              : status === "partial"
+                                ? ""
+                                : "",
+                          },
+                        }))}
+                      >
+                        {statusLabels[status]}
+                      </Button>
+                    ))}
+                  </div>
                   {draft.status !== "rescheduled" && (
                     <>
                       <label className="text-xs text-muted-foreground">Фактически доставлено
@@ -212,13 +237,19 @@ export function DriverPage() {
                           min={0}
                           max={execution.quantity}
                           step="any"
+                          inputMode="decimal"
                           className="mt-1 w-full h-10 rounded-md border bg-background px-2 text-sm"
                           value={draft.actual_qty}
-                          onFocus={(event) => event.currentTarget.select()}
-                          onChange={(event) => setDrafts((current) => ({
-                            ...current,
-                            [execution.id]: { ...draft, actual_qty: Number(event.target.value) },
-                          }))}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            setDrafts((current) => ({
+                              ...current,
+                              [execution.id]: {
+                                ...draft,
+                                actual_qty: value === "" ? "" : Number(value),
+                              },
+                            }));
+                          }}
                         />
                       </label>
                       <label className="text-xs text-muted-foreground">Способ оплаты
