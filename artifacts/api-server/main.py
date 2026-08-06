@@ -3152,6 +3152,73 @@ class ExecutionUpdate(BaseModel):
     driver_comment: str = ""
 
 
+_PRODUCT_QUANTITY_RE = re.compile(
+    r"^\s*(?:(?P<prefix>\d+(?:[.,]\d+)?)\s+\S|(?P<suffix>\S.+?)\s+(?P<suffix_qty>\d+(?:[.,]\d+)?)"
+    r"|(?P<multiplier>\S.+?)\s*[xх×]\s*(?P<multiplier_qty>\d+(?:[.,]\d+)?))",
+    re.IGNORECASE,
+)
+
+
+def _quantity_from_products(products: object) -> Optional[float]:
+    """Extract the total planned quantity from a products display string.
+
+    Product summaries come from several importers, so accept both
+    ``2 воды``/``воды 2`` and ``вода x2``/``Молоко×5``.  A bare product name
+    does not provide enough information and intentionally returns None.
+    """
+    if products is None:
+        return None
+    text = str(products).strip()
+    if not text:
+        return None
+
+    total = 0.0
+    found = False
+    for item in re.split(r"[,;]\s*", text):
+        item = item.strip()
+        if not item:
+            continue
+        match = _PRODUCT_QUANTITY_RE.match(item)
+        if not match:
+            continue
+        raw_quantity = (
+            match.group("prefix")
+            or match.group("suffix_qty")
+            or match.group("multiplier_qty")
+        )
+        if raw_quantity is None:
+            continue
+        quantity = float(raw_quantity.replace(",", "."))
+        if math.isfinite(quantity) and quantity > 0:
+            total += quantity
+            found = True
+    return total if found else None
+
+
+def _execution_quantity(
+    quantity: object,
+    products: object,
+    fallback_quantity: object = None,
+) -> float:
+    """Return a positive planned quantity without changing the DB schema."""
+    try:
+        parsed_quantity = float(quantity or 0)
+    except (TypeError, ValueError):
+        parsed_quantity = 0.0
+    if math.isfinite(parsed_quantity) and parsed_quantity > 0:
+        return parsed_quantity
+    product_quantity = _quantity_from_products(products)
+    if product_quantity is not None:
+        return product_quantity
+    try:
+        parsed_fallback = float(fallback_quantity or 0)
+    except (TypeError, ValueError):
+        parsed_fallback = 0.0
+    if math.isfinite(parsed_fallback) and parsed_fallback > 0:
+        return parsed_fallback
+    return 1.0
+
+
 def _validate_execution_quantities(status: str, planned_qty: float, actual_qty: float) -> None:
     """Keep delivered quantities bounded and status-consistent."""
     if not math.isfinite(planned_qty) or not math.isfinite(actual_qty):
@@ -6999,7 +7066,11 @@ def build_route(request: Request, body: RouteRequest):
                         od = _orders_by_store.get(stop["store_id"])
                         if od:
                             stop["products"] = od.get("products") or ""
-                            stop["quantity"] = float(od.get("quantity") or 0)
+                            stop["quantity"] = _execution_quantity(
+                                stop.get("quantity"),
+                                od.get("products"),
+                                od.get("quantity"),
+                            )
         except Exception as _enrich_err:
             logger.warning(f"Failed to enrich stops with products: {_enrich_err}")
 
@@ -7112,6 +7183,25 @@ def _load_assignment_for_token(token: str) -> tuple[dict, list[dict]]:
         (assignment["id"],),
     )
     executions = [dict(r) for r in cur.fetchall()]
+    # Repair legacy rows created before products-derived quantities existed.
+    # This is intentionally a safe data update: it only changes rows whose
+    # planned quantity is zero and leaves delivery status/actual quantity intact.
+    repaired = []
+    for execution in executions:
+        if float(execution.get("quantity") or 0) > 0:
+            continue
+        planned_qty = _execution_quantity(0, execution.get("products"))
+        cur.execute(
+            """UPDATE route_executions
+                  SET quantity=%s, updated_at=NOW()
+                WHERE id=%s AND assignment_id=%s AND quantity <= 0""",
+            (planned_qty, execution["id"], assignment["id"]),
+        )
+        if cur.rowcount:
+            execution["quantity"] = planned_qty
+            repaired.append(execution["id"])
+    if repaired:
+        conn.commit()
     cur.close(); conn.close()
     return dict(assignment), executions
 
@@ -7273,13 +7363,12 @@ def create_route_assignment(session_id: int, body: AssignmentCreate, request: Re
                         assignment["id"], stop.get("store_id"), stop.get("order", 0),
                         stop.get("store_name", ""), stop.get("address", ""),
                         stop.get("lat"), stop.get("lon"), stop.get("products", ""),
-                        (
-                            float(stop.get("quantity") or 0)
-                            or (
-                                quantities_by_store.get(int(stop["store_id"]), 0)
-                                if stop.get("store_id") is not None
-                                else 0
-                            )
+                        _execution_quantity(
+                            stop.get("quantity"),
+                            stop.get("products"),
+                            quantities_by_store.get(int(stop["store_id"]), 0)
+                            if stop.get("store_id") is not None
+                            else 0,
                         ),
                         0,
                         stop.get("arrive_by", ""),
