@@ -902,6 +902,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "aiofiles" },
+    { name = "bcrypt" },
     { name = "fastapi" },
     { name = "openpyxl" },
     { name = "ortools" },
@@ -916,6 +917,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "aiofiles", specifier = ">=23.1" },
+    { name = "bcrypt", specifier = ">=5.0.0" },
     { name = "fastapi", specifier = ">=0.136" },
     { name = "openpyxl", specifier = ">=3.1" },
     { name = "ortools", specifier = ">=9.10" },

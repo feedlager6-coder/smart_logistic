@@ -2019,6 +2019,7 @@ def init_db():
             lon DOUBLE PRECISION,
             products TEXT DEFAULT '',
             quantity DOUBLE PRECISION DEFAULT 0,
+            plan_qty DOUBLE PRECISION DEFAULT 0,
             actual_qty DOUBLE PRECISION DEFAULT 0,
             arrive_by TEXT DEFAULT '',
             yandex_url TEXT DEFAULT '',
@@ -2043,6 +2044,7 @@ def init_db():
         ("lon", "DOUBLE PRECISION"),
         ("products", "TEXT DEFAULT ''"),
         ("quantity", "DOUBLE PRECISION DEFAULT 0"),
+        ("plan_qty", "DOUBLE PRECISION DEFAULT 0"),
         ("actual_qty", "DOUBLE PRECISION"),
         ("arrive_by", "TEXT DEFAULT ''"),
         ("yandex_url", "TEXT DEFAULT ''"),
@@ -2079,6 +2081,31 @@ def init_db():
     )
     cur.execute("ALTER TABLE route_executions ALTER COLUMN payment_status SET DEFAULT 'pending'")
     cur.execute("ALTER TABLE route_executions ALTER COLUMN payment_status SET NOT NULL")
+    # ── Backfill plan_qty from products text for legacy rows with quantity=0 ──
+    # Rows created before the products parser existed may have quantity=0 even
+    # though the products column holds human-readable amounts like "2 воды".
+    # We parse them in Python (psycopg2 can't run Python regexes in SQL) and
+    # issue individual UPDATE statements only for affected rows.
+    cur.execute(
+        "SELECT id, products FROM route_executions WHERE COALESCE(quantity, 0) <= 0 AND products IS NOT NULL AND products <> ''"
+    )
+    _rows_to_fix = cur.fetchall()
+    for _fix_row in _rows_to_fix:
+        _recovered = _parse_qty_from_products(str(_fix_row["products"] or ""))
+        if _recovered > 0:
+            cur.execute(
+                "UPDATE route_executions SET quantity=%s WHERE id=%s AND COALESCE(quantity,0) <= 0",
+                (_recovered, _fix_row["id"]),
+            )
+    # Ensure plan_qty is populated for ALL existing rows (including ones
+    # that already had a stored quantity but never got plan_qty written).
+    cur.execute("ALTER TABLE route_executions ALTER COLUMN plan_qty SET DEFAULT 0")
+    cur.execute("ALTER TABLE route_executions ALTER COLUMN plan_qty SET NOT NULL")
+    cur.execute(
+        """UPDATE route_executions
+              SET plan_qty = GREATEST(COALESCE(quantity, 0), COALESCE(plan_qty, 0))
+            WHERE COALESCE(plan_qty, 0) <= 0 AND COALESCE(quantity, 0) > 0"""
+    )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_assignments_owner ON route_assignments(owner_id, session_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_executions_assignment ON route_executions(assignment_id, visit_order)")
     # ── User plan & admin notes ────────────────────────────────────────────────
@@ -3150,6 +3177,74 @@ class ExecutionUpdate(BaseModel):
     payment_method: Optional[str] = None
     payment_status: Optional[str] = None
     driver_comment: str = ""
+
+
+def _parse_qty_from_products(text: str) -> float:
+    """Parse a total planned quantity from a human-readable products string.
+
+    Supported formats (Russian delivery context):
+      "2 воды"          → 2   (leading number before word)
+      "1 вода"          → 1
+      "Воды 3"          → 3   (trailing number)
+      "Бутыль 1"        → 1
+      "Вода 19л x2"     → 2   (xN / ×N multiplier)
+      "Молоко x5"       → 5
+      "Молоко×4, Сахар×16" → 20  (sum of all ×N values)
+      "Сыр"             → 1   (no number → default 1)
+
+    Numbers embedded in unit descriptions ("19л") are ignored when an
+    explicit xN/×N multiplier is present elsewhere in the string.
+    Always returns at least 1.0.
+    """
+    if not text or not text.strip():
+        return 1.0
+
+    # Pattern 1: sum all explicit multipliers written as ×N or xN
+    # Handles both the _products_str format (Молоко×4) and free-text (x2).
+    cross_hits = re.findall(r"[×xX×]\s*(\d+(?:[.,]\d+)?)", text)
+    if cross_hits:
+        total = sum(float(h.replace(",", ".")) for h in cross_hits)
+        return max(total, 1.0)
+
+    # Pattern 2: leading integer at the very start ("2 воды")
+    m = re.match(r"^\s*(\d+(?:[.,]\d+)?)\s+\S", text)
+    if m:
+        return max(float(m.group(1).replace(",", ".")), 1.0)
+
+    # Pattern 3: trailing integer at the very end ("Воды 3", "Бутыль 1")
+    m = re.search(r"\b(\d+(?:[.,]\d+)?)\s*$", text)
+    if m:
+        return max(float(m.group(1).replace(",", ".")), 1.0)
+
+    # Pattern 4: any standalone number NOT immediately followed by a letter
+    # (avoids matching "19" in "19л" when no xN is present)
+    for hit in re.finditer(r"\b(\d+(?:[.,]\d+)?)\b", text):
+        after = text[hit.end():].lstrip()
+        if not after or after[0] not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\u0430-\u044f\u0410-\u042f":
+            return max(float(hit.group(1).replace(",", ".")), 1.0)
+
+    return 1.0
+
+
+def _effective_planned_qty(row_quantity, products_text: str, row_plan_qty=None) -> float:
+    """Return the best available plan_qty for an execution row.
+
+    Priority:
+      1. ``plan_qty`` DB column (canonical persisted field)
+      2. Legacy ``quantity`` column (kept for backward compat)
+      3. Parse from ``products`` text (recovery for zero-qty legacy rows)
+      4. 1.0 (absolute fallback so partial delivery never raises 422 on
+         a row that truly has no quantity information at all)
+    """
+    if row_plan_qty is not None:
+        stored = float(row_plan_qty or 0)
+        if stored > 0:
+            return stored
+    stored = float(row_quantity or 0)
+    if stored > 0:
+        return stored
+    parsed = _parse_qty_from_products(products_text or "")
+    return parsed  # _parse_qty_from_products already returns ≥ 1.0
 
 
 def _validate_execution_quantities(status: str, planned_qty: float, actual_qty: float) -> None:
@@ -7105,7 +7200,7 @@ def _load_assignment_for_token(token: str) -> tuple[dict, list[dict]]:
         raise HTTPException(status_code=410, detail="Срок действия ссылки водителя истёк. Попросите диспетчера выдать новую ссылку.")
     cur.execute(
         """SELECT id, store_id, visit_order, store_name, address, lat, lon,
-                  products, quantity, actual_qty, arrive_by, yandex_url, status,
+                  products, quantity, plan_qty, actual_qty, arrive_by, yandex_url, status,
                   payment_method, payment_status, driver_comment, rescheduled_date,
                   updated_at, delivered_at
            FROM route_executions WHERE assignment_id=%s ORDER BY visit_order""",
@@ -7117,7 +7212,12 @@ def _load_assignment_for_token(token: str) -> tuple[dict, list[dict]]:
 
 
 def _serialize_execution(row: dict) -> dict:
-    planned_qty = float(row.get("quantity") or 0)
+    products_text = row.get("products") or ""
+    # Use the effective planned qty: plan_qty column (canonical) first,
+    # then legacy quantity column, then parse from products text.
+    planned_qty = _effective_planned_qty(
+        row.get("quantity"), products_text, row_plan_qty=row.get("plan_qty")
+    )
     actual_raw = row.get("actual_qty")
     actual_qty = planned_qty if actual_raw is None else float(actual_raw)
     status = row.get("status") or "planned"
@@ -7125,6 +7225,7 @@ def _serialize_execution(row: dict) -> dict:
         status = "planned"
     if status == "planned":
         actual_qty = 0
+    remaining = max(planned_qty - actual_qty, 0)
     return {
         "id": row["id"],
         "store_id": row.get("store_id"),
@@ -7133,13 +7234,13 @@ def _serialize_execution(row: dict) -> dict:
         "address": row.get("address") or "",
         "lat": row.get("lat"),
         "lon": row.get("lon"),
-        "products": row.get("products") or "",
+        "products": products_text,
+        # Both names returned for forward/backward compatibility.
         "quantity": planned_qty,
+        "plan_qty": planned_qty,
         "actual_qty": actual_qty,
-        "shortfall_qty": max(
-            planned_qty - actual_qty,
-            0,
-        ),
+        "shortfall_qty": remaining,
+        "remaining_qty": remaining,
         "arrive_by": row.get("arrive_by") or "",
         "yandex_url": row.get("yandex_url") or "",
         "status": status,
@@ -7175,7 +7276,7 @@ def list_route_assignments(session_id: int, request: Request):
     if rows:
         cur.execute(
             """SELECT assignment_id, id, store_id, visit_order, store_name,
-                      address, lat, lon, products, quantity, actual_qty, arrive_by,
+                      address, lat, lon, products, quantity, plan_qty, actual_qty, arrive_by,
                       yandex_url, status, payment_method, payment_status,
                       driver_comment, rescheduled_date, updated_at, delivered_at
                FROM route_executions
@@ -7266,21 +7367,23 @@ def create_route_assignment(session_id: int, body: AssignmentCreate, request: Re
                 cur.execute(
                     """INSERT INTO route_executions
                        (assignment_id, store_id, visit_order, store_name, address, lat, lon,
-                        products, quantity, actual_qty, arrive_by, yandex_url,
+                        products, quantity, plan_qty, actual_qty, arrive_by, yandex_url,
                         payment_status)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (
                         assignment["id"], stop.get("store_id"), stop.get("order", 0),
                         stop.get("store_name", ""), stop.get("address", ""),
                         stop.get("lat"), stop.get("lon"), stop.get("products", ""),
-                        (
+                        # quantity (legacy) and plan_qty (canonical) — same computed value
+                        *([_effective_planned_qty(
                             float(stop.get("quantity") or 0)
                             or (
                                 quantities_by_store.get(int(stop["store_id"]), 0)
                                 if stop.get("store_id") is not None
                                 else 0
-                            )
-                        ),
+                            ),
+                            stop.get("products", ""),
+                        )] * 2),
                         0,
                         stop.get("arrive_by", ""),
                         stop.get("yandex_url", ""), "pending",
@@ -7441,8 +7544,9 @@ def create_rescheduled_order(
                     execution["address"] or "",
                     body.delivery_date,
                     max(
-                        float(execution["quantity"] or 0)
-                        - float(execution["actual_qty"] or 0),
+                        _effective_planned_qty(
+                            execution["quantity"], execution.get("products") or ""
+                        ) - float(execution["actual_qty"] or 0),
                         0,
                     ),
                     execution["products"] or "",
@@ -7505,7 +7609,9 @@ def create_remaining_order(
         if not execution["store_id"]:
             raise HTTPException(status_code=422, detail="У точки нет связанного магазина")
 
-        planned_qty = float(execution["quantity"] or 0)
+        planned_qty = _effective_planned_qty(
+            execution["quantity"], execution.get("products") or ""
+        )
         actual_qty = float(execution["actual_qty"] or 0)
         remaining_qty = max(planned_qty - actual_qty, 0)
         if remaining_qty <= 0:
@@ -7569,7 +7675,11 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
     current = next((row for row in executions if int(row["id"]) == execution_id), None)
     if not current:
         raise HTTPException(status_code=404, detail="Точка рейса не найдена")
-    planned_qty = float(current.get("quantity") or 0)
+    # Use the effective planned qty: stored value when > 0, else parse from
+    # the products text so legacy rows with quantity=0 work correctly.
+    planned_qty = _effective_planned_qty(
+        current.get("quantity"), current.get("products") or ""
+    )
     quantity_required_statuses = {"delivered", "partial"}
     if body.status in quantity_required_statuses and body.actual_qty is None:
         raise HTTPException(status_code=422, detail="Укажите фактически доставленное количество")
@@ -7579,10 +7689,10 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
         if body.actual_qty is None
         else body.actual_qty
     )
-    # A few legacy executions were created with quantity=0 even though the
-    # driver had a real order. Accept their first delivered quantity and
-    # repair the execution row instead of returning a misleading 422.
-    if body.status == "delivered" and planned_qty <= 0 and actual_qty > 0:
+    # For delivered/partial with quantity=0 legacy rows: the effective_planned_qty
+    # already recovered from products, but if actual_qty still exceeds it (driver
+    # entered a larger number), accept the driver's value as the plan.
+    if body.status in quantity_required_statuses and planned_qty <= 0 and actual_qty > 0:
         planned_qty = actual_qty
     if body.status in quantity_required_statuses or body.actual_qty is not None:
         _validate_execution_quantities(body.status, planned_qty, actual_qty)
@@ -7603,8 +7713,11 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
         """UPDATE route_executions
-           SET status=%s, quantity=CASE WHEN quantity <= 0 AND %s='delivered'
-                                        THEN %s ELSE quantity END,
+           SET status=%s,
+               quantity=CASE WHEN quantity <= 0 AND %s IN ('delivered','partial')
+                             THEN %s ELSE quantity END,
+               plan_qty=CASE WHEN COALESCE(plan_qty,0) <= 0 AND %s IN ('delivered','partial')
+                             THEN %s ELSE COALESCE(plan_qty, quantity) END,
                actual_qty=%s, payment_method=%s, payment_status=%s,
                driver_comment=%s,
                rescheduled_date=CASE WHEN %s='rescheduled' THEN rescheduled_date ELSE NULL END,
@@ -7613,10 +7726,11 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
                                  THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END
            WHERE id=%s AND assignment_id=%s
            RETURNING id, store_id, visit_order, store_name, address, lat, lon,
-                     products, quantity, actual_qty, arrive_by, yandex_url, status,
+                     products, quantity, plan_qty, actual_qty, arrive_by, yandex_url, status,
                      payment_method, payment_status, driver_comment, rescheduled_date,
                      updated_at, delivered_at""",
-        (body.status, body.status, planned_qty, actual_qty, payment_method, payment_status, body.driver_comment.strip(),
+        (body.status, body.status, planned_qty, body.status, planned_qty,
+         actual_qty, payment_method, payment_status, body.driver_comment.strip(),
          body.status,
          body.status, execution_id, assignment["id"]),
     )
