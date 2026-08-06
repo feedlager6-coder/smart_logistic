@@ -18,6 +18,7 @@ import { SettingsPage } from "@/pages/settings";
 import { OrdersPage } from "@/pages/orders";
 import { IntegrationsPage } from "@/pages/integrations";
 import { IntegrationsSpecialistPage } from "@/pages/integrations-specialist";
+import { DriverPage } from "@/pages/driver";
 import { ApiError } from "@workspace/api-client-react";
 
 function is401(error: unknown): boolean {
@@ -93,7 +94,10 @@ function App() {
           <AuthProvider>
             <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
               <ErrorBoundary>
-                <ProtectedRouter />
+                <Switch>
+                  <Route path="/driver/:token" component={DriverPage} />
+                  <Route component={ProtectedRouter} />
+                </Switch>
               </ErrorBoundary>
             </WouterRouter>
           </AuthProvider>

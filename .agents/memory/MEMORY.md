@@ -44,3 +44,4 @@
 - [quick-setup key rotation](quick-setup-key-rotation.md) — quick-setup atomically revokes old api_key_id before creating new key; ZIP package_b64 returned once in response.
 - [1C auto-store-sync design](1c-auto-store-sync.md) — counterparty_code→stores.external_id naming asymmetry; _auto_create_store_if_missing priority; db_stores mutated in-place per batch.
 - [1C BSL v3 architecture](1c-bsl-v3.md) — single source of truth: `_1C_BSL_MODULE` in main.py; download-module endpoint fills {{BASE_URL}} + placeholder key (never stored); SmartRouteModule.bsl mirrors it. EPF_SPEC.md = full developer spec. SSL Ложь mandatory for Windows Server 2012/2016.
+- [Delivery execution architecture](delivery-execution-architecture.md) — immutable route optimization is separated from operational assignments and point executions.

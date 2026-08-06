@@ -1,11 +1,12 @@
 import { useEffect, useState, Fragment } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Link, useLocation, useParams } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check, AlertTriangle, Printer, Info, Settings, Package } from "lucide-react";
+import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check, AlertTriangle, Printer, Info, Settings, Package, Users, Link2, Loader2 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap } from "react-leaflet";
 import 'leaflet/dist/leaflet.css';
@@ -32,6 +33,176 @@ type VehicleRouteWithUrls = RouteResult["routes"][number] & {
 };
 
 const COLORS = ["#0ea5e9", "#f43f5e", "#8b5cf6", "#10b981", "#f59e0b", "#6366f1", "#ec4899", "#14b8a6", "#f97316", "#84cc16"];
+
+type ExecutionStatus = "planned" | "loaded" | "on_route" | "delivered" | "partial" | "failed" | "rescheduled";
+type Assignment = {
+  id: number;
+  route_index: number;
+  driver_name: string;
+  vehicle_name: string;
+  status: string;
+  total_points: number;
+  completed_points: number;
+  driver_url?: string;
+  whatsapp_url?: string;
+  executions?: Array<{
+    id: number;
+    visit_order: number;
+    store_name: string;
+    status: ExecutionStatus;
+    payment_method: string;
+    driver_comment: string;
+  }>;
+};
+
+const executionStatusLabels: Record<ExecutionStatus, string> = {
+  planned: "План",
+  loaded: "Загружено",
+  on_route: "В пути",
+  delivered: "Доставлено",
+  partial: "Частично",
+  failed: "Не доставлено",
+  rescheduled: "Перенесено",
+};
+
+const executionStatusClass: Record<ExecutionStatus, string> = {
+  planned: "bg-muted text-muted-foreground",
+  loaded: "bg-sky-100 text-sky-800",
+  on_route: "bg-amber-100 text-amber-800",
+  delivered: "bg-emerald-100 text-emerald-800",
+  partial: "bg-orange-100 text-orange-800",
+  failed: "bg-red-100 text-red-800",
+  rescheduled: "bg-violet-100 text-violet-800",
+};
+
+function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; routes: RouteResult["routes"] }) {
+  const [driverNames, setDriverNames] = useState<Record<number, string>>({});
+  const [creatingRoute, setCreatingRoute] = useState<number | null>(null);
+  const [copiedAssignment, setCopiedAssignment] = useState<number | null>(null);
+  const [issuedLinks, setIssuedLinks] = useState<Record<number, { driver_url: string; whatsapp_url: string }>>({});
+  const { data, isLoading, refetch } = useQuery<{ assignments: Assignment[] }>({
+    queryKey: ["route-assignments", sessionId],
+    queryFn: async () => {
+      const response = await fetch(`/api/route/sessions/${sessionId}/assignments`, { credentials: "include" });
+      if (!response.ok) throw new Error("Не удалось загрузить исполнение маршрута");
+      return response.json();
+    },
+    refetchInterval: 10_000,
+  });
+
+  const createAssignment = async (routeIndex: number) => {
+    setCreatingRoute(routeIndex);
+    try {
+      const response = await fetch(`/api/route/sessions/${sessionId}/assignments`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          route_index: routeIndex,
+          driver_name: driverNames[routeIndex] ?? "",
+          vehicle_name: routes[routeIndex].vehicle_name,
+        }),
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        throw new Error(error.detail || "Не удалось создать рейс");
+      }
+      const created = await response.json() as Assignment & { driver_url?: string; whatsapp_url?: string };
+      if (created.driver_url) {
+        const driverUrl = new URL(created.driver_url, window.location.origin).toString();
+        setIssuedLinks((current) => ({
+          ...current,
+          [routeIndex]: {
+            driver_url: driverUrl,
+            whatsapp_url: `https://wa.me/?text=${encodeURIComponent(`SmartRoute: маршрут водителя ${driverUrl}`)}`,
+          },
+        }));
+      }
+      await refetch();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Не удалось создать рейс");
+    } finally {
+      setCreatingRoute(null);
+    }
+  };
+
+  const copyDriverLink = async (assignment: Assignment) => {
+    const link = assignment.driver_url;
+    if (!link) return;
+    await navigator.clipboard.writeText(link);
+    setCopiedAssignment(assignment.id);
+    window.setTimeout(() => setCopiedAssignment(null), 1800);
+  };
+
+  return (
+    <Card className="print:hidden">
+      <CardHeader className="pb-3 border-b bg-muted/20">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <CardTitle className="flex items-center gap-2 text-lg"><Users className="w-5 h-5 text-primary" />Исполнение доставок</CardTitle>
+            <p className="text-sm text-muted-foreground mt-1">Назначьте рейс водителю и следите за фактическими статусами точек.</p>
+          </div>
+          {isLoading && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
+        </div>
+      </CardHeader>
+      <CardContent className="p-0 divide-y">
+        {routes.map((route, routeIndex) => {
+          const assignment = data?.assignments?.find((item) => item.route_index === routeIndex);
+          const issuedLink = issuedLinks[routeIndex];
+          const driverUrl = issuedLink?.driver_url;
+          const whatsappUrl = issuedLink?.whatsapp_url;
+          const completed = assignment?.completed_points ?? 0;
+          const total = assignment?.total_points ?? route.stores.length;
+          const percent = total ? Math.round(completed / total * 100) : 0;
+          return (
+            <div key={`${route.vehicle_name}-${routeIndex}`} className="p-4 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0" style={{ backgroundColor: COLORS[routeIndex % COLORS.length] }}><Car className="w-4 h-4" /></div>
+                  <div className="min-w-0">
+                    <p className="font-semibold truncate">{route.vehicle_name}</p>
+                    <p className="text-xs text-muted-foreground">{completed} из {total} точек завершено{assignment ? ` · ${assignment.status === "completed" ? "рейс завершён" : "рейс активен"}` : ""}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {driverUrl ? (
+                    <>
+                      <Button size="sm" variant="outline" className="gap-1.5" onClick={() => navigator.clipboard.writeText(driverUrl).then(() => { setCopiedAssignment(assignment?.id ?? routeIndex); window.setTimeout(() => setCopiedAssignment(null), 1800); })}><Link2 className="w-3.5 h-3.5" />{copiedAssignment === (assignment?.id ?? routeIndex) ? "Скопировано" : "Ссылка водителю"}</Button>
+                      <Button size="sm" variant="outline" className="text-emerald-700 border-emerald-200" onClick={() => window.open(whatsappUrl, "_blank")}>WhatsApp</Button>
+                    </>
+                  ) : null}
+                </div>
+              </div>
+              <div className="space-y-1">
+                <div className="flex justify-between text-xs text-muted-foreground"><span>Прогресс рейса</span><span>{percent}%</span></div>
+                <div className="h-2 rounded-full bg-muted overflow-hidden"><div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${percent}%` }} /></div>
+              </div>
+              {(!assignment || !driverUrl) && (
+                <div className="flex gap-2">
+                  <input className="h-9 flex-1 rounded-md border bg-background px-3 text-sm" placeholder="Имя водителя (необязательно)" value={driverNames[routeIndex] ?? ""} onChange={(event) => setDriverNames((current) => ({ ...current, [routeIndex]: event.target.value }))} />
+                  <Button size="sm" onClick={() => createAssignment(routeIndex)} disabled={creatingRoute === routeIndex}>
+                    {creatingRoute === routeIndex ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Link2 className="w-4 h-4 mr-1" />}Назначить
+                  </Button>
+                </div>
+              )}
+              {assignment?.executions && assignment.executions.length > 0 && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {assignment.executions.map((execution) => (
+                    <div key={execution.id} className="flex items-center gap-2 rounded-md border px-2.5 py-2 text-xs">
+                      <span className="font-semibold text-muted-foreground w-5">{execution.visit_order}</span>
+                      <span className="truncate flex-1">{execution.store_name}</span>
+                      <span className={`rounded-full px-2 py-0.5 whitespace-nowrap ${executionStatusClass[execution.status]}`}>{executionStatusLabels[execution.status]}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </CardContent>
+    </Card>
+  );
+}
 
 // Auto-fits map to all route points
 function FitBoundsToRoutes({ routes }: { routes: RouteResult["routes"] }) {
@@ -741,6 +912,7 @@ export function ResultPage() {
       </div>
 
       <div className="space-y-6 print:hidden">
+        {sessionId && <ExecutionControlPanel sessionId={sessionId} routes={result.routes} />}
         <h2 className="text-2xl font-bold tracking-tight mt-8 mb-4">Детализация по машинам</h2>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {result.routes.map((route, i) => {

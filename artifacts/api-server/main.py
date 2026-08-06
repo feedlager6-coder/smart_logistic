@@ -224,6 +224,7 @@ _AUTH_PUBLIC_PATHS = {"/api/healthz", "/api/auth/login",
                       "/api/v1/openapi.json", "/api/v1/docs"}
 # Webhook ingest paths use token-in-URL auth (checked inside the handler)
 _AUTH_WEBHOOK_PREFIX = "/api/v1/webhooks/ingest/"
+_DRIVER_API_PREFIX = "/api/driver/"
 
 AVG_SPEED_KMH = 30
 TRAFFIC_MULTIPLIER = 1.2
@@ -1986,6 +1987,64 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_stores_owner ON stores(owner_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner ON route_sessions(owner_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_settings_owner ON company_settings(owner_id)")
+    # Operational execution layer. Routing history stays immutable in
+    # route_sessions; assignments and executions track the actual delivery.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS route_assignments (
+            id SERIAL PRIMARY KEY,
+            owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            session_id INTEGER NOT NULL REFERENCES route_sessions(id) ON DELETE CASCADE,
+            route_index INTEGER NOT NULL,
+            driver_name TEXT DEFAULT '',
+            vehicle_name TEXT DEFAULT '',
+            route_yandex_url TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'planned',
+            access_token_hash TEXT NOT NULL UNIQUE,
+            token_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(session_id, route_index)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS route_executions (
+            id SERIAL PRIMARY KEY,
+            assignment_id INTEGER NOT NULL REFERENCES route_assignments(id) ON DELETE CASCADE,
+            store_id INTEGER REFERENCES stores(id) ON DELETE SET NULL,
+            visit_order INTEGER NOT NULL,
+            store_name TEXT DEFAULT '',
+            address TEXT DEFAULT '',
+            lat DOUBLE PRECISION,
+            lon DOUBLE PRECISION,
+            products TEXT DEFAULT '',
+            quantity DOUBLE PRECISION DEFAULT 0,
+            arrive_by TEXT DEFAULT '',
+            yandex_url TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'planned',
+            payment_method TEXT NOT NULL DEFAULT 'none',
+            driver_comment TEXT DEFAULT '',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            delivered_at TIMESTAMP,
+            UNIQUE(assignment_id, visit_order)
+        )
+    """)
+    # Additive migrations for installations created by the first MVP draft.
+    cur.execute("ALTER TABLE route_assignments ADD COLUMN IF NOT EXISTS route_yandex_url TEXT DEFAULT ''")
+    for _column, _definition in (
+        ("store_name", "TEXT DEFAULT ''"),
+        ("address", "TEXT DEFAULT ''"),
+        ("lat", "DOUBLE PRECISION"),
+        ("lon", "DOUBLE PRECISION"),
+        ("products", "TEXT DEFAULT ''"),
+        ("quantity", "DOUBLE PRECISION DEFAULT 0"),
+        ("arrive_by", "TEXT DEFAULT ''"),
+        ("yandex_url", "TEXT DEFAULT ''"),
+    ):
+        cur.execute(
+            f"ALTER TABLE route_executions ADD COLUMN IF NOT EXISTS {_column} {_definition}"
+        )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_assignments_owner ON route_assignments(owner_id, session_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_executions_assignment ON route_executions(assignment_id, visit_order)")
     # ── User plan & admin notes ────────────────────────────────────────────────
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS plan TEXT DEFAULT 'trial'")
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS admin_note TEXT DEFAULT ''")
@@ -3013,6 +3072,27 @@ class CompanySettingsInput(BaseModel):
     fuel_consumption: float # л/100 км
 
 
+EXECUTION_STATUSES = {"planned", "loaded", "on_route", "delivered", "partial", "failed", "rescheduled"}
+PAYMENT_METHODS = {"cash", "card", "transfer", "none"}
+
+
+class AssignmentCreate(BaseModel):
+    route_index: int
+    driver_name: str = ""
+    vehicle_name: str = ""
+
+
+class AssignmentUpdate(BaseModel):
+    driver_name: Optional[str] = None
+    vehicle_name: Optional[str] = None
+
+
+class ExecutionUpdate(BaseModel):
+    status: str
+    payment_method: str = "none"
+    driver_comment: str = ""
+
+
 # ── Routes ───────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
@@ -3323,6 +3403,9 @@ async def auth_middleware(request: Request, call_next):
 
     # Webhook ingest: token-in-URL, authenticated inside the handler
     if path.startswith(_AUTH_WEBHOOK_PREFIX):
+        return await call_next(request)
+    # Driver execution endpoints authenticate with a scoped URL token.
+    if path.startswith(_DRIVER_API_PREFIX):
         return await call_next(request)
 
     if path in _AUTH_PUBLIC_PATHS or not path.startswith("/api/"):
@@ -6889,6 +6972,302 @@ def get_route_session(id: int, request: Request):
     if not row or not row["result_json"]:
         raise HTTPException(status_code=404, detail="Route session not found")
     return json.loads(row["result_json"])
+
+
+def _assignment_summary(row: dict) -> dict:
+    """Serialize an assignment without exposing its one-time token."""
+    return {
+        "id": row["id"],
+        "session_id": row["session_id"],
+        "route_index": row["route_index"],
+        "driver_name": row.get("driver_name") or "",
+        "vehicle_name": row.get("vehicle_name") or "",
+        "route_yandex_url": row.get("route_yandex_url") or "",
+        "status": row.get("status") or "planned",
+        "total_points": int(row.get("total_points") or 0),
+        "completed_points": int(row.get("completed_points") or 0),
+        "updated_at": str(row["updated_at"]) if row.get("updated_at") else None,
+    }
+
+
+def _load_assignment_for_token(token: str) -> tuple[dict, list[dict]]:
+    """Load a driver assignment by a raw token; the raw token is never stored."""
+    if not token or len(token) > 160:
+        raise HTTPException(status_code=404, detail="Ссылка водителя недействительна")
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """SELECT id, session_id, route_index, driver_name, vehicle_name,
+                  route_yandex_url, status,
+                  updated_at
+           FROM route_assignments WHERE access_token_hash=%s""",
+        (token_hash,),
+    )
+    assignment = cur.fetchone()
+    if not assignment:
+        cur.close(); conn.close()
+        raise HTTPException(status_code=404, detail="Ссылка водителя недействительна или отозвана")
+    cur.execute(
+        """SELECT id, store_id, visit_order, store_name, address, lat, lon,
+                  products, quantity, arrive_by, yandex_url, status,
+                  payment_method, driver_comment, updated_at, delivered_at
+           FROM route_executions WHERE assignment_id=%s ORDER BY visit_order""",
+        (assignment["id"],),
+    )
+    executions = [dict(r) for r in cur.fetchall()]
+    cur.close(); conn.close()
+    return dict(assignment), executions
+
+
+def _serialize_execution(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "store_id": row.get("store_id"),
+        "visit_order": row["visit_order"],
+        "store_name": row.get("store_name") or "",
+        "address": row.get("address") or "",
+        "lat": row.get("lat"),
+        "lon": row.get("lon"),
+        "products": row.get("products") or "",
+        "quantity": float(row.get("quantity") or 0),
+        "arrive_by": row.get("arrive_by") or "",
+        "yandex_url": row.get("yandex_url") or "",
+        "status": row.get("status") or "planned",
+        "payment_method": row.get("payment_method") or "none",
+        "driver_comment": row.get("driver_comment") or "",
+        "updated_at": str(row["updated_at"]) if row.get("updated_at") else None,
+        "delivered_at": str(row["delivered_at"]) if row.get("delivered_at") else None,
+    }
+
+
+@app.get("/api/route/sessions/{session_id}/assignments")
+def list_route_assignments(session_id: int, request: Request):
+    """Dispatcher view of operational trips and point progress."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """SELECT a.id, a.session_id, a.route_index, a.driver_name,
+                  a.vehicle_name, a.route_yandex_url, a.status, a.updated_at,
+                  COUNT(e.id) AS total_points,
+                  COUNT(e.id) FILTER (WHERE e.status IN
+                    ('delivered','partial','failed','rescheduled')) AS completed_points
+           FROM route_assignments a
+           LEFT JOIN route_executions e ON e.assignment_id=a.id
+           WHERE a.session_id=%s AND a.owner_id=%s
+           GROUP BY a.id ORDER BY a.route_index""",
+        (session_id, uid),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    items = [_assignment_summary(row) for row in rows]
+    if rows:
+        cur.execute(
+            """SELECT assignment_id, id, store_id, visit_order, store_name,
+                      address, lat, lon, products, quantity, arrive_by,
+                      yandex_url, status, payment_method, driver_comment,
+                      updated_at, delivered_at
+               FROM route_executions
+               WHERE assignment_id = ANY(%s)
+               ORDER BY assignment_id, visit_order""",
+            ([row["id"] for row in rows],),
+        )
+        by_assignment = {}
+        for execution in cur.fetchall():
+            item = _serialize_execution(dict(execution))
+            by_assignment.setdefault(execution["assignment_id"], []).append(item)
+        for item in items:
+            item["executions"] = by_assignment.get(item["id"], [])
+    cur.close(); conn.close()
+    return {"assignments": items}
+
+
+@app.post("/api/route/sessions/{session_id}/assignments", status_code=201)
+def create_route_assignment(session_id: int, body: AssignmentCreate, request: Request):
+    """Create a trip assignment and return a fresh driver link."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            "SELECT result_json FROM route_sessions WHERE id=%s AND owner_id=%s",
+            (session_id, uid),
+        )
+        session = cur.fetchone()
+        if not session or not session["result_json"]:
+            raise HTTPException(status_code=404, detail="Маршрут не найден")
+        result = json.loads(session["result_json"])
+        routes = result.get("routes") or []
+        if body.route_index < 0 or body.route_index >= len(routes):
+            raise HTTPException(status_code=422, detail="Указан неизвестный рейс маршрута")
+        route = routes[body.route_index]
+        raw_token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+        vehicle_name = body.vehicle_name.strip() or str(route.get("vehicle_name") or "")
+        driver_name = body.driver_name.strip()
+        cur.execute(
+            """INSERT INTO route_assignments
+                 (owner_id, session_id, route_index, driver_name, vehicle_name,
+                  route_yandex_url, access_token_hash)
+               VALUES (%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (session_id, route_index)
+               DO UPDATE SET driver_name=EXCLUDED.driver_name,
+                             vehicle_name=EXCLUDED.vehicle_name,
+                             route_yandex_url=EXCLUDED.route_yandex_url,
+                             access_token_hash=EXCLUDED.access_token_hash,
+                             token_created_at=NOW(), updated_at=NOW()
+               RETURNING id, session_id, route_index, driver_name, vehicle_name,
+                         route_yandex_url, status, updated_at""",
+            (
+                uid, session_id, body.route_index, driver_name, vehicle_name,
+                route.get("yandex_url") or "", token_hash,
+            ),
+        )
+        assignment = dict(cur.fetchone())
+        cur.execute(
+            "SELECT COUNT(*) AS count FROM route_executions WHERE assignment_id=%s",
+            (assignment["id"],),
+        )
+        if int(cur.fetchone()["count"]) == 0:
+            for stop in route.get("stores") or []:
+                cur.execute(
+                    """INSERT INTO route_executions
+                       (assignment_id, store_id, visit_order, store_name, address, lat, lon,
+                        products, quantity, arrive_by, yandex_url)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (
+                        assignment["id"], stop.get("store_id"), stop.get("order", 0),
+                        stop.get("store_name", ""), stop.get("address", ""),
+                        stop.get("lat"), stop.get("lon"), stop.get("products", ""),
+                        stop.get("quantity", 0), stop.get("arrive_by", ""),
+                        stop.get("yandex_url", ""),
+                    ),
+                )
+        conn.commit()
+        # Relative path keeps the link on the public frontend origin when the
+        # API is reached through Vite/Replit's development proxy.
+        driver_url = f"/driver/{raw_token}"
+        assignment.update({
+            "total_points": len(route.get("stores") or []),
+            "completed_points": 0,
+            "driver_url": driver_url,
+            "whatsapp_url": "https://wa.me/?text=" + urllib.parse.quote(
+                f"SmartRoute: маршрут водителя {driver_url}"
+            ),
+        })
+        return assignment
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        logger.exception("create_route_assignment failed")
+        raise HTTPException(status_code=500, detail="Не удалось создать рейс")
+    finally:
+        cur.close(); conn.close()
+
+
+@app.patch("/api/route/assignments/{assignment_id}")
+def update_route_assignment(assignment_id: int, body: AssignmentUpdate, request: Request):
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    fields, values = [], []
+    if body.driver_name is not None:
+        fields.append("driver_name=%s"); values.append(body.driver_name.strip())
+    if body.vehicle_name is not None:
+        fields.append("vehicle_name=%s"); values.append(body.vehicle_name.strip())
+    if not fields:
+        raise HTTPException(status_code=422, detail="Нет изменений")
+    fields.append("updated_at=NOW()")
+    values.extend([assignment_id, uid])
+    cur.execute(
+        f"""UPDATE route_assignments SET {', '.join(fields)}
+            WHERE id=%s AND owner_id=%s
+            RETURNING id, session_id, route_index, driver_name, vehicle_name,
+                      route_yandex_url, status, updated_at""",
+        values,
+    )
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        raise HTTPException(status_code=404, detail="Рейс не найден")
+    conn.commit(); cur.close(); conn.close()
+    return _assignment_summary(dict(row))
+
+
+@app.get("/api/driver/{token}")
+def get_driver_assignment(token: str):
+    """Public, token-scoped driver view. No account or cookie is accepted."""
+    _api_rate_limit(f"driver_get:{hashlib.sha256(token.encode()).hexdigest()}", 120, 60)
+    assignment, executions = _load_assignment_for_token(token)
+    terminal = {"delivered", "partial", "failed", "rescheduled"}
+    completed = sum(1 for row in executions if row.get("status") in terminal)
+    return {
+        "assignment": {
+            "id": assignment["id"],
+            "driver_name": assignment.get("driver_name") or "",
+            "vehicle_name": assignment.get("vehicle_name") or "",
+            "route_yandex_url": assignment.get("route_yandex_url") or "",
+            "status": assignment.get("status") or "planned",
+            "total_points": len(executions),
+            "completed_points": completed,
+        },
+        "executions": [_serialize_execution(row) for row in executions],
+    }
+
+
+@app.patch("/api/driver/{token}/executions/{execution_id}")
+def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate):
+    """Update one delivery point through the scoped driver link."""
+    if body.status not in EXECUTION_STATUSES:
+        raise HTTPException(status_code=422, detail="Недопустимый статус доставки")
+    if body.payment_method not in PAYMENT_METHODS:
+        raise HTTPException(status_code=422, detail="Недопустимый способ оплаты")
+    assignment, _ = _load_assignment_for_token(token)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """UPDATE route_executions
+           SET status=%s, payment_method=%s, driver_comment=%s,
+               updated_at=NOW(),
+               delivered_at=CASE WHEN %s IN ('delivered','partial','failed')
+                                 THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END
+           WHERE id=%s AND assignment_id=%s
+           RETURNING id, store_id, visit_order, store_name, address, lat, lon,
+                     products, quantity, arrive_by, yandex_url, status,
+                     payment_method, driver_comment, updated_at, delivered_at""",
+        (body.status, body.payment_method, body.driver_comment.strip(),
+         body.status, execution_id, assignment["id"]),
+    )
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        raise HTTPException(status_code=404, detail="Точка рейса не найдена")
+    cur.execute(
+        """SELECT COUNT(*) AS total,
+                  COUNT(*) FILTER (WHERE status IN
+                    ('delivered','partial','failed','rescheduled')) AS completed,
+                  COUNT(*) FILTER (WHERE status='on_route') AS active
+           FROM route_executions WHERE assignment_id=%s""",
+        (assignment["id"],),
+    )
+    counts = cur.fetchone()
+    total, completed = int(counts["total"]), int(counts["completed"])
+    assignment_status = "completed" if total and completed == total else (
+        "on_route" if int(counts["active"]) > 0 or completed > 0 else "planned"
+    )
+    cur.execute(
+        "UPDATE route_assignments SET status=%s, updated_at=NOW() WHERE id=%s",
+        (assignment_status, assignment["id"]),
+    )
+    conn.commit(); cur.close(); conn.close()
+    return {
+        "execution": _serialize_execution(dict(row)),
+        "assignment_status": assignment_status,
+        "completed_points": completed,
+        "total_points": total,
+    }
 
 
 @app.delete("/api/route/sessions/{id}")
