@@ -34,7 +34,7 @@ type VehicleRouteWithUrls = RouteResult["routes"][number] & {
 
 const COLORS = ["#0ea5e9", "#f43f5e", "#8b5cf6", "#10b981", "#f59e0b", "#6366f1", "#ec4899", "#14b8a6", "#f97316", "#84cc16"];
 
-type ExecutionStatus = "planned" | "loaded" | "on_route" | "delivered" | "partial" | "failed" | "rescheduled";
+type ExecutionStatus = "planned" | "delivered" | "partial" | "failed" | "rescheduled";
 type Assignment = {
   id: number;
   route_index: number;
@@ -45,6 +45,7 @@ type Assignment = {
   completed_points: number;
   driver_url?: string;
   whatsapp_url?: string;
+  expires_at?: string | null;
   executions?: Array<{
     id: number;
     visit_order: number;
@@ -56,13 +57,12 @@ type Assignment = {
     payment_method: string;
     payment_status: string;
     driver_comment: string;
+    rescheduled_date: string | null;
   }>;
 };
 
 const executionStatusLabels: Record<ExecutionStatus, string> = {
   planned: "План",
-  loaded: "Загружено",
-  on_route: "В пути",
   delivered: "Доставлено",
   partial: "Частично",
   failed: "Не доставлено",
@@ -71,8 +71,6 @@ const executionStatusLabels: Record<ExecutionStatus, string> = {
 
 const executionStatusClass: Record<ExecutionStatus, string> = {
   planned: "bg-muted text-muted-foreground",
-  loaded: "bg-sky-100 text-sky-800",
-  on_route: "bg-amber-100 text-amber-800",
   delivered: "bg-emerald-100 text-emerald-800",
   partial: "bg-orange-100 text-orange-800",
   failed: "bg-red-100 text-red-800",
@@ -84,6 +82,8 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
   const [creatingRoute, setCreatingRoute] = useState<number | null>(null);
   const [copiedAssignment, setCopiedAssignment] = useState<number | null>(null);
   const [issuedLinks, setIssuedLinks] = useState<Record<number, { driver_url: string; whatsapp_url: string }>>({});
+  const [rescheduleDates, setRescheduleDates] = useState<Record<number, string>>({});
+  const [savingReschedule, setSavingReschedule] = useState<number | null>(null);
   const { data, isLoading, refetch } = useQuery<{ assignments: Assignment[] }>({
     queryKey: ["route-assignments", sessionId],
     queryFn: async () => {
@@ -138,6 +138,27 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
     window.setTimeout(() => setCopiedAssignment(null), 1800);
   };
 
+  const saveRescheduleDate = async (assignmentId: number, executionId: number) => {
+    const rescheduledDate = rescheduleDates[executionId];
+    if (!rescheduledDate) return;
+    setSavingReschedule(executionId);
+    try {
+      const response = await fetch(`/api/route/assignments/${assignmentId}/executions/${executionId}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rescheduled_date: rescheduledDate }),
+      });
+      const payload = await response.json().catch(() => null) as { detail?: string } | null;
+      if (!response.ok) throw new Error(`HTTP ${response.status}: ${payload?.detail || "Не удалось сохранить дату"}`);
+      await refetch();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Не удалось сохранить дату переноса");
+    } finally {
+      setSavingReschedule(null);
+    }
+  };
+
   return (
     <Card className="print:hidden">
       <CardHeader className="pb-3 border-b bg-muted/20">
@@ -177,11 +198,22 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                   ) : null}
                 </div>
               </div>
+              {assignment?.expires_at && (
+                <p className="text-xs text-muted-foreground">
+                  Ссылка действует до {new Date(assignment.expires_at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                </p>
+              )}
               <div className="space-y-1">
                 <div className="flex justify-between text-xs text-muted-foreground"><span>Прогресс рейса</span><span>{percent}%</span></div>
                 <div className="h-2 rounded-full bg-muted overflow-hidden"><div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${percent}%` }} /></div>
               </div>
-              {(!assignment || !driverUrl) && (
+              {assignment && (
+                <Button size="sm" variant="outline" className="w-full" onClick={() => createAssignment(routeIndex)} disabled={creatingRoute === routeIndex}>
+                  {creatingRoute === routeIndex ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <RefreshCw className="w-4 h-4 mr-1" />}
+                  Выдать новую ссылку (срок 48 часов)
+                </Button>
+              )}
+              {!assignment && (
                 <div className="flex gap-2">
                   <input className="h-9 flex-1 rounded-md border bg-background px-3 text-sm" placeholder="Имя водителя (необязательно)" value={driverNames[routeIndex] ?? ""} onChange={(event) => setDriverNames((current) => ({ ...current, [routeIndex]: event.target.value }))} />
                   <Button size="sm" onClick={() => createAssignment(routeIndex)} disabled={creatingRoute === routeIndex}>
@@ -192,11 +224,30 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
               {assignment?.executions && assignment.executions.length > 0 && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                   {assignment.executions.map((execution) => (
-                    <div key={execution.id} className="flex items-center gap-2 rounded-md border px-2.5 py-2 text-xs">
+                    <div key={execution.id} className="flex flex-wrap items-center gap-2 rounded-md border px-2.5 py-2 text-xs">
                       <span className="font-semibold text-muted-foreground w-5">{execution.visit_order}</span>
                       <span className="truncate flex-1">{execution.store_name}</span>
                       {execution.shortfall_qty > 0 && <span className="text-orange-700 whitespace-nowrap">−{execution.shortfall_qty} шт.</span>}
                       <span className={`rounded-full px-2 py-0.5 whitespace-nowrap ${executionStatusClass[execution.status]}`}>{executionStatusLabels[execution.status]}</span>
+                      {execution.driver_comment && <span className="text-muted-foreground truncate max-w-[180px]" title={execution.driver_comment}>«{execution.driver_comment}»</span>}
+                      {execution.status === "rescheduled" && (
+                        <div className="basis-full flex items-center gap-2 pt-1">
+                          <input
+                            type="date"
+                            className="h-8 rounded-md border bg-background px-2"
+                            value={rescheduleDates[execution.id] ?? execution.rescheduled_date ?? ""}
+                            onChange={(event) => setRescheduleDates((current) => ({ ...current, [execution.id]: event.target.value }))}
+                          />
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={!rescheduleDates[execution.id] || savingReschedule === execution.id}
+                            onClick={() => saveRescheduleDate(assignment.id, execution.id)}
+                          >
+                            {savingReschedule === execution.id ? <Loader2 className="w-3 h-3 animate-spin" /> : "Сохранить дату"}
+                          </Button>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>

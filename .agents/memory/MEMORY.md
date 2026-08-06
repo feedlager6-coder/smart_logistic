@@ -4,7 +4,7 @@
 - [OSRM lon-lat order](osrm-lon-lat.md) — OSRM Table API URL uses lon,lat order (opposite of Python lat,lon tuples); easy to reverse silently.
 - [OR-Tools float time limit](ortools-time-limit.md) — params.time_limit requires both .seconds (int) and .nanos (int) for sub-second limits; use ORTOOLS_TIME_LIMIT_SECONDS global (float) patched in tests to 0.5.
 - [OR-Tools TSPTW time windows](ortools-tsptw.md) — Time Dimension added to _ortools_solve_group when time_windows param provided; depot fixed at 09:00, per-stop [tw_from,tw_to] range, slack 60min; adaptive time limit: ≤5 stops→0.3s, ≤10→1.0s, else full budget.
-- [Python deps no requirements.txt](python-deps.md) — artifacts/api-server had no requirements.txt; must pip install fastapi uvicorn psycopg2-binary openpyxl ortools python-multipart manually; requirements.txt now added.
+- [Python dependencies](python-deps.md) — install API dependencies through Replit's package manager; shell `pip3` may be unavailable while workflow Python uses `.pythonlibs`.
 - [Savings metrics cost model](savings-cost-model.md) — cost_per_km = fuel×consumption/100 (fuel-only, no salary); ROAD_FACTOR=1.4 monetary only; driver_salary removed from formula/API/frontend.
 - [OR-Tools SetRange CP Solver fail](ortools-setrange-fix.md) — SetRange raises CP Solver fail on domain wipeout; fixed with pre-validation + try/except model rebuild + 3-level degradation chain in build_route.
 - [City filter address format](city-filter-format.md) — city filter splits address on first comma; city MUST be the first token. Excel import must use `f"{city}, {raw_addr}"` (city first). DELETE /api/stores/{id} must check rowcount=0 → 404.

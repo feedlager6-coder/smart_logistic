@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 
-type Status = "planned" | "loaded" | "on_route" | "delivered" | "partial" | "failed" | "rescheduled";
+type Status = "planned" | "delivered" | "partial" | "failed" | "rescheduled";
 type Payment = "cash" | "card" | "transfer" | "none";
 type PaymentStatus = "pending" | "paid" | "not_paid";
 
@@ -41,8 +41,6 @@ type DriverData = {
 
 const statusLabels: Record<Status, string> = {
   planned: "Запланировано",
-  loaded: "Загружено",
-  on_route: "В пути",
   delivered: "Доставлено",
   partial: "Частично",
   failed: "Не доставлено",
@@ -88,7 +86,7 @@ export function DriverPage() {
 
   const draftFor = (execution: Execution) => drafts[execution.id] ?? {
     status: execution.status,
-    actual_qty: execution.actual_qty,
+    actual_qty: execution.actual_qty ?? execution.quantity,
     payment_method: execution.payment_method,
     payment_status: execution.payment_status,
     driver_comment: execution.driver_comment,
@@ -103,15 +101,23 @@ export function DriverPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(draft),
       });
-      if (!response.ok) throw new Error("Не удалось сохранить статус");
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null) as
+          | { detail?: string | Array<{ msg?: string }> }
+          | null;
+        const detail = Array.isArray(payload?.detail)
+          ? payload.detail.map((item) => item.msg).filter(Boolean).join("; ")
+          : payload?.detail;
+        throw new Error(`HTTP ${response.status}: ${detail || "Не удалось сохранить статус"}`);
+      }
       setDrafts((current) => {
         const next = { ...current };
         delete next[execution.id];
         return next;
       });
       await refetch();
-    } catch {
-      window.alert("Не удалось сохранить изменения. Проверьте интернет и повторите.");
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Не удалось сохранить изменения");
     } finally {
       setSavingId(null);
     }
@@ -198,21 +204,43 @@ export function DriverPage() {
                       {Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                     </select>
                   </label>
-                  <label className="text-xs text-muted-foreground">Фактически доставлено
-                    <input type="number" min={0} max={execution.quantity} step="any" className="mt-1 w-full h-10 rounded-md border bg-background px-2 text-sm" value={draft.actual_qty} onChange={(event) => setDrafts((current) => ({ ...current, [execution.id]: { ...draft, actual_qty: Number(event.target.value) } }))} />
-                  </label>
-                  <label className="text-xs text-muted-foreground">Способ оплаты
-                    <select className="mt-1 w-full h-10 rounded-md border bg-background px-2 text-sm" value={draft.payment_method} onChange={(event) => setDrafts((current) => ({ ...current, [execution.id]: { ...draft, payment_method: event.target.value as Payment } }))}>
-                      {Object.entries(paymentLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                    </select>
-                  </label>
-                  <label className="text-xs text-muted-foreground">Статус оплаты
-                    <select className="mt-1 w-full h-10 rounded-md border bg-background px-2 text-sm" value={draft.payment_status} onChange={(event) => setDrafts((current) => ({ ...current, [execution.id]: { ...draft, payment_status: event.target.value as PaymentStatus } }))}>
-                      {Object.entries(paymentStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                    </select>
-                  </label>
+                  {draft.status !== "rescheduled" && (
+                    <>
+                      <label className="text-xs text-muted-foreground">Фактически доставлено
+                        <input
+                          type="number"
+                          min={0}
+                          max={execution.quantity}
+                          step="any"
+                          className="mt-1 w-full h-10 rounded-md border bg-background px-2 text-sm"
+                          value={draft.actual_qty}
+                          onFocus={(event) => event.currentTarget.select()}
+                          onChange={(event) => setDrafts((current) => ({
+                            ...current,
+                            [execution.id]: { ...draft, actual_qty: Number(event.target.value) },
+                          }))}
+                        />
+                      </label>
+                      <label className="text-xs text-muted-foreground">Способ оплаты
+                        <select className="mt-1 w-full h-10 rounded-md border bg-background px-2 text-sm" value={draft.payment_method} onChange={(event) => setDrafts((current) => ({ ...current, [execution.id]: { ...draft, payment_method: event.target.value as Payment } }))}>
+                          {Object.entries(paymentLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                        </select>
+                      </label>
+                      <label className="text-xs text-muted-foreground">Статус оплаты
+                        <select className="mt-1 w-full h-10 rounded-md border bg-background px-2 text-sm" value={draft.payment_status} onChange={(event) => setDrafts((current) => ({ ...current, [execution.id]: { ...draft, payment_status: event.target.value as PaymentStatus } }))}>
+                          {Object.entries(paymentStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                        </select>
+                      </label>
+                    </>
+                  )}
                 </div>
-                <Textarea value={draft.driver_comment} onChange={(event) => setDrafts((current) => ({ ...current, [execution.id]: { ...draft, driver_comment: event.target.value } }))} placeholder="Комментарий водителя" className="min-h-[54px]" />
+                <Textarea
+                  value={draft.driver_comment}
+                  onChange={(event) => setDrafts((current) => ({ ...current, [execution.id]: { ...draft, driver_comment: event.target.value } }))}
+                  placeholder={draft.status === "rescheduled" ? "Причина переноса (обязательно)" : "Комментарий водителя"}
+                  className="min-h-[54px]"
+                  required={draft.status === "rescheduled"}
+                />
                 <div className="flex gap-2">
                   {execution.yandex_url && <Button variant="outline" className="flex-1" onClick={() => window.open(execution.yandex_url, "_blank")}>Навигация</Button>}
                   <Button className="flex-1" onClick={() => saveExecution(execution)} disabled={savingId === execution.id}>

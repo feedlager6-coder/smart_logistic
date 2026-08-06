@@ -2001,6 +2001,7 @@ def init_db():
             status TEXT NOT NULL DEFAULT 'planned',
             access_token_hash TEXT NOT NULL UNIQUE,
             token_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(session_id, route_index)
@@ -2025,6 +2026,7 @@ def init_db():
             payment_method TEXT NOT NULL DEFAULT 'none',
             payment_status TEXT NOT NULL DEFAULT 'pending',
             driver_comment TEXT DEFAULT '',
+            rescheduled_date DATE,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             delivered_at TIMESTAMP,
             UNIQUE(assignment_id, visit_order)
@@ -2032,6 +2034,8 @@ def init_db():
     """)
     # Additive migrations for installations created by the first MVP draft.
     cur.execute("ALTER TABLE route_assignments ADD COLUMN IF NOT EXISTS route_yandex_url TEXT DEFAULT ''")
+    cur.execute("ALTER TABLE route_assignments ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP")
+    cur.execute("ALTER TABLE route_executions ADD COLUMN IF NOT EXISTS rescheduled_date DATE")
     for _column, _definition in (
         ("store_name", "TEXT DEFAULT ''"),
         ("address", "TEXT DEFAULT ''"),
@@ -2057,6 +2061,21 @@ def init_db():
     cur.execute("UPDATE route_executions SET payment_status='pending' WHERE payment_status IS NULL")
     cur.execute("ALTER TABLE route_executions ALTER COLUMN actual_qty SET DEFAULT 0")
     cur.execute("ALTER TABLE route_executions ALTER COLUMN actual_qty SET NOT NULL")
+    cur.execute(
+        """UPDATE route_assignments
+           SET expires_at = COALESCE(expires_at, COALESCE(token_created_at, NOW()) + INTERVAL '48 hours')
+           WHERE expires_at IS NULL"""
+    )
+    # The first MVP stored zero for every planned point. Planned actual quantity
+    # is now initialized from the immutable planned quantity.
+    cur.execute(
+        """UPDATE route_executions
+           SET actual_qty = COALESCE(quantity, 0)
+           WHERE status = 'planned' AND COALESCE(actual_qty, 0) = 0"""
+    )
+    cur.execute(
+        "UPDATE route_executions SET status='planned' WHERE status IN ('loaded', 'on_route')"
+    )
     cur.execute("ALTER TABLE route_executions ALTER COLUMN payment_status SET DEFAULT 'pending'")
     cur.execute("ALTER TABLE route_executions ALTER COLUMN payment_status SET NOT NULL")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_assignments_owner ON route_assignments(owner_id, session_id)")
@@ -3088,7 +3107,7 @@ class CompanySettingsInput(BaseModel):
     fuel_consumption: float # л/100 км
 
 
-EXECUTION_STATUSES = {"planned", "loaded", "on_route", "delivered", "partial", "failed", "rescheduled"}
+EXECUTION_STATUSES = {"planned", "delivered", "partial", "failed", "rescheduled"}
 PAYMENT_METHODS = {"cash", "card", "transfer", "none"}
 PAYMENT_STATUSES = {"pending", "paid", "not_paid"}
 
@@ -3102,6 +3121,10 @@ class AssignmentCreate(BaseModel):
 class AssignmentUpdate(BaseModel):
     driver_name: Optional[str] = None
     vehicle_name: Optional[str] = None
+
+
+class DispatcherExecutionUpdate(BaseModel):
+    rescheduled_date: Optional[str] = None
 
 
 class ExecutionUpdate(BaseModel):
@@ -7023,6 +7046,9 @@ def get_route_session(id: int, request: Request):
 
 def _assignment_summary(row: dict) -> dict:
     """Serialize an assignment without exposing its one-time token."""
+    assignment_status = row.get("status") or "planned"
+    if assignment_status == "on_route":
+        assignment_status = "planned"
     return {
         "id": row["id"],
         "session_id": row["session_id"],
@@ -7030,7 +7056,8 @@ def _assignment_summary(row: dict) -> dict:
         "driver_name": row.get("driver_name") or "",
         "vehicle_name": row.get("vehicle_name") or "",
         "route_yandex_url": row.get("route_yandex_url") or "",
-        "status": row.get("status") or "planned",
+        "status": assignment_status,
+        "expires_at": str(row["expires_at"]) if row.get("expires_at") else None,
         "total_points": int(row.get("total_points") or 0),
         "completed_points": int(row.get("completed_points") or 0),
         "updated_at": str(row["updated_at"]) if row.get("updated_at") else None,
@@ -7046,7 +7073,7 @@ def _load_assignment_for_token(token: str) -> tuple[dict, list[dict]]:
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
         """SELECT id, session_id, route_index, driver_name, vehicle_name,
-                  route_yandex_url, status,
+                  route_yandex_url, status, expires_at,
                   updated_at
            FROM route_assignments WHERE access_token_hash=%s""",
         (token_hash,),
@@ -7055,10 +7082,14 @@ def _load_assignment_for_token(token: str) -> tuple[dict, list[dict]]:
     if not assignment:
         cur.close(); conn.close()
         raise HTTPException(status_code=404, detail="Ссылка водителя недействительна или отозвана")
+    if assignment.get("expires_at") and assignment["expires_at"] <= datetime.utcnow():
+        cur.close(); conn.close()
+        raise HTTPException(status_code=410, detail="Срок действия ссылки водителя истёк. Попросите диспетчера выдать новую ссылку.")
     cur.execute(
         """SELECT id, store_id, visit_order, store_name, address, lat, lon,
                   products, quantity, actual_qty, arrive_by, yandex_url, status,
-                  payment_method, payment_status, driver_comment, updated_at, delivered_at
+                  payment_method, payment_status, driver_comment, rescheduled_date,
+                  updated_at, delivered_at
            FROM route_executions WHERE assignment_id=%s ORDER BY visit_order""",
         (assignment["id"],),
     )
@@ -7068,6 +7099,12 @@ def _load_assignment_for_token(token: str) -> tuple[dict, list[dict]]:
 
 
 def _serialize_execution(row: dict) -> dict:
+    planned_qty = float(row.get("quantity") or 0)
+    actual_raw = row.get("actual_qty")
+    actual_qty = planned_qty if actual_raw is None else float(actual_raw)
+    status = row.get("status") or "planned"
+    if status in {"loaded", "on_route"}:
+        status = "planned"
     return {
         "id": row["id"],
         "store_id": row.get("store_id"),
@@ -7077,18 +7114,19 @@ def _serialize_execution(row: dict) -> dict:
         "lat": row.get("lat"),
         "lon": row.get("lon"),
         "products": row.get("products") or "",
-        "quantity": float(row.get("quantity") or 0),
-        "actual_qty": float(row.get("actual_qty") or 0),
+        "quantity": planned_qty,
+        "actual_qty": actual_qty,
         "shortfall_qty": max(
-            float(row.get("quantity") or 0) - float(row.get("actual_qty") or 0),
+            planned_qty - actual_qty,
             0,
         ),
         "arrive_by": row.get("arrive_by") or "",
         "yandex_url": row.get("yandex_url") or "",
-        "status": row.get("status") or "planned",
+        "status": status,
         "payment_method": row.get("payment_method") or "none",
         "payment_status": row.get("payment_status") or "pending",
         "driver_comment": row.get("driver_comment") or "",
+        "rescheduled_date": str(row["rescheduled_date"]) if row.get("rescheduled_date") else None,
         "updated_at": str(row["updated_at"]) if row.get("updated_at") else None,
         "delivered_at": str(row["delivered_at"]) if row.get("delivered_at") else None,
     }
@@ -7102,7 +7140,7 @@ def list_route_assignments(session_id: int, request: Request):
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
         """SELECT a.id, a.session_id, a.route_index, a.driver_name,
-                  a.vehicle_name, a.route_yandex_url, a.status, a.updated_at,
+                  a.vehicle_name, a.route_yandex_url, a.status, a.expires_at, a.updated_at,
                   COUNT(e.id) AS total_points,
                   COUNT(e.id) FILTER (WHERE e.status IN
                     ('delivered','partial','failed','rescheduled')) AS completed_points
@@ -7119,7 +7157,7 @@ def list_route_assignments(session_id: int, request: Request):
             """SELECT assignment_id, id, store_id, visit_order, store_name,
                       address, lat, lon, products, quantity, actual_qty, arrive_by,
                       yandex_url, status, payment_method, payment_status,
-                      driver_comment, updated_at, delivered_at
+                      driver_comment, rescheduled_date, updated_at, delivered_at
                FROM route_executions
                WHERE assignment_id = ANY(%s)
                ORDER BY assignment_id, visit_order""",
@@ -7161,16 +7199,18 @@ def create_route_assignment(session_id: int, body: AssignmentCreate, request: Re
         cur.execute(
             """INSERT INTO route_assignments
                  (owner_id, session_id, route_index, driver_name, vehicle_name,
-                  route_yandex_url, access_token_hash)
-               VALUES (%s,%s,%s,%s,%s,%s,%s)
+                  route_yandex_url, access_token_hash, token_created_at, expires_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,NOW(),NOW() + INTERVAL '48 hours')
                ON CONFLICT (session_id, route_index)
                DO UPDATE SET driver_name=EXCLUDED.driver_name,
                              vehicle_name=EXCLUDED.vehicle_name,
                              route_yandex_url=EXCLUDED.route_yandex_url,
                              access_token_hash=EXCLUDED.access_token_hash,
-                             token_created_at=NOW(), updated_at=NOW()
+                             token_created_at=NOW(),
+                             expires_at=NOW() + INTERVAL '48 hours',
+                             updated_at=NOW()
                RETURNING id, session_id, route_index, driver_name, vehicle_name,
-                         route_yandex_url, status, updated_at""",
+                         route_yandex_url, status, expires_at, updated_at""",
             (
                 uid, session_id, body.route_index, driver_name, vehicle_name,
                 route.get("yandex_url") or "", token_hash,
@@ -7193,7 +7233,7 @@ def create_route_assignment(session_id: int, body: AssignmentCreate, request: Re
                         assignment["id"], stop.get("store_id"), stop.get("order", 0),
                         stop.get("store_name", ""), stop.get("address", ""),
                         stop.get("lat"), stop.get("lon"), stop.get("products", ""),
-                        stop.get("quantity", 0), 0, stop.get("arrive_by", ""),
+                        stop.get("quantity", 0), stop.get("quantity", 0), stop.get("arrive_by", ""),
                         stop.get("yandex_url", ""), "pending",
                     ),
                 )
@@ -7239,7 +7279,7 @@ def update_route_assignment(assignment_id: int, body: AssignmentUpdate, request:
         f"""UPDATE route_assignments SET {', '.join(fields)}
             WHERE id=%s AND owner_id=%s
             RETURNING id, session_id, route_index, driver_name, vehicle_name,
-                      route_yandex_url, status, updated_at""",
+                      route_yandex_url, status, expires_at, updated_at""",
         values,
     )
     row = cur.fetchone()
@@ -7248,6 +7288,49 @@ def update_route_assignment(assignment_id: int, body: AssignmentUpdate, request:
         raise HTTPException(status_code=404, detail="Рейс не найден")
     conn.commit(); cur.close(); conn.close()
     return _assignment_summary(dict(row))
+
+
+@app.patch("/api/route/assignments/{assignment_id}/executions/{execution_id}")
+def update_dispatcher_execution(
+    assignment_id: int,
+    execution_id: int,
+    body: DispatcherExecutionUpdate,
+    request: Request,
+):
+    """Set the new delivery date for a rescheduled point."""
+    uid = get_user_id(request)
+    rescheduled_date = body.rescheduled_date
+    if not rescheduled_date:
+        raise HTTPException(status_code=422, detail="Укажите новую дату доставки")
+    try:
+        datetime.strptime(rescheduled_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Дата должна быть в формате YYYY-MM-DD")
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """UPDATE route_executions e
+           SET rescheduled_date=%s, updated_at=NOW()
+           FROM route_assignments a
+           WHERE e.id=%s AND e.assignment_id=%s
+             AND a.id=e.assignment_id AND a.owner_id=%s
+             AND e.status='rescheduled'
+           RETURNING e.id, e.store_id, e.visit_order, e.store_name, e.address,
+                     e.lat, e.lon, e.products, e.quantity, e.actual_qty,
+                     e.arrive_by, e.yandex_url, e.status, e.payment_method,
+                     e.payment_status, e.driver_comment, e.rescheduled_date,
+                     e.updated_at, e.delivered_at""",
+        (rescheduled_date, execution_id, assignment_id, uid),
+    )
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        raise HTTPException(
+            status_code=404,
+            detail="Перенесённая заявка не найдена или её статус уже изменён",
+        )
+    conn.commit(); cur.close(); conn.close()
+    return {"execution": _serialize_execution(dict(row))}
 
 
 @app.get("/api/driver/{token}")
@@ -7263,7 +7346,7 @@ def get_driver_assignment(token: str):
             "driver_name": assignment.get("driver_name") or "",
             "vehicle_name": assignment.get("vehicle_name") or "",
             "route_yandex_url": assignment.get("route_yandex_url") or "",
-            "status": assignment.get("status") or "planned",
+            "status": "planned" if assignment.get("status") == "on_route" else (assignment.get("status") or "planned"),
             "total_points": len(executions),
             "completed_points": completed,
         },
@@ -7285,6 +7368,8 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
         current.get("actual_qty") if body.actual_qty is None else body.actual_qty
     )
     _validate_execution_quantities(body.status, planned_qty, actual_qty)
+    if body.status == "rescheduled" and not body.driver_comment.strip():
+        raise HTTPException(status_code=422, detail="Для переноса укажите причину")
     payment_method = body.payment_method or current.get("payment_method") or "none"
     payment_status = body.payment_status or current.get("payment_status") or "pending"
     if payment_method not in PAYMENT_METHODS:
@@ -7302,14 +7387,17 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
         """UPDATE route_executions
            SET status=%s, actual_qty=%s, payment_method=%s, payment_status=%s,
                driver_comment=%s,
+               rescheduled_date=CASE WHEN %s='rescheduled' THEN rescheduled_date ELSE NULL END,
                updated_at=NOW(),
                delivered_at=CASE WHEN %s IN ('delivered','partial','failed')
                                  THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END
            WHERE id=%s AND assignment_id=%s
            RETURNING id, store_id, visit_order, store_name, address, lat, lon,
                      products, quantity, actual_qty, arrive_by, yandex_url, status,
-                     payment_method, payment_status, driver_comment, updated_at, delivered_at""",
+                     payment_method, payment_status, driver_comment, rescheduled_date,
+                     updated_at, delivered_at""",
         (body.status, actual_qty, payment_method, payment_status, body.driver_comment.strip(),
+         body.status,
          body.status, execution_id, assignment["id"]),
     )
     row = cur.fetchone()
@@ -7320,15 +7408,14 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
         """SELECT COUNT(*) AS total,
                   COUNT(*) FILTER (WHERE status IN
                     ('delivered','partial','failed','rescheduled')) AS completed,
-                  COUNT(*) FILTER (WHERE status='on_route') AS active
+                  COUNT(*) FILTER (WHERE status NOT IN
+                    ('delivered','partial','failed','rescheduled','planned')) AS active
            FROM route_executions WHERE assignment_id=%s""",
         (assignment["id"],),
     )
     counts = cur.fetchone()
     total, completed = int(counts["total"]), int(counts["completed"])
-    assignment_status = "completed" if total and completed == total else (
-        "on_route" if int(counts["active"]) > 0 or completed > 0 else "planned"
-    )
+    assignment_status = "completed" if total and completed == total else "planned"
     cur.execute(
         "UPDATE route_assignments SET status=%s, updated_at=NOW() WHERE id=%s",
         (assignment_status, assignment["id"]),
