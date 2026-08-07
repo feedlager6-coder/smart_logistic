@@ -62,6 +62,29 @@ type Assignment = {
   }>;
 };
 
+type FollowUpOrderState = {
+  dates: Record<number, string>;
+  createdDates: Record<number, string>;
+};
+
+function readFollowUpOrderState(sessionId: number): FollowUpOrderState {
+  try {
+    const stored = localStorage.getItem(`smartroute_follow_up_orders_${sessionId}`);
+    if (!stored) return { dates: {}, createdDates: {} };
+    const parsed = JSON.parse(stored) as Partial<FollowUpOrderState>;
+    return {
+      dates: parsed.dates && typeof parsed.dates === "object" ? parsed.dates : {},
+      createdDates: parsed.createdDates && typeof parsed.createdDates === "object" ? parsed.createdDates : {},
+    };
+  } catch {
+    return { dates: {}, createdDates: {} };
+  }
+}
+
+function formatFollowUpDate(value: string): string {
+  return new Date(`${value}T00:00:00`).toLocaleDateString("ru-RU");
+}
+
 const executionStatusLabels: Record<ExecutionStatus, string> = {
   planned: "План",
   delivered: "Доставлено",
@@ -83,10 +106,13 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
   const [creatingRoute, setCreatingRoute] = useState<number | null>(null);
   const [copiedAssignment, setCopiedAssignment] = useState<number | null>(null);
   const [issuedLinks, setIssuedLinks] = useState<Record<number, { driver_url: string; whatsapp_url: string }>>({});
-  const [rescheduleDates, setRescheduleDates] = useState<Record<number, string>>({});
-  const [remainingDates, setRemainingDates] = useState<Record<number, string>>({});
-  const [creatingRescheduledOrder, setCreatingRescheduledOrder] = useState<number | null>(null);
-  const [creatingRemainingOrder, setCreatingRemainingOrder] = useState<number | null>(null);
+  const [followUpDates, setFollowUpDates] = useState<Record<number, string>>(
+    () => readFollowUpOrderState(sessionId).dates,
+  );
+  const [createdFollowUpDates, setCreatedFollowUpDates] = useState<Record<number, string>>(
+    () => readFollowUpOrderState(sessionId).createdDates,
+  );
+  const [creatingFollowUpOrder, setCreatingFollowUpOrder] = useState<number | null>(null);
   const { data, isLoading, refetch } = useQuery<{ assignments: Assignment[] }>({
     queryKey: ["route-assignments", sessionId],
     queryFn: async () => {
@@ -97,6 +123,13 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
     // MVP uses polling instead of WebSocket; keep dispatcher updates quick.
     refetchInterval: 3_000,
   });
+
+  useEffect(() => {
+    localStorage.setItem(
+      `smartroute_follow_up_orders_${sessionId}`,
+      JSON.stringify({ dates: followUpDates, createdDates: createdFollowUpDates }),
+    );
+  }, [sessionId, followUpDates, createdFollowUpDates]);
 
   const createAssignment = async (routeIndex: number) => {
     setCreatingRoute(routeIndex);
@@ -144,45 +177,33 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
     window.setTimeout(() => setCopiedAssignment(null), 1800);
   };
 
-  const createRescheduledOrder = async (assignmentId: number, executionId: number) => {
-    const rescheduledDate = rescheduleDates[executionId];
-    if (!rescheduledDate) return;
-    setCreatingRescheduledOrder(executionId);
-    try {
-      const response = await fetch(`/api/route/assignments/${assignmentId}/executions/${executionId}/rescheduled-order`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ delivery_date: rescheduledDate }),
-      });
-      const payload = await response.json().catch(() => null) as { detail?: string } | null;
-      if (!response.ok) throw new Error(`HTTP ${response.status}: ${payload?.detail || "Не удалось создать заявку"}`);
-      await refetch();
-    } catch (error) {
-      window.alert(error instanceof Error ? error.message : "Не удалось создать заявку на новую дату");
-    } finally {
-      setCreatingRescheduledOrder(null);
-    }
-  };
-
-  const createRemainingOrder = async (assignmentId: number, executionId: number) => {
-    const deliveryDate = remainingDates[executionId];
+  const createFollowUpOrder = async (assignmentId: number, execution: NonNullable<Assignment["executions"]>[number]) => {
+    const deliveryDate = followUpDates[execution.id]
+      ?? (execution.status === "rescheduled" ? execution.rescheduled_date : execution.remaining_order_date)
+      ?? "";
     if (!deliveryDate) return;
-    setCreatingRemainingOrder(executionId);
+    const isRescheduled = execution.status === "rescheduled";
+    const endpoint = isRescheduled ? "rescheduled-order" : "remaining-order";
+    setCreatingFollowUpOrder(execution.id);
     try {
-      const response = await fetch(`/api/route/assignments/${assignmentId}/executions/${executionId}/remaining-order`, {
+      const response = await fetch(`/api/route/assignments/${assignmentId}/executions/${execution.id}/${endpoint}`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ delivery_date: deliveryDate }),
       });
       const payload = await response.json().catch(() => null) as { detail?: string } | null;
-      if (!response.ok) throw new Error(`HTTP ${response.status}: ${payload?.detail || "Не удалось создать заявку на остаток"}`);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${payload?.detail || "Не удалось создать заявку"}`);
+      }
+      setCreatedFollowUpDates((current) => ({ ...current, [execution.id]: deliveryDate }));
       await refetch();
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : "Не удалось создать заявку на остаток");
+      window.alert(error instanceof Error
+        ? error.message
+        : isRescheduled ? "Не удалось создать заявку на новую дату" : "Не удалось создать заявку на остаток");
     } finally {
-      setCreatingRemainingOrder(null);
+      setCreatingFollowUpOrder(null);
     }
   };
 
@@ -267,46 +288,42 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                           execution.payment_status === "not_paid" ? "Не оплачено" : "Ожидает оплаты"}
                       </span>
                       {execution.driver_comment && <span className="text-muted-foreground truncate max-w-[180px]" title={execution.driver_comment}>«{execution.driver_comment}»</span>}
-                       {execution.remaining_order_date && (
-                         <span className="basis-full text-emerald-700">
-                           Создана заявка на: {new Date(`${execution.remaining_order_date}T00:00:00`).toLocaleDateString("ru-RU")}
-                         </span>
-                       )}
-                       {(execution.status === "partial" || execution.status === "failed") && execution.shortfall_qty > 0 && (
+                        {(createdFollowUpDates[execution.id] || execution.remaining_order_date) && (
+                          <span className="basis-full text-emerald-700">
+                            Создана заявка на {formatFollowUpDate(
+                              createdFollowUpDates[execution.id] ?? execution.remaining_order_date!,
+                            )}
+                          </span>
+                        )}
+                        {((execution.status === "partial" || execution.status === "failed") && execution.shortfall_qty > 0
+                          || execution.status === "rescheduled") && (
                          <div className="basis-full flex flex-wrap items-center gap-2 pt-1">
                            <input
                              type="date"
                              className="h-8 rounded-md border bg-background px-2"
-                             value={remainingDates[execution.id] ?? ""}
-                             onChange={(event) => setRemainingDates((current) => ({ ...current, [execution.id]: event.target.value }))}
+                              value={followUpDates[execution.id]
+                                ?? (execution.status === "rescheduled"
+                                  ? execution.rescheduled_date ?? ""
+                                  : execution.remaining_order_date ?? "")}
+                              onChange={(event) => setFollowUpDates((current) => ({
+                                ...current,
+                                [execution.id]: event.target.value,
+                              }))}
                            />
                            <Button
                              size="sm"
                              variant="outline"
-                             disabled={!remainingDates[execution.id] || creatingRemainingOrder === execution.id}
-                             onClick={() => createRemainingOrder(assignment.id, execution.id)}
-                           >
-                             {creatingRemainingOrder === execution.id
-                               ? <Loader2 className="w-3 h-3 animate-spin" />
-                               : execution.status === "partial" ? "Создать заявку на остаток" : "Создать заявку на новую дату"}
-                           </Button>
-                         </div>
-                       )}
-                      {execution.status === "rescheduled" && (
-                        <div className="basis-full flex items-center gap-2 pt-1">
-                          <input
-                            type="date"
-                            className="h-8 rounded-md border bg-background px-2"
-                            value={rescheduleDates[execution.id] ?? execution.rescheduled_date ?? ""}
-                            onChange={(event) => setRescheduleDates((current) => ({ ...current, [execution.id]: event.target.value }))}
-                          />
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={!rescheduleDates[execution.id] || creatingRescheduledOrder === execution.id}
-                            onClick={() => createRescheduledOrder(assignment.id, execution.id)}
-                          >
-                            {creatingRescheduledOrder === execution.id ? <Loader2 className="w-3 h-3 animate-spin" /> : "Создать заявку на новую дату"}
+                              disabled={!(
+                                followUpDates[execution.id]
+                                ?? (execution.status === "rescheduled"
+                                  ? execution.rescheduled_date
+                                  : execution.remaining_order_date)
+                              ) || creatingFollowUpOrder === execution.id}
+                              onClick={() => createFollowUpOrder(assignment.id, execution)}
+                            >
+                              {creatingFollowUpOrder === execution.id
+                                ? <Loader2 className="w-3 h-3 animate-spin" />
+                                : execution.status === "partial" ? "Создать заявку на остаток" : "Создать заявку на новую дату"}
                           </Button>
                         </div>
                       )}
