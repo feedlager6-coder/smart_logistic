@@ -3219,6 +3219,46 @@ def _execution_quantity(
     return 1.0
 
 
+def _remaining_order_products(
+    products: object,
+    planned_qty: float,
+    actual_qty: float,
+    remaining_qty: float,
+) -> tuple[str, str]:
+    """Format residual cargo for one product, preserving multi-product text."""
+    source = str(products or "").strip()
+    parts = [part.strip() for part in re.split(r"[,;]\s*", source) if part.strip()]
+    if len(parts) != 1:
+        return source, "Требуется уточнение остатка по товарным позициям."
+
+    item = parts[0]
+    quantity_pattern = r"\d+(?:[.,]\d+)?"
+    patterns = (
+        re.compile(rf"^\s*(?P<qty>{quantity_pattern})\s+(?P<name>.+?)\s*$", re.IGNORECASE),
+        re.compile(rf"^\s*(?P<name>.+?)\s*[xх×]\s*(?P<qty>{quantity_pattern})\s*$", re.IGNORECASE),
+        re.compile(rf"^\s*(?P<name>.+?)\s+(?P<qty>{quantity_pattern})\s*$", re.IGNORECASE),
+    )
+    name = item
+    for pattern in patterns:
+        match = pattern.match(item)
+        if match:
+            name = match.group("name").strip()
+            break
+    if not name:
+        return source, "Требуется уточнение остатка по товарным позициям."
+
+    def format_number(value: float) -> str:
+        numeric_value = float(value)
+        return str(int(numeric_value)) if numeric_value.is_integer() else f"{numeric_value:g}"
+
+    remaining_text = format_number(remaining_qty)
+    comment = (
+        f"Создано из остатка исполнения доставки. Было {format_number(planned_qty)}, "
+        f"доставлено {format_number(actual_qty)}, осталось {remaining_text}."
+    )
+    return f"{name} × {remaining_text}", comment
+
+
 def _validate_execution_quantities(status: str, planned_qty: float, actual_qty: float) -> None:
     """Keep delivered quantities bounded and status-consistent."""
     if not math.isfinite(planned_qty) or not math.isfinite(actual_qty):
@@ -7237,6 +7277,7 @@ def _serialize_execution(row: dict) -> dict:
         "payment_status": row.get("payment_status") or "pending",
         "driver_comment": row.get("driver_comment") or "",
         "rescheduled_date": str(row["rescheduled_date"]) if row.get("rescheduled_date") else None,
+        "remaining_order_date": str(row["remaining_order_date"]) if row.get("remaining_order_date") else None,
         "updated_at": str(row["updated_at"]) if row.get("updated_at") else None,
         "delivered_at": str(row["delivered_at"]) if row.get("delivered_at") else None,
     }
@@ -7267,10 +7308,21 @@ def list_route_assignments(session_id: int, request: Request):
             """SELECT assignment_id, id, store_id, visit_order, store_name,
                       address, lat, lon, products, quantity, actual_qty, arrive_by,
                       yandex_url, status, payment_method, payment_status,
-                      driver_comment, rescheduled_date, updated_at, delivered_at
-               FROM route_executions
-               WHERE assignment_id = ANY(%s)
-               ORDER BY assignment_id, visit_order""",
+                      driver_comment, rescheduled_date, updated_at, delivered_at,
+                      (SELECT MAX(o.delivery_date)::text
+                         FROM daily_orders o
+                        WHERE o.owner_id = a.owner_id
+                          AND o.store_id = e.store_id
+                          AND (
+                              o.notes LIKE 'Создано из остатка исполнения доставки%%'
+                              OR o.notes = 'Требуется уточнение остатка по товарным позициям.'
+                          )
+                          AND o.created_at >= COALESCE(e.delivered_at, e.updated_at)
+                      ) AS remaining_order_date
+               FROM route_executions e
+               JOIN route_assignments a ON a.id = e.assignment_id
+               WHERE e.assignment_id = ANY(%s)
+               ORDER BY e.assignment_id, e.visit_order""",
             ([row["id"] for row in rows],),
         )
         by_assignment = {}
@@ -7599,6 +7651,12 @@ def create_remaining_order(
         remaining_qty = max(planned_qty - actual_qty, 0)
         if remaining_qty <= 0:
             raise HTTPException(status_code=422, detail="У точки нет недоставленного количества")
+        remaining_products, remaining_notes = _remaining_order_products(
+            execution["products"],
+            planned_qty,
+            actual_qty,
+            remaining_qty,
+        )
 
         cur.execute(
             """INSERT INTO daily_orders
@@ -7613,8 +7671,8 @@ def create_remaining_order(
                 execution["address"] or "",
                 body.delivery_date,
                 remaining_qty,
-                execution["products"] or "",
-                "Создано из остатка исполнения доставки",
+                remaining_products,
+                remaining_notes,
             ),
         )
         order = dict(cur.fetchone())

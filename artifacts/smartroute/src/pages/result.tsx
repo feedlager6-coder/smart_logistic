@@ -58,6 +58,7 @@ type Assignment = {
     payment_status: string;
     driver_comment: string;
     rescheduled_date: string | null;
+    remaining_order_date: string | null;
   }>;
 };
 
@@ -266,6 +267,11 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                           execution.payment_status === "not_paid" ? "Не оплачено" : "Ожидает оплаты"}
                       </span>
                       {execution.driver_comment && <span className="text-muted-foreground truncate max-w-[180px]" title={execution.driver_comment}>«{execution.driver_comment}»</span>}
+                       {execution.remaining_order_date && (
+                         <span className="basis-full text-emerald-700">
+                           Создана заявка на: {new Date(`${execution.remaining_order_date}T00:00:00`).toLocaleDateString("ru-RU")}
+                         </span>
+                       )}
                        {(execution.status === "partial" || execution.status === "failed") && execution.shortfall_qty > 0 && (
                          <div className="basis-full flex flex-wrap items-center gap-2 pt-1">
                            <input
