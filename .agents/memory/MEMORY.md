@@ -46,3 +46,4 @@
 - [1C BSL v3 architecture](1c-bsl-v3.md) — single source of truth: `_1C_BSL_MODULE` in main.py; download-module endpoint fills {{BASE_URL}} + placeholder key (never stored); SmartRouteModule.bsl mirrors it. EPF_SPEC.md = full developer spec. SSL Ложь mandatory for Windows Server 2012/2016.
 - [Delivery execution architecture](delivery-execution-architecture.md) — immutable route optimization is separated from operational assignments and point executions.
 - [Dispatcher join qualification](dispatcher-join-qualification.md) — qualify every selected column in execution queries that join assignments and executions; both tables share id/status/timestamps.
+- [Workspace typecheck order](workspace-typecheck-order.md) — run `pnpm run typecheck:libs` before an artifact typecheck so project-reference declarations exist.

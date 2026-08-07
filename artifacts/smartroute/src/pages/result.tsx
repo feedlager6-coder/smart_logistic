@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check, AlertTriangle, Printer, Info, Settings, Package, Users, Link2, Loader2 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap } from "react-leaflet";
@@ -50,6 +51,8 @@ type Assignment = {
     id: number;
     visit_order: number;
     store_name: string;
+    address?: string;
+    products?: string;
     status: ExecutionStatus;
     quantity: number;
     actual_qty: number;
@@ -83,6 +86,26 @@ function readFollowUpOrderState(sessionId: number): FollowUpOrderState {
 
 function formatFollowUpDate(value: string): string {
   return new Date(`${value}T00:00:00`).toLocaleDateString("ru-RU");
+}
+
+function isMixedCargo(products: unknown): boolean {
+  if (Array.isArray(products)) return products.filter(Boolean).length > 1;
+  if (typeof products !== "string") return false;
+  const value = products.trim();
+  if (!value) return false;
+  return value.split(/[,;\n]+/).map((item) => item.trim()).filter(Boolean).length > 1;
+}
+
+function buildAssignmentWhatsAppUrl(driverUrl: string, navigationUrls: string[]): string {
+  const navigationText = navigationUrls.length > 0
+    ? navigationUrls.map((url, index) => `🗺 Яндекс Навигатор${navigationUrls.length > 1 ? ` ${index + 1}` : ""}: ${url}`).join("\n")
+    : "";
+  const text = [
+    "SmartRoute: исполнение маршрута",
+    navigationText,
+    `✅ Ссылка исполнения доставок: ${driverUrl}`,
+  ].filter(Boolean).join("\n");
+  return `https://wa.me/?text=${encodeURIComponent(text)}`;
 }
 
 const executionStatusLabels: Record<ExecutionStatus, string> = {
@@ -157,7 +180,7 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
             driver_url: driverUrl,
             whatsapp_url: created.whatsapp_url
               ? new URL(created.whatsapp_url, window.location.origin).toString()
-              : `https://wa.me/?text=${encodeURIComponent(`SmartRoute: исполнение доставок ${driverUrl}`)}`,
+                : buildAssignmentWhatsAppUrl(driverUrl, getNavSegments(routes[routeIndex] as VehicleRouteWithUrls)),
           },
         }));
       }
@@ -274,11 +297,20 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                   {assignment.executions.map((execution) => (
                     <div key={execution.id} className="flex flex-wrap items-center gap-2 rounded-md border px-2.5 py-2 text-xs">
                       <span className="font-semibold text-muted-foreground w-5">{execution.visit_order}</span>
-                      <span className="truncate flex-1">{execution.store_name}</span>
+                      <div className="min-w-[12rem] flex-1">
+                        <p className="font-medium leading-snug line-clamp-2 break-words">{execution.store_name}</p>
+                        {execution.address && <p className="text-[11px] text-muted-foreground mt-0.5 break-words">{execution.address}</p>}
+                      </div>
                        <span className="whitespace-nowrap text-muted-foreground">
                          План: {execution.quantity ?? 0} · Доставлено: {execution.actual_qty ?? 0} · Остаток: {execution.shortfall_qty ?? 0} шт.
                        </span>
                       <span className={`rounded-full px-2 py-0.5 whitespace-nowrap ${executionStatusClass[execution.status]}`}>{executionStatusLabels[execution.status]}</span>
+                      {isMixedCargo(execution.products) && (
+                        <div className="basis-full flex items-start gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-amber-800">
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                          <span>Смешанный груз: при частичной доставке укажите недоставленные товары в комментарии.</span>
+                        </div>
+                      )}
                       <span className="whitespace-nowrap text-muted-foreground">
                         {execution.payment_method === "cash" ? "Наличные" :
                           execution.payment_method === "card" ? "Карта" :
@@ -413,6 +445,7 @@ export function ResultPage() {
   const [copiedSeg, setCopiedSeg] = useState<CopiedSegKey | null>(null);
   const [localResult, setLocalResult] = useState<RouteResult | null>(null);
   const [activeVehicleIndex, setActiveVehicleIndex] = useState(0);
+  const [activeResultTab, setActiveResultTab] = useState<"execution" | "detail">("execution");
 
   const { data: serverResult, isLoading: sessionLoading, isError: sessionError } = useGetRouteSession(
     sessionId ?? 0,
@@ -666,6 +699,41 @@ export function ResultPage() {
           </div>
         )}
 
+        <div className="grid grid-cols-2 gap-1 p-1 m-3 mb-0 rounded-lg bg-muted text-muted-foreground">
+          <button
+            type="button"
+            onClick={() => setActiveResultTab("execution")}
+            className={`rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+              activeResultTab === "execution" ? "bg-background text-foreground shadow-sm" : ""
+            }`}
+          >
+            Исполнение
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveResultTab("detail")}
+            className={`rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+              activeResultTab === "detail" ? "bg-background text-foreground shadow-sm" : ""
+            }`}
+          >
+            Детализация
+          </button>
+        </div>
+
+        {activeResultTab === "execution" ? (
+          <div className="flex-1 overflow-y-auto p-3">
+            {sessionId ? (
+              <ExecutionControlPanel sessionId={sessionId} routes={result.routes} />
+            ) : (
+              <Card>
+                <CardContent className="py-8 text-center text-sm text-muted-foreground">
+                  Исполнение доступно для маршрутов, сохранённых в истории.
+                </CardContent>
+              </Card>
+            )}
+          </div>
+        ) : (
+          <>
         {/* Split warning (mobile) */}
         {activeSegments.length > 1 && (
           <div className="mx-4 mt-3 mb-1 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 flex gap-2 items-start">
@@ -687,8 +755,8 @@ export function ResultPage() {
                 {stop.order}
               </div>
               <div className="flex-1 min-w-0">
-                <p className="font-semibold text-base leading-tight truncate">{stop.store_name}</p>
-                <p className="text-sm text-muted-foreground mt-0.5 truncate">{stop.address}</p>
+                <p className="font-semibold text-base leading-snug line-clamp-2 break-words">{stop.store_name}</p>
+                <p className="text-sm text-muted-foreground mt-0.5 break-words">{stop.address}</p>
                 {stop.arrive_by && (
                   <TooltipProvider>
                     <Tooltip>
@@ -788,6 +856,8 @@ export function ResultPage() {
             </div>
           )}
         </div>
+          </>
+        )}
       </div>
     );
   }
@@ -1046,10 +1116,34 @@ export function ResultPage() {
         ))}
       </div>
 
-      <div className="space-y-6 print:hidden">
-        {sessionId && <ExecutionControlPanel sessionId={sessionId} routes={result.routes} />}
-        <h2 className="text-2xl font-bold tracking-tight mt-8 mb-4">Детализация по машинам</h2>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="print:hidden">
+        <Tabs defaultValue="execution" className="space-y-5">
+          <TabsList className="w-full sm:w-auto">
+            <TabsTrigger value="execution" className="flex-1 sm:flex-none gap-2">
+              <Users className="w-4 h-4" />
+              Исполнение
+            </TabsTrigger>
+            <TabsTrigger value="detail" className="flex-1 sm:flex-none gap-2">
+              <Info className="w-4 h-4" />
+              Детализация
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="execution" className="space-y-6">
+            {sessionId ? (
+              <ExecutionControlPanel sessionId={sessionId} routes={result.routes} />
+            ) : (
+              <Card>
+                <CardContent className="py-8 text-center text-sm text-muted-foreground">
+                  Исполнение доступно для маршрутов, сохранённых в истории.
+                </CardContent>
+              </Card>
+            )}
+          </TabsContent>
+
+          <TabsContent value="detail" className="space-y-6">
+            <h2 className="text-2xl font-bold tracking-tight">Детализация по машинам</h2>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {result.routes.map((route, i) => {
             const r = route as VehicleRouteWithUrls;
             const segments = getNavSegments(r);
@@ -1186,8 +1280,8 @@ export function ResultPage() {
                             {stop.order}
                           </div>
                           <div className="space-y-1 pb-2 min-w-0">
-                            <p className="font-medium text-sm leading-none truncate">{stop.store_name}</p>
-                            <p className="text-xs text-muted-foreground truncate">{stop.address}</p>
+                            <p className="font-medium text-sm leading-snug line-clamp-2 break-words">{stop.store_name}</p>
+                            <p className="text-xs text-muted-foreground mt-0.5 break-words">{stop.address}</p>
                             {stop.arrive_by && (
                               <TooltipProvider>
                                 <Tooltip>
@@ -1290,8 +1384,10 @@ export function ResultPage() {
                 </div>
               </Card>
             );
-          })}
-        </div>
+            })}
+            </div>
+          </TabsContent>
+        </Tabs>
       </div>
 
       {/* Bottom CTA — rebuild route */}
