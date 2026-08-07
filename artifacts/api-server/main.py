@@ -7305,10 +7305,10 @@ def list_route_assignments(session_id: int, request: Request):
     items = [_assignment_summary(row) for row in rows]
     if rows:
         cur.execute(
-            """SELECT assignment_id, id, store_id, visit_order, store_name,
-                      address, lat, lon, products, quantity, actual_qty, arrive_by,
-                      yandex_url, status, payment_method, payment_status,
-                      driver_comment, rescheduled_date, updated_at, delivered_at,
+            """SELECT e.assignment_id, e.id, e.store_id, e.visit_order, e.store_name,
+                      e.address, e.lat, e.lon, e.products, e.quantity, e.actual_qty, e.arrive_by,
+                      e.yandex_url, e.status, e.payment_method, e.payment_status,
+                      e.driver_comment, e.rescheduled_date, e.updated_at, e.delivered_at,
                       (SELECT MAX(o.delivery_date)::text
                          FROM daily_orders o
                         WHERE o.owner_id = a.owner_id
