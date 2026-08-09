@@ -7780,6 +7780,74 @@ def create_route_assignment(session_id: int, body: AssignmentCreate, request: Re
         cur.close(); conn.close()
 
 
+@app.post("/api/route/assignments/{assignment_id}/share")
+def share_route_assignment(assignment_id: int, request: Request):
+    """Issue a fresh driver link for an existing assignment for re-sharing."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            """SELECT a.id, a.session_id, a.route_index, a.driver_name, a.driver_phone,
+                      a.vehicle_name, a.route_yandex_url, s.date, s.result_json
+                 FROM route_assignments a
+                 JOIN route_sessions s ON s.id=a.session_id
+                WHERE a.id=%s AND a.owner_id=%s""",
+            (assignment_id, uid),
+        )
+        assignment = cur.fetchone()
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Назначение не найдено")
+        result = json.loads(assignment["result_json"] or "{}")
+        routes = result.get("routes") or []
+        route_index = int(assignment["route_index"])
+        route = routes[route_index] if 0 <= route_index < len(routes) else {}
+        cur.execute("SELECT COUNT(*) AS count FROM route_executions WHERE assignment_id=%s", (assignment_id,))
+        total_points = int(cur.fetchone()["count"])
+        raw_token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+        cur.execute(
+            """UPDATE route_assignments
+                  SET access_token_hash=%s, token_created_at=NOW(),
+                      expires_at=NOW() + INTERVAL '48 hours', updated_at=NOW()
+                WHERE id=%s AND owner_id=%s""",
+            (token_hash, assignment_id, uid),
+        )
+        conn.commit()
+        driver_url = f"/driver/{raw_token}"
+        route_url = assignment["route_yandex_url"] or route.get("yandex_url") or ""
+        phone = assignment["driver_phone"] or ""
+        return {
+            "assignment_id": assignment_id,
+            "driver_name": assignment["driver_name"] or "",
+            "driver_phone": phone,
+            "driver_url": driver_url,
+            "whatsapp_url": whatsapp_driver_url(
+                phone,
+                result.get("delivery_date") or str(assignment["date"] or ""),
+                assignment["vehicle_name"] or route.get("vehicle_name") or "",
+                total_points,
+                route.get("total_km") or 0,
+                route_url,
+                driver_url,
+            ) if phone else whatsapp_assignment_url(
+                assignment["vehicle_name"] or route.get("vehicle_name") or "",
+                route_url,
+                driver_url,
+            ),
+            "expires_at": str(datetime.utcnow() + timedelta(hours=48)),
+        }
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        logger.exception("share_route_assignment failed")
+        raise HTTPException(status_code=500, detail="Не удалось подготовить ссылку")
+    finally:
+        cur.close(); conn.close()
+
+
 @app.patch("/api/route/assignments/{assignment_id}")
 def update_route_assignment(assignment_id: int, body: AssignmentUpdate, request: Request):
     uid = get_user_id(request)

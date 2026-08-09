@@ -25,9 +25,12 @@
 - `PATCH /api/drivers/{driver_id}`
 - `DELETE /api/drivers/{driver_id}` (archive)
 - `POST /api/driver/{token}/location`
+- `POST /api/route/assignments/{assignment_id}/share`
 - `GET /api/route/sessions/{session_id}/report.xlsx`
 
 The existing assignment and driver execution endpoints remain compatible.
+The share endpoint rotates the 48-hour driver token and is used when the
+dispatcher returns to the route later and needs to send the links again.
 
 ## Manual smoke test
 
