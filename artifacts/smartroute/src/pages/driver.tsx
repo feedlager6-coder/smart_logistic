@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { CheckCircle2, CircleAlert, Loader2, MapPin, Truck } from "lucide-react";
@@ -35,6 +35,7 @@ type DriverData = {
     status: string;
     total_points: number;
     completed_points: number;
+    next_stop?: { store_name: string; address: string } | null;
   };
   executions: Execution[];
 };
@@ -67,6 +68,8 @@ const paymentStatuses: PaymentStatus[] = ["paid", "not_paid"];
 export function DriverPage() {
   const { token = "" } = useParams<{ token: string }>();
   const [savingId, setSavingId] = useState<number | null>(null);
+  const [trackingEnabled, setTrackingEnabled] = useState(false);
+  const [locationMessage, setLocationMessage] = useState("");
   const [drafts, setDrafts] = useState<Record<number, {
     status: Status;
     actual_qty: number | "";
@@ -83,8 +86,45 @@ export function DriverPage() {
       return response.json();
     },
     enabled: Boolean(token),
-    refetchInterval: 10_000,
+    refetchInterval: 15_000,
   });
+
+  useEffect(() => {
+    if (!trackingEnabled || !token || !navigator.geolocation) return;
+    const sendLocation = () => navigator.geolocation.getCurrentPosition(async (position) => {
+      try {
+        const response = await fetch(`/api/driver/${encodeURIComponent(token)}/location`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            lat: position.coords.latitude,
+            lon: position.coords.longitude,
+            accuracy: position.coords.accuracy,
+          }),
+        });
+        if (!response.ok) throw new Error();
+        setLocationMessage("Геолокация обновляется примерно раз в 20 секунд");
+      } catch {
+        setLocationMessage("Не удалось отправить координаты — проверьте связь");
+      }
+    }, () => setLocationMessage("Браузер не разрешил доступ к геолокации"), {
+      enableHighAccuracy: false,
+      maximumAge: 15000,
+      timeout: 10000,
+    });
+    sendLocation();
+    const timer = window.setInterval(sendLocation, 20000);
+    return () => window.clearInterval(timer);
+  }, [trackingEnabled, token]);
+
+  const enableTracking = () => {
+    if (!navigator.geolocation) {
+      setLocationMessage("Этот браузер не поддерживает геолокацию");
+      return;
+    }
+    setTrackingEnabled(true);
+    setLocationMessage("Запрашиваем разрешение на геолокацию…");
+  };
 
   const draftFor = (execution: Execution) => drafts[execution.id] ?? {
     status: execution.status,
@@ -175,10 +215,19 @@ export function DriverPage() {
             <div className="flex justify-between text-xs mb-1"><span>Прогресс</span><span>{assignment.completed_points} из {assignment.total_points}</span></div>
             <div className="h-2 rounded-full bg-white/25 overflow-hidden"><div className="h-full bg-white rounded-full transition-all" style={{ width: `${progress}%` }} /></div>
           </div>
+          {assignment.next_stop && <p className="text-xs opacity-90 mt-2">Следующая точка: {assignment.next_stop.store_name}</p>}
         </div>
       </header>
 
       <main className="max-w-2xl mx-auto p-4 space-y-3">
+        <Card>
+          <CardContent className="p-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs text-muted-foreground">{locationMessage || "Диспетчер может видеть позицию машины"}</div>
+            <Button size="sm" variant={trackingEnabled ? "secondary" : "outline"} onClick={enableTracking} disabled={trackingEnabled}>
+              {trackingEnabled ? "Геолокация включена" : "Разрешить геолокацию"}
+            </Button>
+          </CardContent>
+        </Card>
         {assignment.route_yandex_url && (
           <Button className="w-full h-11 gap-2" onClick={() => window.open(assignment.route_yandex_url, "_blank")}>
             <MapPin className="w-4 h-4" />
