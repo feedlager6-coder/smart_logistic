@@ -39,7 +39,12 @@ type ExecutionStatus = "planned" | "delivered" | "partial" | "failed" | "resched
 type Assignment = {
   id: number;
   route_index: number;
+  driver_id?: number | null;
   driver_name: string;
+  driver_phone?: string;
+  last_location?: { lat: number; lon: number; accuracy?: number; captured_at?: string } | null;
+  next_stop?: { store_name: string; address: string } | null;
+  next_stop_eta_minutes?: number | null;
   vehicle_name: string;
   status: string;
   total_points: number;
@@ -126,6 +131,7 @@ const executionStatusClass: Record<ExecutionStatus, string> = {
 
 function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; routes: RouteResult["routes"] }) {
   const [driverNames, setDriverNames] = useState<Record<number, string>>({});
+  const [driverIds, setDriverIds] = useState<Record<number, string>>({});
   const [creatingRoute, setCreatingRoute] = useState<number | null>(null);
   const [copiedAssignment, setCopiedAssignment] = useState<number | null>(null);
   const [issuedLinks, setIssuedLinks] = useState<Record<number, { driver_url: string; whatsapp_url: string }>>({});
@@ -136,6 +142,14 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
     () => readFollowUpOrderState(sessionId).createdDates,
   );
   const [creatingFollowUpOrder, setCreatingFollowUpOrder] = useState<number | null>(null);
+  const { data: driversData } = useQuery<{ drivers: Array<{ id: number; name: string; phone: string; vehicle_name: string }> }>({
+    queryKey: ["drivers"],
+    queryFn: async () => {
+      const response = await fetch("/api/drivers", { credentials: "include" });
+      if (!response.ok) throw new Error("Не удалось загрузить справочник водителей");
+      return response.json();
+    },
+  });
   const { data, isLoading, refetch } = useQuery<{ assignments: Assignment[] }>({
     queryKey: ["route-assignments", sessionId],
     queryFn: async () => {
@@ -144,7 +158,7 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
       return response.json();
     },
     // MVP uses polling instead of WebSocket; keep dispatcher updates quick.
-    refetchInterval: 3_000,
+    refetchInterval: 5_000,
   });
 
   useEffect(() => {
@@ -156,6 +170,7 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
 
   const createAssignment = async (routeIndex: number) => {
     setCreatingRoute(routeIndex);
+    const existingAssignment = data?.assignments?.find((item) => item.route_index === routeIndex);
     try {
       const response = await fetch(`/api/route/sessions/${sessionId}/assignments`, {
         method: "POST",
@@ -163,7 +178,10 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           route_index: routeIndex,
-          driver_name: driverNames[routeIndex] ?? "",
+          driver_id: driverIds[routeIndex]
+            ? Number(driverIds[routeIndex])
+            : existingAssignment?.driver_id ?? undefined,
+          driver_name: driverNames[routeIndex] ?? existingAssignment?.driver_name ?? "",
           vehicle_name: routes[routeIndex].vehicle_name,
         }),
       });
@@ -190,6 +208,15 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
     } finally {
       setCreatingRoute(null);
     }
+  };
+
+  const sendAllDrivers = () => {
+    const links = routes.map((_, index) => issuedLinks[index]?.whatsapp_url).filter(Boolean) as string[];
+    if (links.length === 0) {
+      window.alert("Сначала назначьте водителей и выпустите ссылки");
+      return;
+    }
+    links.forEach((link) => window.open(link, "_blank", "noopener,noreferrer"));
   };
 
   const copyDriverLink = async (assignment: Assignment) => {
@@ -238,7 +265,15 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
             <CardTitle className="flex items-center gap-2 text-lg"><Users className="w-5 h-5 text-primary" />Исполнение доставок</CardTitle>
             <p className="text-sm text-muted-foreground mt-1">Назначьте рейс водителю и следите за фактическими статусами точек.</p>
           </div>
-          {isLoading && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="outline" onClick={() => window.open(`/api/route/sessions/${sessionId}/report.xlsx`, "_blank")}>
+              <Download className="w-4 h-4 mr-1" />Отчёт Excel
+            </Button>
+            <Button size="sm" variant="outline" className="text-emerald-700 border-emerald-200" onClick={sendAllDrivers}>
+              Отправить водителям
+            </Button>
+            {isLoading && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
+          </div>
         </div>
       </CardHeader>
       <CardContent className="p-0 divide-y">
@@ -278,6 +313,14 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                 <div className="flex justify-between text-xs text-muted-foreground"><span>Прогресс рейса</span><span>{percent}%</span></div>
                 <div className="h-2 rounded-full bg-muted overflow-hidden"><div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${percent}%` }} /></div>
               </div>
+              {assignment?.next_stop && (
+                <div className="rounded-md bg-sky-50 border border-sky-100 px-3 py-2 text-xs text-sky-900">
+                  Следующая точка: <span className="font-medium">{assignment.next_stop.store_name}</span>
+                  {assignment.next_stop_eta_minutes ? ` · ETA примерно ${assignment.next_stop_eta_minutes} мин` : ""}
+                  {assignment.last_location?.captured_at ? ` · обновлено ${new Date(assignment.last_location.captured_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}` : " · геолокация ещё не получена"}
+                  {assignment.last_location && ` · позиция ${assignment.last_location.lat.toFixed(5)}, ${assignment.last_location.lon.toFixed(5)}`}
+                </div>
+              )}
               {assignment && (
                 <Button size="sm" variant="outline" className="w-full" onClick={() => createAssignment(routeIndex)} disabled={creatingRoute === routeIndex}>
                   {creatingRoute === routeIndex ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <RefreshCw className="w-4 h-4 mr-1" />}
@@ -286,6 +329,16 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
               )}
               {!assignment && (
                 <div className="flex gap-2">
+                  <select
+                    className="h-9 min-w-0 flex-1 rounded-md border bg-background px-3 text-sm"
+                    value={driverIds[routeIndex] ?? ""}
+                    onChange={(event) => setDriverIds((current) => ({ ...current, [routeIndex]: event.target.value }))}
+                  >
+                    <option value="">Водитель из справочника</option>
+                    {(driversData?.drivers ?? []).map((driver) => (
+                      <option key={driver.id} value={driver.id}>{driver.name}{driver.vehicle_name ? ` — ${driver.vehicle_name}` : ""}</option>
+                    ))}
+                  </select>
                   <input className="h-9 flex-1 rounded-md border bg-background px-3 text-sm" placeholder="Имя водителя (необязательно)" value={driverNames[routeIndex] ?? ""} onChange={(event) => setDriverNames((current) => ({ ...current, [routeIndex]: event.target.value }))} />
                   <Button size="sm" onClick={() => createAssignment(routeIndex)} disabled={creatingRoute === routeIndex}>
                     {creatingRoute === routeIndex ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Link2 className="w-4 h-4 mr-1" />}Назначить

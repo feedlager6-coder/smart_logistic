@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import {
   Settings, Save, Fuel, Gauge, Calculator, TrendingDown,
-  Users, Key, Plus, Trash2, RotateCcw, Copy, Check, Eye, EyeOff,
+  Users, Key, Plus, Trash2, RotateCcw, Copy, Check, Eye, EyeOff, Phone,
 } from "lucide-react";
 import { useAuth } from "@/context/auth";
 import { UsersPanel } from "@/components/UsersPanel";
@@ -27,7 +27,109 @@ function calcCostPerKm(fuelPrice: number, consumption: number): number {
   return Math.round((fuelPrice * consumption) / 100 * 100) / 100;
 }
 
-type Tab = "fuel" | "users" | "apikeys";
+type Tab = "fuel" | "users" | "apikeys" | "drivers";
+
+type Driver = {
+  id: number;
+  name: string;
+  phone: string;
+  vehicle_name: string;
+  is_active: boolean;
+};
+
+function DriversPanel() {
+  const { toast } = useToast();
+  const [drivers, setDrivers] = useState<Driver[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [vehicleName, setVehicleName] = useState("");
+
+  async function loadDrivers() {
+    try {
+      const response = await fetch("/api/drivers", { credentials: "include" });
+      if (!response.ok) throw new Error();
+      const data = await response.json() as { drivers: Driver[] };
+      setDrivers(data.drivers);
+    } catch {
+      toast({ title: "Не удалось загрузить водителей", variant: "destructive" });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { loadDrivers(); }, []);
+
+  async function addDriver() {
+    if (!name.trim() || !phone.trim()) {
+      toast({ title: "Укажите имя и телефон водителя", variant: "destructive" });
+      return;
+    }
+    setSaving(true);
+    try {
+      const response = await fetch("/api/drivers", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name.trim(), phone: phone.trim(), vehicle_name: vehicleName.trim() }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || "Не удалось сохранить водителя");
+      setName(""); setPhone(""); setVehicleName("");
+      await loadDrivers();
+      toast({ title: "Водитель добавлен" });
+    } catch (error) {
+      toast({ title: "Не удалось добавить водителя", description: error instanceof Error ? error.message : "Ошибка", variant: "destructive" });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function archiveDriver(driver: Driver) {
+    if (!window.confirm(`Убрать водителя «${driver.name}» из справочника?`)) return;
+    const response = await fetch(`/api/drivers/${driver.id}`, { method: "DELETE", credentials: "include" });
+    if (!response.ok) {
+      toast({ title: "Не удалось убрать водителя", variant: "destructive" });
+      return;
+    }
+    setDrivers((current) => current.filter((item) => item.id !== driver.id));
+    toast({ title: "Водитель убран из активного списка" });
+  }
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h2 className="text-lg font-semibold flex items-center gap-2"><Users className="w-5 h-5 text-primary" />Водители</h2>
+        <p className="text-sm text-muted-foreground mt-1">Телефон используется только для персональной ссылки WhatsApp с готовым сообщением.</p>
+      </div>
+      <Card className="border-primary/30 bg-primary/5">
+        <CardContent className="pt-5">
+          <div className="grid grid-cols-1 sm:grid-cols-[1.2fr_1fr_1fr_auto] gap-3 items-end">
+            <div className="space-y-2"><Label>Имя</Label><Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Алексей" /></div>
+            <div className="space-y-2"><Label>Телефон</Label><Input value={phone} onChange={(event) => setPhone(event.target.value)} placeholder="+7 900 000-00-00" inputMode="tel" /></div>
+            <div className="space-y-2"><Label>Машина</Label><Input value={vehicleName} onChange={(event) => setVehicleName(event.target.value)} placeholder="Газель А123АА" /></div>
+            <Button onClick={addDriver} disabled={saving} className="gap-2"><Plus className="w-4 h-4" />Добавить</Button>
+          </div>
+        </CardContent>
+      </Card>
+      {loading ? <div className="text-sm text-muted-foreground">Загрузка…</div> : drivers.length === 0 ? (
+        <div className="rounded-xl border-2 border-dashed border-border py-10 text-center text-sm text-muted-foreground">Справочник пока пуст</div>
+      ) : (
+        <div className="space-y-2">
+          {drivers.map((driver) => (
+            <div key={driver.id} className="flex flex-wrap items-center gap-3 rounded-lg border bg-background px-3 py-2.5">
+              <div className="min-w-[150px] flex-1 font-medium">{driver.name}</div>
+              <div className="flex items-center gap-1.5 text-sm text-muted-foreground"><Phone className="w-3.5 h-3.5" />{driver.phone}</div>
+              <div className="text-sm text-muted-foreground min-w-[130px]">{driver.vehicle_name || "Машина не указана"}</div>
+              <Button size="sm" variant="ghost" className="text-destructive" onClick={() => archiveDriver(driver)}>Убрать</Button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 interface ApiKey {
   id: number;
@@ -548,6 +650,17 @@ export function SettingsPage() {
           Топливо
         </button>
         <button
+          onClick={() => setActiveTab("drivers")}
+          className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === "drivers"
+              ? "border-primary text-primary"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <Users className="w-4 h-4" />
+          Водители
+        </button>
+        <button
           onClick={() => setActiveTab("apikeys")}
           className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
             activeTab === "apikeys"
@@ -574,6 +687,8 @@ export function SettingsPage() {
       </div>
 
       {/* Fuel tab */}
+      {activeTab === "drivers" && <DriversPanel />}
+
       {activeTab === "fuel" && (
         <div className="space-y-8">
           <Card className="border-border">

@@ -1987,6 +1987,21 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_stores_owner ON stores(owner_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner ON route_sessions(owner_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_settings_owner ON company_settings(owner_id)")
+    # Driver directory. Assignments keep a phone snapshot so historical
+    # WhatsApp links remain understandable after a directory edit.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS drivers (
+            id SERIAL PRIMARY KEY,
+            owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            phone TEXT NOT NULL,
+            vehicle_name TEXT DEFAULT '',
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_drivers_owner_active ON drivers(owner_id, is_active, name)")
     # Operational execution layer. Routing history stays immutable in
     # route_sessions; assignments and executions track the actual delivery.
     cur.execute("""
@@ -1995,7 +2010,9 @@ def init_db():
             owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             session_id INTEGER NOT NULL REFERENCES route_sessions(id) ON DELETE CASCADE,
             route_index INTEGER NOT NULL,
+            driver_id INTEGER REFERENCES drivers(id) ON DELETE SET NULL,
             driver_name TEXT DEFAULT '',
+            driver_phone TEXT DEFAULT '',
             vehicle_name TEXT DEFAULT '',
             route_yandex_url TEXT DEFAULT '',
             status TEXT NOT NULL DEFAULT 'planned',
@@ -2007,6 +2024,8 @@ def init_db():
             UNIQUE(session_id, route_index)
         )
     """)
+    cur.execute("ALTER TABLE route_assignments ADD COLUMN IF NOT EXISTS driver_id INTEGER REFERENCES drivers(id) ON DELETE SET NULL")
+    cur.execute("ALTER TABLE route_assignments ADD COLUMN IF NOT EXISTS driver_phone TEXT DEFAULT ''")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS route_executions (
             id SERIAL PRIMARY KEY,
@@ -2081,6 +2100,18 @@ def init_db():
     cur.execute("ALTER TABLE route_executions ALTER COLUMN payment_status SET NOT NULL")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_assignments_owner ON route_assignments(owner_id, session_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_executions_assignment ON route_executions(assignment_id, visit_order)")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS driver_locations (
+            id SERIAL PRIMARY KEY,
+            assignment_id INTEGER NOT NULL REFERENCES route_assignments(id) ON DELETE CASCADE,
+            lat DOUBLE PRECISION NOT NULL,
+            lon DOUBLE PRECISION NOT NULL,
+            accuracy DOUBLE PRECISION,
+            captured_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_driver_locations_latest ON driver_locations(assignment_id)")
     # ── User plan & admin notes ────────────────────────────────────────────────
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS plan TEXT DEFAULT 'trial'")
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS admin_note TEXT DEFAULT ''")
@@ -3045,6 +3076,35 @@ def whatsapp_assignment_url(vehicle_name: str, route_url: str, driver_url: str) 
     )
 
 
+def _normalize_driver_phone(phone: str) -> str:
+    """Return a WhatsApp-compatible phone value without punctuation."""
+    return re.sub(r"\D", "", phone or "")
+
+
+def whatsapp_driver_url(
+    phone: str,
+    delivery_date: str,
+    vehicle_name: str,
+    total_points: int,
+    total_km: float,
+    route_url: str,
+    driver_url: str,
+) -> str:
+    """Build a prefilled WhatsApp link; delivery is always user-initiated."""
+    text = "\n".join(line for line in [
+        "SmartRoute — рейс",
+        f"Дата: {delivery_date or 'не указана'}",
+        f"Машина: {vehicle_name or 'не указана'}",
+        f"Точек: {total_points}",
+        f"Пробег: {round(float(total_km or 0), 1)} км",
+        f"Яндекс Навигатор: {route_url}" if route_url else "",
+        f"Исполнение доставок: {driver_url}",
+    ] if line)
+    normalized = _normalize_driver_phone(phone)
+    target = f"https://wa.me/{normalized}" if normalized else "https://wa.me/"
+    return f"{target}?text={urllib.parse.quote(text)}"
+
+
 def store_row_to_dict(row) -> dict:
     return {
         "id": row["id"],
@@ -3129,11 +3189,26 @@ class AssignmentCreate(BaseModel):
     route_index: int
     driver_name: str = ""
     vehicle_name: str = ""
+    driver_id: Optional[int] = None
 
 
 class AssignmentUpdate(BaseModel):
     driver_name: Optional[str] = None
     vehicle_name: Optional[str] = None
+    driver_id: Optional[int] = None
+
+
+class DriverCreate(BaseModel):
+    name: str
+    phone: str
+    vehicle_name: str = ""
+
+
+class DriverUpdate(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    vehicle_name: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 class DispatcherExecutionUpdate(BaseModel):
@@ -3150,6 +3225,12 @@ class ExecutionUpdate(BaseModel):
     payment_method: Optional[str] = None
     payment_status: Optional[str] = None
     driver_comment: str = ""
+
+
+class DriverLocationInput(BaseModel):
+    lat: float
+    lon: float
+    accuracy: Optional[float] = None
 
 
 _PRODUCT_QUANTITY_RE = re.compile(
@@ -7159,6 +7240,116 @@ def build_route(request: Request, body: RouteRequest):
     return result
 
 
+def _serialize_driver(row: dict) -> dict:
+    return {
+        "id": int(row["id"]),
+        "name": row.get("name") or "",
+        "phone": row.get("phone") or "",
+        "vehicle_name": row.get("vehicle_name") or "",
+        "is_active": bool(row.get("is_active", True)),
+        "created_at": str(row["created_at"]) if row.get("created_at") else None,
+        "updated_at": str(row["updated_at"]) if row.get("updated_at") else None,
+    }
+
+
+@app.get("/api/drivers")
+def list_drivers(request: Request, include_inactive: bool = False):
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            """SELECT id, name, phone, vehicle_name, is_active, created_at, updated_at
+                 FROM drivers
+                WHERE owner_id=%s AND (%s OR is_active=TRUE)
+                ORDER BY is_active DESC, name""",
+            (uid, include_inactive),
+        )
+        return {"drivers": [_serialize_driver(dict(row)) for row in cur.fetchall()]}
+    finally:
+        cur.close(); conn.close()
+
+
+@app.post("/api/drivers", status_code=201)
+def create_driver(body: DriverCreate, request: Request):
+    uid = get_user_id(request)
+    name = body.name.strip()
+    phone = body.phone.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Укажите имя водителя")
+    if len(_normalize_driver_phone(phone)) < 7:
+        raise HTTPException(status_code=422, detail="Укажите корректный телефон водителя")
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            """INSERT INTO drivers (owner_id, name, phone, vehicle_name)
+               VALUES (%s,%s,%s,%s)
+               RETURNING id, name, phone, vehicle_name, is_active, created_at, updated_at""",
+            (uid, name, phone, body.vehicle_name.strip()),
+        )
+        row = dict(cur.fetchone())
+        conn.commit()
+        return _serialize_driver(row)
+    finally:
+        cur.close(); conn.close()
+
+
+@app.patch("/api/drivers/{driver_id}")
+def update_driver(driver_id: int, body: DriverUpdate, request: Request):
+    uid = get_user_id(request)
+    fields, values = [], []
+    if body.name is not None:
+        if not body.name.strip():
+            raise HTTPException(status_code=422, detail="Имя водителя не может быть пустым")
+        fields.append("name=%s"); values.append(body.name.strip())
+    if body.phone is not None:
+        if len(_normalize_driver_phone(body.phone)) < 7:
+            raise HTTPException(status_code=422, detail="Укажите корректный телефон водителя")
+        fields.append("phone=%s"); values.append(body.phone.strip())
+    if body.vehicle_name is not None:
+        fields.append("vehicle_name=%s"); values.append(body.vehicle_name.strip())
+    if body.is_active is not None:
+        fields.append("is_active=%s"); values.append(body.is_active)
+    if not fields:
+        raise HTTPException(status_code=422, detail="Нет изменений")
+    fields.append("updated_at=NOW()")
+    values.extend([driver_id, uid])
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            f"""UPDATE drivers SET {', '.join(fields)}
+                    WHERE id=%s AND owner_id=%s
+                RETURNING id, name, phone, vehicle_name, is_active, created_at, updated_at""",
+            values,
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Водитель не найден")
+        conn.commit()
+        return _serialize_driver(dict(row))
+    finally:
+        cur.close(); conn.close()
+
+
+@app.delete("/api/drivers/{driver_id}", status_code=204)
+def archive_driver(driver_id: int, request: Request):
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "UPDATE drivers SET is_active=FALSE, updated_at=NOW() WHERE id=%s AND owner_id=%s",
+            (driver_id, uid),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Водитель не найден")
+        conn.commit()
+    finally:
+        cur.close(); conn.close()
+
+
 @app.get("/api/route/sessions/{id}")
 def get_route_session(id: int, request: Request):
     uid = get_user_id(request)
@@ -7173,6 +7364,84 @@ def get_route_session(id: int, request: Request):
     return json.loads(row["result_json"])
 
 
+@app.get("/api/route/sessions/{session_id}/report.xlsx")
+def download_route_report(session_id: int, request: Request):
+    """Export the operational route report as a dispatcher-friendly workbook."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            "SELECT id, date, total_km, result_json FROM route_sessions WHERE id=%s AND owner_id=%s",
+            (session_id, uid),
+        )
+        session = cur.fetchone()
+        if not session:
+            raise HTTPException(status_code=404, detail="Маршрут не найден")
+        cur.execute(
+            """SELECT a.vehicle_name, a.driver_name, a.driver_phone, a.route_index,
+                      e.visit_order, e.store_name, e.address, e.status,
+                      e.quantity, e.actual_qty, e.products, e.payment_method,
+                      e.payment_status, e.driver_comment, e.rescheduled_date
+                 FROM route_assignments a
+                 LEFT JOIN route_executions e ON e.assignment_id=a.id
+                WHERE a.session_id=%s AND a.owner_id=%s
+                ORDER BY a.route_index, e.visit_order""",
+            (session_id, uid),
+        )
+        rows = [dict(row) for row in cur.fetchall()]
+    finally:
+        cur.close(); conn.close()
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Отчёт по рейсу"
+    headers = [
+        "Машина", "Водитель", "Телефон", "Дата", "№ точки", "Контрагент",
+        "Адрес", "Статус", "План", "Доставлено", "Остаток", "Товар",
+        "Способ оплаты", "Статус оплаты", "Комментарий", "Дата переноса",
+        "Общий пробег, км",
+    ]
+    sheet.append(headers)
+    header_fill = openpyxl.styles.PatternFill("solid", fgColor="1D4ED8")
+    for cell in sheet[1]:
+        cell.font = openpyxl.styles.Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+        cell.alignment = openpyxl.styles.Alignment(horizontal="center", vertical="center", wrap_text=True)
+    total_km = float(session.get("total_km") or 0)
+    for row in rows:
+        planned = float(row.get("quantity") or 0)
+        actual = float(row.get("actual_qty") or 0)
+        sheet.append([
+            row.get("vehicle_name") or "", row.get("driver_name") or "", row.get("driver_phone") or "",
+            session.get("date") or "", row.get("visit_order") or "", row.get("store_name") or "",
+            row.get("address") or "", row.get("status") or "planned", planned, actual,
+            max(planned - actual, 0), row.get("products") or "", row.get("payment_method") or "none",
+            row.get("payment_status") or "pending", row.get("driver_comment") or "",
+            str(row["rescheduled_date"]) if row.get("rescheduled_date") else "", total_km,
+        ])
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    widths = [16, 20, 16, 13, 10, 30, 34, 16, 12, 14, 12, 30, 18, 18, 34, 16, 18]
+    for index, width in enumerate(widths, 1):
+        sheet.column_dimensions[openpyxl.utils.get_column_letter(index)].width = width
+    for row in sheet.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = openpyxl.styles.Alignment(vertical="top", wrap_text=True)
+    for col in (9, 10, 11, 17):
+        for cell in list(sheet.iter_cols(min_col=col, max_col=col, min_row=2))[0]:
+            cell.number_format = "0.0"
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    filename = f"smartroute_route_{session_id}_{date.today().isoformat()}.xlsx"
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 def _assignment_summary(row: dict) -> dict:
     """Serialize an assignment without exposing its one-time token."""
     assignment_status = row.get("status") or "planned"
@@ -7182,7 +7451,9 @@ def _assignment_summary(row: dict) -> dict:
         "id": row["id"],
         "session_id": row["session_id"],
         "route_index": row["route_index"],
+        "driver_id": row.get("driver_id"),
         "driver_name": row.get("driver_name") or "",
+        "driver_phone": row.get("driver_phone") or "",
         "vehicle_name": row.get("vehicle_name") or "",
         "route_yandex_url": row.get("route_yandex_url") or "",
         "status": assignment_status,
@@ -7190,6 +7461,11 @@ def _assignment_summary(row: dict) -> dict:
         "total_points": int(row.get("total_points") or 0),
         "completed_points": int(row.get("completed_points") or 0),
         "updated_at": str(row["updated_at"]) if row.get("updated_at") else None,
+        "whatsapp_url": row.get("whatsapp_url"),
+        "location_lat": row.get("location_lat"),
+        "location_lon": row.get("location_lon"),
+        "location_accuracy": row.get("location_accuracy"),
+        "location_captured_at": row.get("location_captured_at"),
     }
 
 
@@ -7201,7 +7477,7 @@ def _load_assignment_for_token(token: str) -> tuple[dict, list[dict]]:
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        """SELECT id, session_id, route_index, driver_name, vehicle_name,
+        """SELECT id, session_id, route_index, driver_id, driver_name, driver_phone, vehicle_name,
                   route_yandex_url, status, expires_at,
                   updated_at
            FROM route_assignments WHERE access_token_hash=%s""",
@@ -7290,15 +7566,25 @@ def list_route_assignments(session_id: int, request: Request):
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        """SELECT a.id, a.session_id, a.route_index, a.driver_name,
-                  a.vehicle_name, a.route_yandex_url, a.status, a.expires_at, a.updated_at,
+        """SELECT a.id, a.session_id, a.route_index, a.driver_id, a.driver_name,
+                  a.driver_phone, a.vehicle_name, a.route_yandex_url, a.status, a.expires_at, a.updated_at,
+                  loc.lat AS location_lat, loc.lon AS location_lon,
+                  loc.accuracy AS location_accuracy, loc.captured_at AS location_captured_at,
                   COUNT(e.id) AS total_points,
                   COUNT(e.id) FILTER (WHERE e.status IN
                     ('delivered','partial','failed','rescheduled')) AS completed_points
            FROM route_assignments a
            LEFT JOIN route_executions e ON e.assignment_id=a.id
+           LEFT JOIN LATERAL (
+             SELECT lat, lon, accuracy, captured_at
+               FROM driver_locations
+              WHERE assignment_id=a.id
+              ORDER BY captured_at DESC
+              LIMIT 1
+           ) loc ON TRUE
            WHERE a.session_id=%s AND a.owner_id=%s
-           GROUP BY a.id ORDER BY a.route_index""",
+           GROUP BY a.id, loc.lat, loc.lon, loc.accuracy, loc.captured_at
+           ORDER BY a.route_index""",
         (session_id, uid),
     )
     rows = [dict(row) for row in cur.fetchall()]
@@ -7331,6 +7617,29 @@ def list_route_assignments(session_id: int, request: Request):
             by_assignment.setdefault(execution["assignment_id"], []).append(item)
         for item in items:
             item["executions"] = by_assignment.get(item["id"], [])
+            location = {
+                "lat": item.pop("location_lat", None),
+                "lon": item.pop("location_lon", None),
+                "accuracy": item.pop("location_accuracy", None),
+                "captured_at": str(item.pop("location_captured_at")) if item.get("location_captured_at") else None,
+            }
+            item["last_location"] = location if location["lat"] is not None else None
+            next_stop = next((stop for stop in item["executions"] if stop.get("status") == "planned"), None)
+            item["next_stop"] = {
+                "visit_order": next_stop.get("visit_order"),
+                "store_name": next_stop.get("store_name") or "",
+                "address": next_stop.get("address") or "",
+                "lat": next_stop.get("lat"),
+                "lon": next_stop.get("lon"),
+            } if next_stop else None
+            if location["lat"] is not None and next_stop and next_stop.get("lat") is not None and next_stop.get("lon") is not None:
+                distance_km = haversine_meters(
+                    (float(location["lat"]), float(location["lon"])),
+                    (float(next_stop["lat"]), float(next_stop["lon"])),
+                ) / 1000
+                item["next_stop_eta_minutes"] = max(1, round(distance_km / 30 * 60 * 1.6))
+            else:
+                item["next_stop_eta_minutes"] = None
     cur.close(); conn.close()
     return {"assignments": items}
 
@@ -7376,25 +7685,41 @@ def create_route_assignment(session_id: int, body: AssignmentCreate, request: Re
             }
         raw_token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
-        vehicle_name = body.vehicle_name.strip() or str(route.get("vehicle_name") or "")
+        driver_id = body.driver_id
+        driver_phone = ""
         driver_name = body.driver_name.strip()
+        directory_vehicle = ""
+        if driver_id is not None:
+            cur.execute(
+                "SELECT id, name, phone, vehicle_name FROM drivers WHERE id=%s AND owner_id=%s AND is_active=TRUE",
+                (driver_id, uid),
+            )
+            driver = cur.fetchone()
+            if not driver:
+                raise HTTPException(status_code=422, detail="Выбранный водитель не найден или неактивен")
+            driver_name = driver["name"]
+            driver_phone = driver["phone"] or ""
+            directory_vehicle = driver["vehicle_name"] or ""
+        vehicle_name = body.vehicle_name.strip() or directory_vehicle or str(route.get("vehicle_name") or "")
         cur.execute(
             """INSERT INTO route_assignments
-                 (owner_id, session_id, route_index, driver_name, vehicle_name,
+                 (owner_id, session_id, route_index, driver_id, driver_name, driver_phone, vehicle_name,
                   route_yandex_url, access_token_hash, token_created_at, expires_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,NOW(),NOW() + INTERVAL '48 hours')
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),NOW() + INTERVAL '48 hours')
                ON CONFLICT (session_id, route_index)
-               DO UPDATE SET driver_name=EXCLUDED.driver_name,
+               DO UPDATE SET driver_id=EXCLUDED.driver_id,
+                             driver_name=EXCLUDED.driver_name,
+                             driver_phone=EXCLUDED.driver_phone,
                              vehicle_name=EXCLUDED.vehicle_name,
                              route_yandex_url=EXCLUDED.route_yandex_url,
                              access_token_hash=EXCLUDED.access_token_hash,
                              token_created_at=NOW(),
                              expires_at=NOW() + INTERVAL '48 hours',
                              updated_at=NOW()
-               RETURNING id, session_id, route_index, driver_name, vehicle_name,
+               RETURNING id, session_id, route_index, driver_id, driver_name, driver_phone, vehicle_name,
                          route_yandex_url, status, expires_at, updated_at""",
             (
-                uid, session_id, body.route_index, driver_name, vehicle_name,
+                uid, session_id, body.route_index, driver_id, driver_name, driver_phone, vehicle_name,
                 route.get("yandex_url") or "", token_hash,
             ),
         )
@@ -7435,10 +7760,12 @@ def create_route_assignment(session_id: int, body: AssignmentCreate, request: Re
             "total_points": len(route.get("stores") or []),
             "completed_points": 0,
             "driver_url": driver_url,
-            "whatsapp_url": whatsapp_assignment_url(
-                vehicle_name,
-                route.get("yandex_url") or "",
-                driver_url,
+            "whatsapp_url": whatsapp_driver_url(
+                driver_phone, delivery_date or "", vehicle_name,
+                len(route.get("stores") or []), route.get("total_km") or 0,
+                route.get("yandex_url") or "", driver_url,
+            ) if driver_phone else whatsapp_assignment_url(
+                vehicle_name, route.get("yandex_url") or "", driver_url,
             ),
         })
         return assignment
@@ -7461,6 +7788,18 @@ def update_route_assignment(assignment_id: int, body: AssignmentUpdate, request:
     fields, values = [], []
     if body.driver_name is not None:
         fields.append("driver_name=%s"); values.append(body.driver_name.strip())
+    if body.driver_id is not None:
+        cur.execute(
+            "SELECT id, name, phone, vehicle_name FROM drivers WHERE id=%s AND owner_id=%s AND is_active=TRUE",
+            (body.driver_id, uid),
+        )
+        driver = cur.fetchone()
+        if not driver:
+            raise HTTPException(status_code=422, detail="Выбранный водитель не найден или неактивен")
+        fields.extend(["driver_id=%s", "driver_name=%s", "driver_phone=%s"])
+        values.extend([driver["id"], driver["name"], driver["phone"] or ""])
+        if body.vehicle_name is None and driver["vehicle_name"]:
+            fields.append("vehicle_name=%s"); values.append(driver["vehicle_name"])
     if body.vehicle_name is not None:
         fields.append("vehicle_name=%s"); values.append(body.vehicle_name.strip())
     if not fields:
@@ -7470,7 +7809,7 @@ def update_route_assignment(assignment_id: int, body: AssignmentUpdate, request:
     cur.execute(
         f"""UPDATE route_assignments SET {', '.join(fields)}
             WHERE id=%s AND owner_id=%s
-            RETURNING id, session_id, route_index, driver_name, vehicle_name,
+            RETURNING id, session_id, route_index, driver_id, driver_name, driver_phone, vehicle_name,
                       route_yandex_url, status, expires_at, updated_at""",
         values,
     )
@@ -7686,6 +8025,32 @@ def create_remaining_order(
         conn.close()
 
 
+@app.post("/api/driver/{token}/location")
+def update_driver_location(token: str, body: DriverLocationInput):
+    """Store the latest phone position for a token-scoped assignment."""
+    _api_rate_limit(f"driver_location:{hashlib.sha256(token.encode()).hexdigest()}", 6, 60)
+    if not (-90 <= body.lat <= 90 and -180 <= body.lon <= 180):
+        raise HTTPException(status_code=422, detail="Некорректные координаты")
+    if body.accuracy is not None and (body.accuracy < 0 or body.accuracy > 10000):
+        raise HTTPException(status_code=422, detail="Некорректная точность геолокации")
+    assignment, _ = _load_assignment_for_token(token)
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """INSERT INTO driver_locations (assignment_id, lat, lon, accuracy, captured_at)
+               VALUES (%s,%s,%s,%s,NOW())
+               ON CONFLICT (assignment_id) DO UPDATE SET
+                 lat=EXCLUDED.lat, lon=EXCLUDED.lon, accuracy=EXCLUDED.accuracy,
+                 captured_at=EXCLUDED.captured_at""",
+            (assignment["id"], body.lat, body.lon, body.accuracy),
+        )
+        conn.commit()
+        return {"ok": True, "captured_at": datetime.utcnow().isoformat()}
+    finally:
+        cur.close(); conn.close()
+
+
 @app.get("/api/driver/{token}")
 def get_driver_assignment(token: str):
     """Public, token-scoped driver view. No account or cookie is accepted."""
@@ -7693,6 +8058,7 @@ def get_driver_assignment(token: str):
     assignment, executions = _load_assignment_for_token(token)
     terminal = {"delivered", "partial", "failed", "rescheduled"}
     completed = sum(1 for row in executions if row.get("status") in terminal)
+    next_stop = next((row for row in executions if row.get("status") == "planned"), None)
     return {
         "assignment": {
             "id": assignment["id"],
@@ -7702,6 +8068,10 @@ def get_driver_assignment(token: str):
             "status": "planned" if assignment.get("status") == "on_route" else (assignment.get("status") or "planned"),
             "total_points": len(executions),
             "completed_points": completed,
+            "next_stop": {
+                "store_name": next_stop.get("store_name") or "",
+                "address": next_stop.get("address") or "",
+            } if next_stop else None,
         },
         "executions": [_serialize_execution(row) for row in executions],
     }
