@@ -27,7 +27,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useListStores } from "@workspace/api-client-react";
 import { Calendar } from "@/components/ui/calendar";
 import { ru } from "date-fns/locale";
-import { format } from "date-fns";
+import { addDays, format, subDays } from "date-fns";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -211,18 +211,18 @@ export function OrdersPage() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   // Selected delivery date — drives view / import / manual add / clear.
-  // Priority: ?date= URL param (coming from route page) → sessionStorage → today.
+  // URL is the source of truth; without it the operational default is today.
   const [date, setDate] = useState<string>(() => {
     const urlDate = new URLSearchParams(window.location.search).get("date");
     if (urlDate && /^\d{4}-\d{2}-\d{2}$/.test(urlDate)) return urlDate;
-    const stored = sessionStorage.getItem("smartroute_orders_date");
-    if (stored && /^\d{4}-\d{2}-\d{2}$/.test(stored)) return stored;
     return TODAY;
   });
 
-  // Persist selected date to sessionStorage so navigating away and back keeps it.
+  // Keep browser navigation/deep links aligned with the selected date.
   useEffect(() => {
-    sessionStorage.setItem("smartroute_orders_date", date);
+    const url = new URL(window.location.href);
+    url.searchParams.set("date", date);
+    window.history.replaceState({}, "", `${url.pathname}?${url.searchParams.toString()}${url.hash}`);
   }, [date]);
   const AUTOSELECT_KEY = `smartroute_autoselect_${date}`;
 
@@ -991,6 +991,11 @@ export function OrdersPage() {
         <div className="flex items-center gap-3 shrink-0">
           <div className="flex items-center gap-2">
             <CalendarDays className="w-4 h-4 text-muted-foreground" />
+            <div className="hidden lg:flex items-center gap-1">
+              <Button size="sm" variant="ghost" onClick={() => setDate(format(subDays(new Date(`${date}T00:00:00`), 1), "yyyy-MM-dd"))}>← Вчера</Button>
+              <Button size="sm" variant={date === TODAY ? "secondary" : "ghost"} onClick={() => setDate(TODAY)}>Сегодня · {format(new Date(`${TODAY}T00:00:00`), "d MMMM", { locale: ru })}</Button>
+              <Button size="sm" variant="ghost" onClick={() => setDate(format(addDays(new Date(`${date}T00:00:00`), 1), "yyyy-MM-dd"))}>Завтра →</Button>
+            </div>
             <Popover open={calendarOpen} onOpenChange={setCalendarOpen}>
               <PopoverTrigger asChild>
                 <Button
@@ -998,7 +1003,7 @@ export function OrdersPage() {
                   className="w-[170px] justify-start text-left font-normal text-sm gap-2"
                 >
                   <span className="font-medium">
-                    {format(new Date(date + "T00:00:00"), "d MMM yyyy", { locale: ru })}
+                    {date === TODAY ? "Сегодня" : format(new Date(date + "T00:00:00"), "d MMM yyyy", { locale: ru })}
                   </span>
                   <span className="text-muted-foreground capitalize text-xs">
                     {format(new Date(date + "T00:00:00"), "EEEE", { locale: ru })}

@@ -1905,6 +1905,8 @@ def init_db():
     cur.execute("""
         ALTER TABLE route_sessions ADD COLUMN IF NOT EXISTS result_json TEXT
     """)
+    cur.execute("ALTER TABLE route_sessions ADD COLUMN IF NOT EXISTS is_completed BOOLEAN NOT NULL DEFAULT FALSE")
+    cur.execute("ALTER TABLE route_sessions ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP")
     cur.execute("""
         ALTER TABLE stores ADD COLUMN IF NOT EXISTS map_url TEXT
     """)
@@ -8398,12 +8400,32 @@ def list_route_assignments(session_id: int, request: Request):
                 "lat": next_stop.get("lat"),
                 "lon": next_stop.get("lon"),
             } if next_stop else None
+            # Dispatcher ETA for every remaining point. Keep the model simple
+            # and stable: road distance is estimated from GPS/current stop at
+            # 30 km/h with a 1.6 road factor, plus four minutes service per
+            # intermediate stop. Values are rounded to five minutes so the
+            # list does not jump on every GPS poll.
+            if location["lat"] is not None and location["lon"] is not None:
+                cursor_lat, cursor_lon = float(location["lat"]), float(location["lon"])
+                elapsed_minutes = 0
+                for stop in item["executions"]:
+                    stop["eta_minutes"] = None
+                    if stop.get("status") != "planned" or stop.get("lat") is None or stop.get("lon") is None:
+                        continue
+                    leg_km = haversine_meters(
+                        (cursor_lat, cursor_lon),
+                        (float(stop["lat"]), float(stop["lon"])),
+                    ) / 1000
+                    elapsed_minutes += max(1, round(leg_km / 30 * 60 * 1.6))
+                    stop["eta_minutes"] = max(5, int(round(elapsed_minutes / 5) * 5))
+                    elapsed_minutes += 4
+                    cursor_lat, cursor_lon = float(stop["lat"]), float(stop["lon"])
             if location["lat"] is not None and next_stop and next_stop.get("lat") is not None and next_stop.get("lon") is not None:
                 distance_km = haversine_meters(
                     (float(location["lat"]), float(location["lon"])),
                     (float(next_stop["lat"]), float(next_stop["lon"])),
                 ) / 1000
-                item["next_stop_eta_minutes"] = max(1, round(distance_km / 30 * 60 * 1.6))
+                item["next_stop_eta_minutes"] = max(5, int(round((distance_km / 30 * 60 * 1.6) / 5) * 5))
             else:
                 item["next_stop_eta_minutes"] = None
     cur.close(); conn.close()
@@ -8870,6 +8892,8 @@ def update_driver_location(token: str, body: DriverLocationInput):
     if body.accuracy is not None and (body.accuracy < 0 or body.accuracy > 10000):
         raise HTTPException(status_code=422, detail="Некорректная точность геолокации")
     assignment, _ = _load_assignment_for_token(token)
+    if assignment.get("status") == "completed":
+        raise HTTPException(status_code=409, detail="Рейс завершён, геолокация больше не принимается")
     conn = get_db()
     cur = conn.cursor()
     try:
@@ -8919,6 +8943,8 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
     if body.status not in EXECUTION_STATUSES:
         raise HTTPException(status_code=422, detail="Недопустимый статус доставки")
     assignment, executions = _load_assignment_for_token(token)
+    if assignment.get("status") == "completed":
+        raise HTTPException(status_code=409, detail="Рейс уже завершён")
     current = next((row for row in executions if int(row["id"]) == execution_id), None)
     if not current:
         raise HTTPException(status_code=404, detail="Точка рейса не найдена")
@@ -9065,6 +9091,72 @@ def list_route_sessions(request: Request, page: int = 1, page_size: int = 20):
                 for r in rows
             ],
         }
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.get("/api/route/active-session")
+def get_active_route_session(request: Request):
+    """Return the latest unfinished route so navigation never loses context."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            """SELECT id, date, num_vehicles, total_km, num_points
+                 FROM route_sessions
+                WHERE owner_id=%s AND COALESCE(is_completed, FALSE)=FALSE
+                  AND date::date >= CURRENT_DATE - 2
+                ORDER BY created_at DESC LIMIT 1""",
+            (uid,),
+        )
+        row = cur.fetchone()
+        return {"session": dict(row) if row else None}
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.post("/api/route/sessions/{session_id}/complete")
+def complete_route_session(session_id: int, request: Request):
+    """Close a route only after every assigned delivery point is terminal."""
+    uid = get_user_id(request)
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            """SELECT id FROM route_sessions WHERE id=%s AND owner_id=%s
+               FOR UPDATE""",
+            (session_id, uid),
+        )
+        if not cur.fetchone():
+            raise HTTPException(status_code=404, detail="Маршрут не найден")
+        cur.execute(
+            """SELECT COUNT(*) AS pending
+                 FROM route_executions e
+                 JOIN route_assignments a ON a.id=e.assignment_id
+                WHERE a.session_id=%s AND e.status='planned'""",
+            (session_id,),
+        )
+        pending = int(cur.fetchone()["pending"] or 0)
+        if pending:
+            raise HTTPException(status_code=409, detail=f"Осталось необработанных точек: {pending}")
+        cur.execute(
+            """UPDATE route_sessions SET is_completed=TRUE, completed_at=NOW()
+                WHERE id=%s RETURNING id""",
+            (session_id,),
+        )
+        cur.execute(
+            """UPDATE route_assignments SET status='completed', updated_at=NOW()
+                WHERE session_id=%s AND status <> 'completed'""",
+            (session_id,),
+        )
+        conn.commit()
+        return {"ok": True, "session_id": session_id}
+    except HTTPException:
+        conn.rollback()
+        raise
     finally:
         cur.close()
         conn.close()

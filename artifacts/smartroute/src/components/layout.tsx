@@ -12,12 +12,36 @@ import {
   SidebarFooter,
 } from "@/components/ui/sidebar";
 import { Link, useLocation } from "wouter";
-import { Home, Store, Map, BarChart3, Truck, History, LogOut, User, Settings, ClipboardList, Puzzle } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Home, Store, BarChart3, Truck, History, LogOut, User, Settings, ClipboardList, Puzzle } from "lucide-react";
 import React from "react";
 import { useAuth } from "@/context/auth";
 import { Button } from "@/components/ui/button";
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
+  const [activeRoute, setActiveRoute] = useState<{ id: number; date: string; num_points: number; total_km: number } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const response = await fetch("/api/route/active-session", { credentials: "include" });
+        if (!response.ok) return;
+        const payload = await response.json();
+        if (!cancelled) setActiveRoute(payload.session ?? null);
+      } catch {}
+    };
+    load();
+    const timer = window.setInterval(load, 30_000);
+    const refresh = () => load();
+    window.addEventListener("route:changed", refresh);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener("route:changed", refresh);
+    };
+  }, []);
+
   return (
     <SidebarProvider>
       <div className="flex min-h-screen w-full bg-background overflow-hidden print:block">
@@ -26,6 +50,13 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
           <header className="h-14 border-b border-border bg-card flex items-center px-4 md:px-6 shrink-0 z-10 sticky top-0 print:hidden">
             <SidebarTrigger className="-ml-2 md:hidden mr-2" />
             <div className="flex-1" />
+            {activeRoute && (
+              <Link href={`/result/${activeRoute.id}`} className="hidden sm:flex items-center gap-2 rounded-md bg-emerald-50 px-3 py-1.5 text-xs text-emerald-800 hover:bg-emerald-100">
+                <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                В работе: {activeRoute.date} · {activeRoute.num_points} точек
+                <span className="font-medium underline">Открыть</span>
+              </Link>
+            )}
             <div className="flex items-center gap-4 text-sm text-muted-foreground">
               <span className="flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
@@ -52,7 +83,6 @@ function AppSidebar() {
     { title: "Главная", url: "/", icon: Home },
     { title: "Магазины", url: "/stores", icon: Store },
     { title: "Заявки на день", url: "/orders", icon: ClipboardList },
-    { title: "Новый маршрут", url: "/route", icon: Map },
     { title: "Аналитика", url: "/analytics", icon: BarChart3 },
     { title: "История", url: "/history", icon: History },
     { title: "Интеграции", url: "/integrations", icon: Puzzle },

@@ -84,6 +84,7 @@ type Assignment = {
     driver_comment: string;
     rescheduled_date: string | null;
     remaining_order_date: string | null;
+    eta_minutes?: number | null;
   }>;
 };
 
@@ -435,6 +436,9 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                       <div className="min-w-[12rem] flex-1">
                         <p className="font-medium leading-snug line-clamp-2 break-words">{execution.store_name}</p>
                         {execution.address && <p className="text-[11px] text-muted-foreground mt-0.5 break-words">{execution.address}</p>}
+                        {execution.status === "planned" && execution.eta_minutes ? (
+                          <p className="text-[11px] text-sky-700 mt-1">{formatRouteDuration(execution.eta_minutes)}</p>
+                        ) : null}
                       </div>
                        <span className="whitespace-nowrap text-muted-foreground">
                          План: {execution.quantity ?? 0} · Доставлено: {execution.actual_qty ?? 0} · Остаток: {execution.shortfall_qty ?? 0} шт.
@@ -581,6 +585,7 @@ export function ResultPage() {
   const [localResult, setLocalResult] = useState<RouteResult | null>(null);
   const [activeVehicleIndex, setActiveVehicleIndex] = useState(0);
   const [activeResultTab, setActiveResultTab] = useState<"execution" | "detail">("execution");
+  const [completingRoute, setCompletingRoute] = useState(false);
 
   const { data: serverResult, isLoading: sessionLoading, isError: sessionError } = useGetRouteSession(
     sessionId ?? 0,
@@ -614,6 +619,26 @@ export function ResultPage() {
       toast({ title: "Ссылка скопирована", description: "Поделитесь ею с водителем." });
       setTimeout(() => setCopied(false), 2000);
     });
+  };
+
+  const handleCompleteRoute = async () => {
+    if (!sessionId || completingRoute) return;
+    if (!window.confirm("Завершить маршрут? После завершения он станет архивным, а GPS и исполнение будут закрыты.")) return;
+    setCompletingRoute(true);
+    try {
+      const response = await fetch(`/api/route/sessions/${sessionId}/complete`, {
+        method: "POST",
+        credentials: "include",
+      });
+      const payload = await response.json().catch(() => ({})) as { detail?: string };
+      if (!response.ok) throw new Error(payload.detail || "Не удалось завершить маршрут");
+      window.dispatchEvent(new Event("route:changed"));
+      toast({ title: "Маршрут завершён", description: "Он больше не отображается как активный." });
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Не удалось завершить маршрут");
+    } finally {
+      setCompletingRoute(false);
+    }
   };
 
   const handleCopyNav = (url: string, index: number) => {
@@ -1037,6 +1062,12 @@ export function ResultPage() {
               Построить заново
             </Link>
           </Button>
+          {sessionId && (
+            <Button variant="outline" className="gap-2 border-emerald-300 text-emerald-700" onClick={handleCompleteRoute} disabled={completingRoute}>
+              {completingRoute ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+              {completingRoute ? "Завершаем…" : "Завершить маршрут"}
+            </Button>
+          )}
         </div>
       </div>
 
