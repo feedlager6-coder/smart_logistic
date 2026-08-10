@@ -3366,14 +3366,14 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: str, dispatcher: 
 def _telegram_remove_reply_keyboard(chat_id: int) -> None:
     """Remove the obsolete location ReplyKeyboard from chats created by old releases."""
     try:
-        response = _telegram_api("sendMessage", {
+        # Do not delete this service message immediately. Some Telegram mobile
+        # clients apply ReplyKeyboardRemove asynchronously and keep the old
+        # keyboard if the message disappears in the same request cycle.
+        _telegram_api("sendMessage", {
             "chat_id": chat_id,
-            "text": "\u200b",
+            "text": "Клавиатура обновлена. Используйте кнопки в сообщении рейса.",
             "reply_markup": {"remove_keyboard": True},
         })
-        message_id = (response.get("result") or {}).get("message_id")
-        if message_id:
-            _telegram_api("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
     except Exception as exc:
         logger.info("Telegram reply keyboard cleanup failed: %s", exc)
 
