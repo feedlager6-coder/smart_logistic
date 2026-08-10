@@ -221,7 +221,7 @@ def _api_rate_limit(key: str, max_calls: int, window_seconds: int) -> None:
 
 # Paths that do NOT require authentication
 _AUTH_PUBLIC_PATHS = {"/api/healthz", "/api/auth/login",
-                      "/api/v1/openapi.json", "/api/v1/docs"}
+                      "/api/v1/openapi.json", "/api/v1/docs", "/api/telegram/webhook"}
 # Webhook ingest paths use token-in-URL auth (checked inside the handler)
 _AUTH_WEBHOOK_PREFIX = "/api/v1/webhooks/ingest/"
 _DRIVER_API_PREFIX = "/api/driver/"
@@ -236,6 +236,10 @@ bulk_create_jobs: dict = {}  # job_id → progress/result dict for bulk store cr
 
 GRAPHHOPPER_API_KEY: str = os.environ.get("GRAPHHOPPER_API_KEY", "")
 YANDEX_GEOCODER_API_KEY: str = os.environ.get("YANDEX_GEOCODER_API_KEY", "")
+TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_BOT_USERNAME: str = os.environ.get("TELEGRAM_BOT_USERNAME", "").strip().lstrip("@")
+TELEGRAM_WEBHOOK_SECRET: str = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "").strip()
+PUBLIC_APP_URL: str = os.environ.get("PUBLIC_APP_URL", "").strip().rstrip("/")
 
 # Max locations per single GH Matrix request.  Free plan = 5; Starter = 25+.
 # Override via GRAPHHOPPER_CLUSTER_MAX env-var if you are on a higher-tier plan.
@@ -1997,11 +2001,20 @@ def init_db():
             phone TEXT NOT NULL,
             vehicle_name TEXT DEFAULT '',
             is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            telegram_chat_id BIGINT,
+            telegram_connected_at TIMESTAMP,
+            telegram_connect_token_hash TEXT,
+            telegram_token_expires_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_chat_id BIGINT")
+    cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_connected_at TIMESTAMP")
+    cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_connect_token_hash TEXT")
+    cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_token_expires_at TIMESTAMP")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_drivers_owner_active ON drivers(owner_id, is_active, name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_drivers_telegram_token ON drivers(telegram_connect_token_hash) WHERE telegram_connect_token_hash IS NOT NULL")
     # Operational execution layer. Routing history stays immutable in
     # route_sessions; assignments and executions track the actual delivery.
     cur.execute("""
@@ -3107,7 +3120,7 @@ def whatsapp_driver_url(
 
 def _public_app_url(request: Request) -> str:
     """Resolve the public origin used inside driver links shared in WhatsApp."""
-    configured = os.environ.get("PUBLIC_APP_URL", "").strip().rstrip("/")
+    configured = PUBLIC_APP_URL
     if configured:
         return configured
     forwarded_host = request.headers.get("x-forwarded-host") or request.headers.get("host")
@@ -3115,6 +3128,60 @@ def _public_app_url(request: Request) -> str:
     if forwarded_host:
         return f"{forwarded_proto.split(',')[0].strip()}://{forwarded_host.split(',')[0].strip()}"
     return str(request.base_url).rstrip("/")
+
+
+def _telegram_api(method: str, payload: dict) -> dict:
+    if not TELEGRAM_BOT_TOKEN:
+        raise HTTPException(status_code=503, detail="Telegram Bot API не настроен: добавьте TELEGRAM_BOT_TOKEN")
+    api_request = urllib.request.Request(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(api_request, timeout=10) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        if not result.get("ok"):
+            raise RuntimeError(result.get("description") or "Telegram API error")
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
+def _telegram_connect_link(raw_token: str) -> str:
+    if not TELEGRAM_BOT_USERNAME:
+        raise HTTPException(status_code=503, detail="Telegram Bot API не настроен: добавьте TELEGRAM_BOT_USERNAME")
+    return f"https://t.me/{TELEGRAM_BOT_USERNAME}?start={urllib.parse.quote(raw_token, safe='-_')}"
+
+
+def _issue_assignment_link(cur, assignment_id: int, request: Request) -> tuple[str, str]:
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    cur.execute(
+        "UPDATE route_assignments SET access_token_hash=%s, token_created_at=NOW(), expires_at=NOW()+INTERVAL '48 hours', updated_at=NOW() WHERE id=%s RETURNING id",
+        (token_hash, assignment_id),
+    )
+    if not cur.fetchone():
+        raise HTTPException(status_code=404, detail="Рейс не найден")
+    relative = f"/driver/{raw_token}"
+    return relative, _public_app_url(request) + relative
+
+
+def _configure_telegram_webhook() -> None:
+    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET and PUBLIC_APP_URL):
+        return
+    try:
+        _telegram_api("setWebhook", {
+            "url": f"{PUBLIC_APP_URL}/api/telegram/webhook",
+            "secret_token": TELEGRAM_WEBHOOK_SECRET,
+            "allowed_updates": ["message"],
+        })
+        logger.info("Telegram webhook configured")
+    except Exception as exc:
+        logger.warning("Telegram webhook configuration failed: %s", exc)
 
 
 def store_row_to_dict(row) -> dict:
@@ -3401,6 +3468,8 @@ async def startup():
             "YANDEX_GEOCODER_API_KEY not set — Yandex Geocoder disabled, falling back to Nominatim"
         )
     init_db()
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET and PUBLIC_APP_URL:
+        threading.Thread(target=_configure_telegram_webhook, daemon=True).start()
     # NOTE: migrate_moscow_stores() deliberately NOT called here.
     # It was a one-time dev migration that ran when the DB held old Moscow demo data.
     # Calling it on every startup is catastrophically dangerous for production clients
@@ -7253,12 +7322,15 @@ def build_route(request: Request, body: RouteRequest):
 
 
 def _serialize_driver(row: dict) -> dict:
+    connected_at = row.get("telegram_connected_at")
     return {
         "id": int(row["id"]),
         "name": row.get("name") or "",
         "phone": row.get("phone") or "",
         "vehicle_name": row.get("vehicle_name") or "",
         "is_active": bool(row.get("is_active", True)),
+        "telegram_connected": bool(row.get("telegram_chat_id")),
+        "telegram_connected_at": str(connected_at) if connected_at else None,
         "created_at": str(row["created_at"]) if row.get("created_at") else None,
         "updated_at": str(row["updated_at"]) if row.get("updated_at") else None,
     }
@@ -7271,7 +7343,7 @@ def list_drivers(request: Request, include_inactive: bool = False):
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
         cur.execute(
-            """SELECT id, name, phone, vehicle_name, is_active, created_at, updated_at
+            """SELECT id, name, phone, vehicle_name, is_active, telegram_chat_id, telegram_connected_at, created_at, updated_at
                  FROM drivers
                 WHERE owner_id=%s AND (%s OR is_active=TRUE)
                 ORDER BY is_active DESC, name""",
@@ -7297,7 +7369,7 @@ def create_driver(body: DriverCreate, request: Request):
         cur.execute(
             """INSERT INTO drivers (owner_id, name, phone, vehicle_name)
                VALUES (%s,%s,%s,%s)
-               RETURNING id, name, phone, vehicle_name, is_active, created_at, updated_at""",
+               RETURNING id, name, phone, vehicle_name, is_active, telegram_chat_id, telegram_connected_at, created_at, updated_at""",
             (uid, name, phone, body.vehicle_name.strip()),
         )
         row = dict(cur.fetchone())
@@ -7333,7 +7405,7 @@ def update_driver(driver_id: int, body: DriverUpdate, request: Request):
         cur.execute(
             f"""UPDATE drivers SET {', '.join(fields)}
                     WHERE id=%s AND owner_id=%s
-                RETURNING id, name, phone, vehicle_name, is_active, created_at, updated_at""",
+                RETURNING id, name, phone, vehicle_name, is_active, telegram_chat_id, telegram_connected_at, created_at, updated_at""",
             values,
         )
         row = cur.fetchone()
@@ -7358,6 +7430,132 @@ def archive_driver(driver_id: int, request: Request):
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Водитель не найден")
         conn.commit()
+    finally:
+        cur.close(); conn.close()
+
+
+@app.post("/api/drivers/{driver_id}/telegram-link")
+def create_telegram_link(driver_id: int, request: Request):
+    uid = get_user_id(request)
+    raw_token = secrets.token_urlsafe(24)
+    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            """UPDATE drivers
+                  SET telegram_connect_token_hash=%s, telegram_token_expires_at=NOW()+INTERVAL '24 hours',
+                      updated_at=NOW()
+                WHERE id=%s AND owner_id=%s AND is_active=TRUE
+            RETURNING id, name, phone""",
+            (token_hash, driver_id, uid),
+        )
+        driver = cur.fetchone()
+        if not driver:
+            raise HTTPException(status_code=404, detail="Водитель не найден")
+        conn.commit()
+        link = _telegram_connect_link(raw_token)
+        message = f"Здравствуйте, {driver['name']}! Откройте ссылку и нажмите Start, чтобы получать рейсы SmartRoute в Telegram: {link}"
+        return {
+            "telegram_link": link,
+            "message": message,
+            "whatsapp_url": f"https://wa.me/{_normalize_driver_phone(driver['phone'])}?text={urllib.parse.quote(message)}",
+            "sms_url": f"sms:{_normalize_driver_phone(driver['phone'])}?body={urllib.parse.quote(message)}",
+        }
+    finally:
+        cur.close(); conn.close()
+
+
+@app.post("/api/telegram/webhook")
+def telegram_webhook(request: Request, payload: dict):
+    if TELEGRAM_WEBHOOK_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != TELEGRAM_WEBHOOK_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid Telegram webhook secret")
+    message = payload.get("message") or {}
+    chat = message.get("chat") or {}
+    text = str(message.get("text") or "")
+    if not chat.get("id") or not text.startswith("/start"):
+        return {"ok": True}
+    parts = text.split(maxsplit=1)
+    raw_token = parts[1].strip() if len(parts) > 1 else ""
+    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            """UPDATE drivers
+                  SET telegram_chat_id=%s, telegram_connected_at=NOW(),
+                      telegram_connect_token_hash=NULL, telegram_token_expires_at=NULL, updated_at=NOW()
+                WHERE telegram_connect_token_hash=%s AND is_active=TRUE
+                  AND (telegram_token_expires_at IS NULL OR telegram_token_expires_at > NOW())
+            RETURNING name""",
+            (int(chat["id"]), token_hash),
+        )
+        driver = cur.fetchone()
+        conn.commit()
+        if driver:
+            try:
+                _telegram_api("sendMessage", {"chat_id": int(chat["id"]), "text": f"✅ {driver['name']}, Telegram подключён! Теперь диспетчер сможет отправлять вам рейсы сюда."})
+            except Exception as exc:
+                logger.warning("Telegram confirmation failed: %s", exc)
+        return {"ok": True}
+    finally:
+        cur.close(); conn.close()
+
+
+@app.post("/api/telegram/route-sessions/{session_id}/send")
+def send_route_to_telegram(session_id: int, request: Request):
+    uid = get_user_id(request)
+    if not TELEGRAM_BOT_TOKEN:
+        raise HTTPException(status_code=503, detail="Telegram Bot API не настроен: добавьте TELEGRAM_BOT_TOKEN")
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    sent = 0
+    skipped = 0
+    errors = []
+    try:
+        cur.execute("SELECT result_json, date::text AS delivery_date FROM route_sessions WHERE id=%s AND owner_id=%s", (session_id, uid))
+        session = cur.fetchone()
+        if not session:
+            raise HTTPException(status_code=404, detail="Маршрут не найден")
+        result = json.loads(session.get("result_json") or "{}")
+        routes = result.get("routes") or []
+        cur.execute(
+            """SELECT a.id, a.route_index, a.driver_name, a.vehicle_name, a.route_yandex_url,
+                       d.telegram_chat_id
+                  FROM route_assignments a JOIN drivers d ON d.id=a.driver_id
+                 WHERE a.session_id=%s AND a.owner_id=%s AND d.is_active=TRUE AND d.telegram_chat_id IS NOT NULL
+                 ORDER BY a.route_index""",
+            (session_id, uid),
+        )
+        assignments = cur.fetchall()
+        cur.execute("SELECT COUNT(*) AS count FROM route_assignments WHERE session_id=%s AND owner_id=%s", (session_id, uid))
+        total_assignments = int(cur.fetchone()["count"])
+        skipped = max(0, total_assignments - len(assignments))
+        for assignment in assignments:
+            route = routes[int(assignment["route_index"])] if int(assignment["route_index"]) < len(routes) else {}
+            relative, driver_url = _issue_assignment_link(cur, int(assignment["id"]), request)
+            del relative
+            points = route.get("stores") or []
+            navigation_url = assignment.get("route_yandex_url") or route.get("yandex_url") or ""
+            text = "\n".join([
+                "🚚 SmartRoute — ваш рейс",
+                f"📅 Дата: {session.get('delivery_date') or 'не указана'}",
+                f"🚙 Машина: {assignment.get('vehicle_name') or route.get('vehicle_name') or 'не указана'}",
+                f"📍 Точек: {len(points)}",
+                f"🛣 Пробег: {round(float(route.get('total_km') or 0), 1)} км",
+                "\nОткройте нужную кнопку ниже 👇",
+            ])
+            keyboard = {"inline_keyboard": [
+                ([{"text": "🧭 Навигация", "url": navigation_url}] if navigation_url else []),
+                [{"text": "📦 Исполнение", "url": driver_url}],
+            ]}
+            try:
+                _telegram_api("sendMessage", {"chat_id": int(assignment["telegram_chat_id"]), "text": text, "reply_markup": keyboard})
+                sent += 1
+            except Exception as exc:
+                errors.append(f"{assignment.get('driver_name') or 'Водитель'}: {str(exc)[:160]}")
+        conn.commit()
+        return {"sent": sent, "skipped": skipped, "errors": errors}
     finally:
         cur.close(); conn.close()
 
