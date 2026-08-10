@@ -88,7 +88,7 @@ async def security_headers_middleware(request: Request, call_next):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-    response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+    response.headers.setdefault("Permissions-Policy", "geolocation=(self), microphone=(), camera=()")
     # HSTS only when served over HTTPS (Railway / custom domain)
     if request.url.scheme == "https":
         response.headers.setdefault(
@@ -2005,6 +2005,12 @@ def init_db():
             telegram_connected_at TIMESTAMP,
             telegram_connect_token_hash TEXT,
             telegram_token_expires_at TIMESTAMP,
+            telegram_tracking_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+            telegram_tracking_started_at TIMESTAMP,
+            telegram_tracking_stopped_at TIMESTAMP,
+            telegram_pending_action TEXT,
+            telegram_pending_execution_id INTEGER,
+            telegram_pending_payload TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -2013,6 +2019,12 @@ def init_db():
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_connected_at TIMESTAMP")
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_connect_token_hash TEXT")
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_token_expires_at TIMESTAMP")
+    cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_tracking_enabled BOOLEAN NOT NULL DEFAULT FALSE")
+    cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_tracking_started_at TIMESTAMP")
+    cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_tracking_stopped_at TIMESTAMP")
+    cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_pending_action TEXT")
+    cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_pending_execution_id INTEGER")
+    cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_pending_payload TEXT")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_drivers_owner_active ON drivers(owner_id, is_active, name)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_drivers_telegram_token ON drivers(telegram_connect_token_hash) WHERE telegram_connect_token_hash IS NOT NULL")
     # Operational execution layer. Routing history stays immutable in
@@ -2052,6 +2064,7 @@ def init_db():
             products TEXT DEFAULT '',
             quantity DOUBLE PRECISION DEFAULT 0,
             actual_qty DOUBLE PRECISION DEFAULT 0,
+            actual_items_json TEXT DEFAULT '',
             arrive_by TEXT DEFAULT '',
             yandex_url TEXT DEFAULT '',
             status TEXT NOT NULL DEFAULT 'planned',
@@ -2079,6 +2092,7 @@ def init_db():
         ("arrive_by", "TEXT DEFAULT ''"),
         ("yandex_url", "TEXT DEFAULT ''"),
         ("payment_status", "TEXT DEFAULT 'pending'"),
+        ("actual_items_json", "TEXT DEFAULT ''"),
     ):
         cur.execute(
             f"ALTER TABLE route_executions ADD COLUMN IF NOT EXISTS {_column} {_definition}"
@@ -3184,6 +3198,195 @@ def _configure_telegram_webhook() -> None:
         logger.warning("Telegram webhook configuration failed: %s", exc)
 
 
+def _telegram_parse_products(products: str, planned_qty: float) -> list[dict]:
+    """Parse the existing compact products string for Telegram quantity controls."""
+    items = []
+    for part in re.split(r"[,;\n]+", products or ""):
+        value = part.strip()
+        if not value:
+            continue
+        match = re.match(r"^(.+?)\s*[×x*]\s*(\d+(?:[.,]\d+)?)$", value)
+        if match:
+            name = match.group(1).strip()
+            quantity = float(match.group(2).replace(",", "."))
+        else:
+            name = value
+            quantity = 0.0
+        items.append({"name": name, "quantity": quantity})
+    if not items:
+        return [{"name": "Заявка", "quantity": max(float(planned_qty or 0), 0)}]
+    if len(items) == 1 and items[0]["quantity"] <= 0:
+        items[0]["quantity"] = max(float(planned_qty or 0), 0)
+    return items
+
+
+def _telegram_driver_assignment(cur, chat_id: int, assignment_id: Optional[int] = None, execution_id: Optional[int] = None):
+    query = """
+        SELECT d.id AS driver_id, d.name AS driver_name, d.telegram_tracking_enabled,
+               a.id AS assignment_id, a.owner_id, a.vehicle_name, a.route_yandex_url,
+               a.session_id, a.route_index
+          FROM drivers d
+          JOIN route_assignments a ON a.driver_id=d.id
+         WHERE d.telegram_chat_id=%s AND d.is_active=TRUE
+           AND (%s IS NULL OR a.id=%s)
+           ORDER BY a.updated_at DESC
+         LIMIT 1
+    """
+    if execution_id is not None:
+        query = query.replace("AND a.status <> 'completed'", "AND a.status <> 'completed' AND EXISTS (SELECT 1 FROM route_executions e WHERE e.assignment_id=a.id AND e.id=%s)")
+        cur.execute(query, (chat_id, assignment_id, assignment_id, execution_id))
+    else:
+        cur.execute(query, (chat_id, assignment_id, assignment_id))
+    return cur.fetchone()
+
+
+def _telegram_next_data(cur, assignment_id: int) -> dict:
+    cur.execute(
+        """SELECT a.id, a.driver_name, a.vehicle_name, a.route_yandex_url, a.session_id,
+                  a.route_index, s.result_json, s.date::text AS delivery_date,
+                  d.telegram_tracking_enabled,
+                  loc.lat, loc.lon, loc.captured_at
+             FROM route_assignments a
+             JOIN route_sessions s ON s.id=a.session_id
+             LEFT JOIN drivers d ON d.id=a.driver_id
+             LEFT JOIN LATERAL (
+               SELECT lat, lon, captured_at FROM driver_locations
+                WHERE assignment_id=a.id ORDER BY captured_at DESC LIMIT 1
+             ) loc ON TRUE
+            WHERE a.id=%s""",
+        (assignment_id,),
+    )
+    assignment = cur.fetchone()
+    if not assignment:
+        raise ValueError("assignment not found")
+    cur.execute(
+        """SELECT id, visit_order, store_name, address, lat, lon, products,
+                  quantity, actual_qty, actual_items_json, status, payment_method,
+                  payment_status, driver_comment, yandex_url
+             FROM route_executions WHERE assignment_id=%s ORDER BY visit_order""",
+        (assignment_id,),
+    )
+    executions = [dict(row) for row in cur.fetchall()]
+    next_execution = next((item for item in executions if item.get("status") == "planned"), None)
+    eta = None
+    if next_execution and assignment.get("lat") is not None and next_execution.get("lat") is not None:
+        distance_km = haversine_meters(
+            (float(assignment["lat"]), float(assignment["lon"])),
+            (float(next_execution["lat"]), float(next_execution["lon"])),
+        ) / 1000
+        eta = max(1, round(distance_km / 30 * 60 * 1.6))
+    return {
+        "assignment": dict(assignment),
+        "executions": executions,
+        "next": next_execution,
+        "eta": eta,
+    }
+
+
+def _telegram_card(data: dict, assignment_id: int, driver_url: Optional[str] = None) -> tuple[str, dict]:
+    assignment = data["assignment"]
+    executions = data["executions"]
+    next_execution = data["next"]
+    route_points = len(executions)
+    result = json.loads(assignment.get("result_json") or "{}")
+    route = (result.get("routes") or [{}])[int(assignment.get("route_index") or 0)] if result.get("routes") else {}
+    total_km = route.get("total_km") or 0
+    if next_execution:
+        status_line = "⏳ Ожидает выполнения"
+        if assignment.get("lat") is not None:
+            status_line = "🟢 GPS обновляется" if assignment.get("telegram_tracking_enabled") and data.get("eta") is not None else "🟡 GPS ожидается"
+        lines = [
+            f"🚚 Рейс на {assignment.get('delivery_date') or 'сегодня'}",
+            f"🚙 {assignment.get('vehicle_name') or 'Машина не указана'} · {route_points} точек · {round(float(total_km), 1)} км",
+            "",
+            f"📍 Текущая точка: {next_execution.get('visit_order')}. {next_execution.get('store_name') or 'Без названия'}",
+            f"🏪 {next_execution.get('address') or 'Адрес не указан'}",
+            f"📦 {next_execution.get('products') or 'Товар не указан'}",
+            status_line,
+        ]
+        if data.get("eta"):
+            lines.append(f"⏱ До следующей точки: ~{data['eta']} мин (оценка)")
+        elif assignment.get("lat") is None:
+            lines.append("📍 Включите отслеживание, чтобы видеть оценочный ETA")
+    else:
+        lines = [
+            f"🏁 Рейс на {assignment.get('delivery_date') or 'сегодня'} завершён",
+            f"🚙 {assignment.get('vehicle_name') or 'Машина не указана'} · {route_points} точек",
+            "Все точки обработаны. Спасибо за работу!",
+        ]
+    keyboard = []
+    if assignment.get("route_yandex_url"):
+        keyboard.append([{"text": "🧭 Открыть маршрут", "url": assignment["route_yandex_url"]}])
+    if driver_url:
+        keyboard.append([
+            {"text": "📦 Исполнение заявки", "callback_data": f"tg:current:{assignment_id}"},
+            {"text": "🌐 Web", "url": driver_url},
+        ])
+    if next_execution:
+        execution_id = int(next_execution["id"])
+        keyboard.extend([
+            [{"text": "✅ Доставлено", "callback_data": f"tg:delivered:{execution_id}"}, {"text": "⚠️ Частично", "callback_data": f"tg:partial:{execution_id}"}],
+            [{"text": "❌ Не доставлено", "callback_data": f"tg:failed:{execution_id}"}, {"text": "📅 Перенести", "callback_data": f"tg:rescheduled:{execution_id}"}],
+        ])
+    tracking = bool(assignment.get("telegram_tracking_enabled"))
+    keyboard.append([{ "text": "⏹ Остановить отслеживание" if tracking else "📍 Начать отслеживание", "callback_data": f"tg:track:{'off' if tracking else 'on'}:{assignment_id}" }])
+    return "\n".join(lines), {"inline_keyboard": keyboard}
+
+
+def _telegram_render_assignment(cur, assignment_id: int, chat_id: int, request: Request, message_id: Optional[int] = None, driver_url: Optional[str] = None):
+    data = _telegram_next_data(cur, assignment_id)
+    text, markup = _telegram_card(data, assignment_id, driver_url)
+    payload = {"chat_id": chat_id, "text": text, "reply_markup": markup}
+    if message_id:
+        payload["message_id"] = message_id
+        try:
+            return _telegram_api("editMessageText", payload)
+        except Exception as exc:
+            logger.info("Telegram card edit failed, sending a new card: %s", exc)
+    return _telegram_api("sendMessage", {"chat_id": chat_id, "text": text, "reply_markup": markup})
+
+
+def _telegram_save_execution(cur, assignment_id: int, execution_id: int, status: str, actual_qty: float, actual_items: Optional[dict] = None, comment: str = ""):
+    cur.execute(
+        """SELECT quantity, payment_method, payment_status FROM route_executions
+            WHERE id=%s AND assignment_id=%s FOR UPDATE""",
+        (execution_id, assignment_id),
+    )
+    current = cur.fetchone()
+    if not current:
+        raise ValueError("Точка рейса не найдена")
+    planned = float(current.get("quantity") or 0)
+    actual_qty = max(0.0, min(float(actual_qty), planned))
+    if status == "delivered":
+        actual_qty = planned
+    if status == "rescheduled" and not comment.strip():
+        raise ValueError("Для переноса нужна причина")
+    if status == "failed":
+        actual_qty = 0
+    cur.execute(
+        """UPDATE route_executions
+              SET status=%s, actual_qty=%s, actual_items_json=%s, driver_comment=%s,
+                  updated_at=NOW(), delivered_at=CASE WHEN %s IN ('delivered','partial','failed') THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END
+            WHERE id=%s AND assignment_id=%s""",
+        (status, actual_qty, json.dumps(actual_items or {}, ensure_ascii=False), comment.strip(), status, execution_id, assignment_id),
+    )
+    cur.execute(
+        """UPDATE route_assignments a SET status=CASE WHEN NOT EXISTS (
+                   SELECT 1 FROM route_executions e WHERE e.assignment_id=a.id AND e.status='planned'
+               ) THEN 'completed' ELSE 'planned' END, updated_at=NOW()
+            WHERE a.id=%s""",
+        (assignment_id,),
+    )
+
+
+def _telegram_payment_keyboard(execution_id: int):
+    return {"inline_keyboard": [
+        [{"text": "💵 Наличные", "callback_data": f"tg:pay:{execution_id}:cash:pending"}, {"text": "💳 Карта", "callback_data": f"tg:pay:{execution_id}:card:pending"}],
+        [{"text": "🏦 Перевод", "callback_data": f"tg:pay:{execution_id}:transfer:pending"}, {"text": "⛔ Без оплаты", "callback_data": f"tg:pay:{execution_id}:none:pending"}],
+        [{"text": "✅ Оплачено", "callback_data": f"tg:pay:{execution_id}:current:paid"}, {"text": "❌ Не оплачено", "callback_data": f"tg:pay:{execution_id}:current:not_paid"}],
+    ]}
+
+
 def store_row_to_dict(row) -> dict:
     return {
         "id": row["id"],
@@ -3301,6 +3504,7 @@ class DispatcherCreateRescheduledOrder(BaseModel):
 class ExecutionUpdate(BaseModel):
     status: str
     actual_qty: Optional[float] = None
+    actual_items: Optional[dict[str, float]] = None
     payment_method: Optional[str] = None
     payment_status: Optional[str] = None
     driver_comment: str = ""
@@ -7466,37 +7670,276 @@ def create_telegram_link(driver_id: int, request: Request):
         cur.close(); conn.close()
 
 
+TELEGRAM_LIVE_PERIOD_SECONDS = 8 * 60 * 60
+TELEGRAM_LOCATION_STALE_SECONDS = 120
+
+
+def _telegram_tracking_keyboard(enabled: bool = False):
+    return {"inline_keyboard": [[{
+        "text": "⏹ Остановить отслеживание" if enabled else "📍 Начать отслеживание",
+        "callback_data": "tg:track:off" if enabled else "tg:track:on",
+    }]]}
+
+
+def _telegram_location_request_keyboard():
+    return {
+        "keyboard": [[{"text": "📍 Отправить геопозицию", "request_location": True}]],
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
+
+
+def _telegram_partial_keyboard(execution_id: int, items: list[dict]):
+    rows = []
+    for index, item in enumerate(items):
+        quantity = float(item.get("selected") or 0)
+        planned = float(item.get("quantity") or 0)
+        rows.append([{"text": f"{item.get('name')}: {quantity:g}/{planned:g}", "callback_data": "tg:noop"}])
+        rows.append([
+            {"text": "− 1", "callback_data": f"tg:partial:{execution_id}:item:{index}:-1"},
+            {"text": "+ 1", "callback_data": f"tg:partial:{execution_id}:item:{index}:1"},
+        ])
+    rows.append([{ "text": "💾 Сохранить", "callback_data": f"tg:partial:{execution_id}:save" }])
+    return {"inline_keyboard": rows}
+
+
+def _telegram_handle_callback(request: Request, callback: dict):
+    callback_id = str(callback.get("id") or "")
+    message = callback.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+    data = str(callback.get("data") or "")
+    if callback_id:
+        try:
+            _telegram_api("answerCallbackQuery", {"callback_query_id": callback_id})
+        except Exception as exc:
+            logger.warning("Telegram callback acknowledgement failed: %s", exc)
+    if not chat_id:
+        return {"ok": True}
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        if data == "tg:noop":
+            return {"ok": True}
+        parts = data.split(":")
+        if len(parts) < 3 or parts[0] != "tg":
+            return {"ok": True}
+        action = parts[1]
+        if action == "track":
+            enabled = parts[2] == "on"
+            assignment_id = int(parts[3]) if len(parts) > 3 else None
+            driver = _telegram_driver_assignment(cur, int(chat_id), assignment_id)
+            if not driver:
+                _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "⚠️ Активный рейс не найден. Попросите диспетчера отправить рейс ещё раз."})
+                return {"ok": True}
+            cur.execute(
+                """UPDATE drivers SET telegram_tracking_enabled=%s,
+                          telegram_tracking_started_at=CASE WHEN %s THEN NOW() ELSE telegram_tracking_started_at END,
+                          telegram_tracking_stopped_at=CASE WHEN %s THEN NOW() ELSE telegram_tracking_stopped_at END,
+                          updated_at=NOW() WHERE id=%s""",
+                (enabled, enabled, not enabled, driver["driver_id"]),
+            )
+            conn.commit()
+            text = (
+                "🟢 Отслеживание включено на рабочую смену (до 8 часов).\n\n"
+                "Telegram не может включить GPS сам: нажмите скрепку → Геопозиция → «Поделиться геопозицией» и выберите 8 часов."
+                if enabled else "🔴 Отслеживание остановлено. При необходимости его можно включить снова."
+            )
+            _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": text, "reply_markup": _telegram_location_request_keyboard() if enabled else {"remove_keyboard": True}})
+            return {"ok": True}
+
+        if action == "current":
+            assignment_id = int(parts[2])
+            driver = _telegram_driver_assignment(cur, int(chat_id), assignment_id)
+            if driver:
+                _telegram_render_assignment(cur, assignment_id, int(chat_id), request, int(message_id) if message_id else None)
+            return {"ok": True}
+
+        execution_id = int(parts[2])
+        driver = _telegram_driver_assignment(cur, int(chat_id), execution_id=execution_id)
+        if not driver:
+            _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "⚠️ Эта точка больше не относится к вашему активному рейсу."})
+            return {"ok": True}
+        assignment_id = int(driver["assignment_id"])
+        cur.execute("SELECT * FROM route_executions WHERE id=%s AND assignment_id=%s", (execution_id, assignment_id))
+        execution = cur.fetchone()
+        if not execution:
+            return {"ok": True}
+        if action in {"delivered", "partial", "failed", "rescheduled"} and execution.get("status") != "planned":
+            _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "ℹ️ Эта точка уже обработана. Откройте актуальную карточку рейса командой /route."})
+            return {"ok": True}
+
+        if action == "delivered":
+            _telegram_save_execution(cur, assignment_id, execution_id, "delivered", float(execution.get("quantity") or 0), comment="")
+            conn.commit()
+            _telegram_render_assignment(cur, assignment_id, int(chat_id), request, int(message_id) if message_id else None)
+            _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "✅ Точка отмечена как доставленная. При необходимости выберите оплату:", "reply_markup": _telegram_payment_keyboard(execution_id)})
+        elif action == "partial" and len(parts) >= 6 and parts[3] == "item":
+            cur.execute("SELECT telegram_pending_payload FROM drivers WHERE id=%s", (driver["driver_id"],))
+            pending = cur.fetchone()
+            try:
+                state = json.loads((pending or {}).get("telegram_pending_payload") or "{}")
+                items = state.get("items") or []
+                index = int(parts[4])
+                delta = float(parts[5])
+                item = items[index]
+                item["selected"] = max(0, min(float(item.get("quantity") or 0), float(item.get("selected") or 0) + delta))
+                cur.execute("UPDATE drivers SET telegram_pending_payload=%s WHERE id=%s", (json.dumps({"items": items}, ensure_ascii=False), driver["driver_id"]))
+                conn.commit()
+                _telegram_api("editMessageText", {"chat_id": int(chat_id), "message_id": int(message_id), "text": "⚠️ Укажите, сколько доставлено по каждой позиции:", "reply_markup": _telegram_partial_keyboard(execution_id, items)})
+            except (IndexError, ValueError, TypeError, json.JSONDecodeError):
+                raise ValueError("Некорректное количество")
+        elif action == "partial" and len(parts) >= 4 and parts[3] == "save":
+            cur.execute("SELECT telegram_pending_payload FROM drivers WHERE id=%s", (driver["driver_id"],))
+            pending = cur.fetchone()
+            state = json.loads((pending or {}).get("telegram_pending_payload") or "{}")
+            items = state.get("items") or []
+            actual_items = {str(item.get("name") or "Позиция"): float(item.get("selected") or 0) for item in items}
+            actual_qty = sum(actual_items.values())
+            planned_qty = float(execution.get("quantity") or 0)
+            if actual_qty <= 0 or actual_qty >= planned_qty:
+                raise ValueError("Для частичной доставки укажите количество больше нуля и меньше плана")
+            _telegram_save_execution(cur, assignment_id, execution_id, "partial", actual_qty, actual_items=actual_items)
+            cur.execute("UPDATE drivers SET telegram_pending_action=NULL, telegram_pending_execution_id=NULL, telegram_pending_payload=NULL WHERE id=%s", (driver["driver_id"],))
+            conn.commit()
+            _telegram_render_assignment(cur, assignment_id, int(chat_id), request, int(message_id) if message_id else None)
+            _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "✅ Частичная доставка сохранена. При необходимости выберите оплату:", "reply_markup": _telegram_payment_keyboard(execution_id)})
+        elif action == "partial":
+            items = _telegram_parse_products(execution.get("products") or "", float(execution.get("quantity") or 0))
+            for item in items:
+                item["selected"] = 0
+            cur.execute("UPDATE drivers SET telegram_pending_action='partial', telegram_pending_execution_id=%s, telegram_pending_payload=%s WHERE id=%s", (execution_id, json.dumps({"items": items}, ensure_ascii=False), driver["driver_id"]))
+            conn.commit()
+            _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "⚠️ Укажите, сколько доставлено по каждой позиции:", "reply_markup": _telegram_partial_keyboard(execution_id, items)})
+        elif action == "failed" or action == "rescheduled":
+            pending = "failed" if action == "failed" else "rescheduled"
+            cur.execute("UPDATE drivers SET telegram_pending_action=%s, telegram_pending_execution_id=%s, telegram_pending_payload=NULL WHERE id=%s", (pending, execution_id, driver["driver_id"]))
+            conn.commit()
+            prompt = "Напишите причину, например: клиент отсутствует." if pending == "failed" else "Напишите причину переноса. Дату позже выберет диспетчер."
+            _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": f"📝 {prompt}"})
+        elif action == "pay":
+            method = parts[3]
+            status = parts[4]
+            if method == "current":
+                method = execution.get("payment_method") or "none"
+            if status == "paid" and method == "none":
+                _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "⚠️ Для оплаты выберите способ: наличные, карта или перевод."})
+                return {"ok": True}
+            cur.execute("UPDATE route_executions SET payment_method=%s, payment_status=%s, updated_at=NOW() WHERE id=%s AND assignment_id=%s", (method, status, execution_id, assignment_id))
+            conn.commit()
+            _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "✅ Данные оплаты сохранены."})
+            _telegram_render_assignment(cur, assignment_id, int(chat_id), request, int(message_id) if message_id else None)
+        return {"ok": True}
+    except Exception as exc:
+        conn.rollback()
+        logger.exception("Telegram callback failed: %s", exc)
+        try:
+            _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "⚠️ Не удалось сохранить результат доставки. Попробуйте ещё раз."})
+        except Exception:
+            pass
+        return {"ok": True}
+    finally:
+        cur.close(); conn.close()
+
+
 @app.post("/api/telegram/webhook")
 def telegram_webhook(request: Request, payload: dict):
     if TELEGRAM_WEBHOOK_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != TELEGRAM_WEBHOOK_SECRET:
         raise HTTPException(status_code=403, detail="Invalid Telegram webhook secret")
-    message = payload.get("message") or {}
+    if payload.get("callback_query"):
+        return _telegram_handle_callback(request, payload["callback_query"])
+    message = payload.get("message") or payload.get("edited_message") or {}
     chat = message.get("chat") or {}
     text = str(message.get("text") or "")
-    if not chat.get("id") or not text.startswith("/start"):
+    chat_id = chat.get("id")
+    if not chat_id:
         return {"ok": True}
-    parts = text.split(maxsplit=1)
-    raw_token = parts[1].strip() if len(parts) > 1 else ""
-    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    location = message.get("location") or {}
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
-        cur.execute(
-            """UPDATE drivers
-                  SET telegram_chat_id=%s, telegram_connected_at=NOW(),
-                      telegram_connect_token_hash=NULL, telegram_token_expires_at=NULL, updated_at=NOW()
-                WHERE telegram_connect_token_hash=%s AND is_active=TRUE
-                  AND (telegram_token_expires_at IS NULL OR telegram_token_expires_at > NOW())
-            RETURNING name""",
-            (int(chat["id"]), token_hash),
-        )
-        driver = cur.fetchone()
-        conn.commit()
-        if driver:
-            try:
-                _telegram_api("sendMessage", {"chat_id": int(chat["id"]), "text": f"✅ {driver['name']}, Telegram подключён! Теперь диспетчер сможет отправлять вам рейсы сюда."})
-            except Exception as exc:
-                logger.warning("Telegram confirmation failed: %s", exc)
+        if location.get("latitude") is not None and location.get("longitude") is not None:
+            cur.execute(
+                """SELECT a.id FROM drivers d JOIN route_assignments a ON a.driver_id=d.id
+                    WHERE d.telegram_chat_id=%s AND d.is_active=TRUE AND d.telegram_tracking_enabled=TRUE
+                      AND a.status <> 'completed' ORDER BY a.updated_at DESC LIMIT 1""",
+                (int(chat_id),),
+            )
+            assignment = cur.fetchone()
+            if assignment:
+                accuracy = location.get("horizontal_accuracy")
+                cur.execute(
+                    """INSERT INTO driver_locations (assignment_id, lat, lon, accuracy, captured_at)
+                       VALUES (%s,%s,%s,%s,NOW())
+                       ON CONFLICT (assignment_id) DO UPDATE SET lat=EXCLUDED.lat, lon=EXCLUDED.lon,
+                         accuracy=EXCLUDED.accuracy, captured_at=EXCLUDED.captured_at""",
+                    (assignment["id"], float(location["latitude"]), float(location["longitude"]), accuracy),
+                )
+                conn.commit()
+            return {"ok": True}
+
+        if text == "/start" or text.startswith("/start "):
+            parts = text.split(maxsplit=1)
+            raw_token = parts[1].strip() if len(parts) > 1 else ""
+            token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+            cur.execute(
+                """UPDATE drivers
+                      SET telegram_chat_id=%s, telegram_connected_at=NOW(),
+                          telegram_connect_token_hash=NULL, telegram_token_expires_at=NULL, updated_at=NOW()
+                    WHERE telegram_connect_token_hash=%s AND is_active=TRUE
+                      AND (telegram_token_expires_at IS NULL OR telegram_token_expires_at > NOW())
+                RETURNING name""",
+                (int(chat_id), token_hash),
+            )
+            driver = cur.fetchone()
+            conn.commit()
+            if driver:
+                welcome = f"👋 Добро пожаловать в SmartRoute, {driver['name']}!\n\n🟢 Водитель подключён. Здесь вы будете получать рабочие рейсы и отмечать выполнение доставок."
+            else:
+                welcome = "👋 Добро пожаловать в SmartRoute! Попросите диспетчера выдать персональную ссылку подключения."
+            _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": welcome})
+            return {"ok": True}
+
+        if text in {"/route", "/myroute"}:
+            driver = _telegram_driver_assignment(cur, int(chat_id))
+            if driver:
+                _telegram_render_assignment(cur, int(driver["assignment_id"]), int(chat_id), request)
+            else:
+                _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "ℹ️ Активных рейсов пока нет."})
+            return {"ok": True}
+
+        cur.execute("SELECT id, telegram_pending_action, telegram_pending_execution_id FROM drivers WHERE telegram_chat_id=%s AND is_active=TRUE", (int(chat_id),))
+        pending_driver = cur.fetchone()
+        if pending_driver and text and not text.startswith("/") and pending_driver.get("telegram_pending_action") in {"failed", "rescheduled"}:
+            driver = _telegram_driver_assignment(cur, int(chat_id), execution_id=int(pending_driver["telegram_pending_execution_id"]))
+            if driver:
+                status = pending_driver["telegram_pending_action"]
+                _telegram_save_execution(cur, int(driver["assignment_id"]), int(pending_driver["telegram_pending_execution_id"]), status, 0, comment=text)
+                cur.execute("UPDATE drivers SET telegram_pending_action=NULL, telegram_pending_execution_id=NULL, telegram_pending_payload=NULL WHERE id=%s", (pending_driver["id"],))
+                conn.commit()
+                _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "✅ Результат сохранён."})
+                _telegram_render_assignment(cur, int(driver["assignment_id"]), int(chat_id), request)
+            return {"ok": True}
+
+        if text in {"/track", "📍 Начать отслеживание"}:
+            driver = _telegram_driver_assignment(cur, int(chat_id))
+            if driver:
+                cur.execute("UPDATE drivers SET telegram_tracking_enabled=TRUE, telegram_tracking_started_at=NOW(), updated_at=NOW() WHERE id=%s", (driver["driver_id"],))
+                conn.commit()
+                _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "🟢 Отслеживание включено на рабочую смену (до 8 часов).\n\nНажмите кнопку ниже для разовой геопозиции или скрепку → Геопозиция → «Поделиться геопозицией» и выберите 8 часов.", "reply_markup": _telegram_location_request_keyboard()})
+            return {"ok": True}
+
+        if text in {"/stoptrack", "⏹ Остановить отслеживание"}:
+            cur.execute("UPDATE drivers SET telegram_tracking_enabled=FALSE, telegram_tracking_stopped_at=NOW(), updated_at=NOW() WHERE telegram_chat_id=%s", (int(chat_id),))
+            conn.commit()
+            _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "🔴 Отслеживание остановлено.", "reply_markup": {"remove_keyboard": True}})
+            return {"ok": True}
+
+        return {"ok": True}
+    except Exception as exc:
+        conn.rollback()
+        logger.exception("Telegram webhook failed: %s", exc)
         return {"ok": True}
     finally:
         cur.close(); conn.close()
@@ -7520,42 +7963,39 @@ def send_route_to_telegram(session_id: int, request: Request):
         result = json.loads(session.get("result_json") or "{}")
         routes = result.get("routes") or []
         cur.execute(
-            """SELECT a.id, a.route_index, a.driver_name, a.vehicle_name, a.route_yandex_url,
+            """SELECT a.id, a.route_index, a.driver_name, a.vehicle_name,
+                       a.driver_id, d.name AS directory_driver_name, d.is_active,
                        d.telegram_chat_id
-                  FROM route_assignments a JOIN drivers d ON d.id=a.driver_id
-                 WHERE a.session_id=%s AND a.owner_id=%s AND d.is_active=TRUE AND d.telegram_chat_id IS NOT NULL
+                  FROM route_assignments a LEFT JOIN drivers d ON d.id=a.driver_id
+                 WHERE a.session_id=%s AND a.owner_id=%s
                  ORDER BY a.route_index""",
             (session_id, uid),
         )
         assignments = cur.fetchall()
-        cur.execute("SELECT COUNT(*) AS count FROM route_assignments WHERE session_id=%s AND owner_id=%s", (session_id, uid))
-        total_assignments = int(cur.fetchone()["count"])
-        skipped = max(0, total_assignments - len(assignments))
+        total_assignments = len(assignments)
         for assignment in assignments:
-            route = routes[int(assignment["route_index"])] if int(assignment["route_index"]) < len(routes) else {}
-            relative, driver_url = _issue_assignment_link(cur, int(assignment["id"]), request)
-            del relative
-            points = route.get("stores") or []
-            navigation_url = assignment.get("route_yandex_url") or route.get("yandex_url") or ""
-            text = "\n".join([
-                "🚚 SmartRoute — ваш рейс",
-                f"📅 Дата: {session.get('delivery_date') or 'не указана'}",
-                f"🚙 Машина: {assignment.get('vehicle_name') or route.get('vehicle_name') or 'не указана'}",
-                f"📍 Точек: {len(points)}",
-                f"🛣 Пробег: {round(float(route.get('total_km') or 0), 1)} км",
-                "\nОткройте нужную кнопку ниже 👇",
-            ])
-            keyboard = {"inline_keyboard": [
-                ([{"text": "🧭 Навигация", "url": navigation_url}] if navigation_url else []),
-                [{"text": "📦 Исполнение", "url": driver_url}],
-            ]}
+            driver_name = assignment.get("directory_driver_name") or assignment.get("driver_name") or "Водитель"
+            reason = None
+            if not assignment.get("driver_id"):
+                reason = "водитель не назначен"
+            elif not assignment.get("is_active"):
+                reason = "водитель архивирован"
+            elif assignment.get("telegram_chat_id") is None:
+                reason = "водитель не подключён к Telegram (нет chat_id)"
+            if reason:
+                skipped += 1
+                errors.append(f"{driver_name}: {reason}")
+                continue
             try:
-                _telegram_api("sendMessage", {"chat_id": int(assignment["telegram_chat_id"]), "text": text, "reply_markup": keyboard})
+                _, driver_url = _issue_assignment_link(cur, int(assignment["id"]), request)
+                _telegram_render_assignment(cur, int(assignment["id"]), int(assignment["telegram_chat_id"]), request, driver_url=driver_url)
                 sent += 1
             except Exception as exc:
-                errors.append(f"{assignment.get('driver_name') or 'Водитель'}: {str(exc)[:160]}")
+                skipped += 1
+                errors.append(f"{driver_name}: ошибка Telegram API")
+                logger.exception("Telegram route send failed for assignment %s: %s", assignment["id"], exc)
         conn.commit()
-        return {"sent": sent, "skipped": skipped, "errors": errors}
+        return {"sent": sent, "total": total_assignments, "skipped": skipped, "errors": errors}
     finally:
         cur.close(); conn.close()
 
@@ -7657,6 +8097,27 @@ def _assignment_summary(row: dict) -> dict:
     assignment_status = row.get("status") or "planned"
     if assignment_status == "on_route":
         assignment_status = "planned"
+    captured_at = row.get("location_captured_at")
+    age_seconds = None
+    if captured_at:
+        try:
+            age_seconds = max(0, int((datetime.utcnow() - captured_at).total_seconds()))
+        except (TypeError, ValueError):
+            age_seconds = None
+    tracking_enabled = bool(row.get("telegram_tracking_enabled"))
+    tracking_started_at = row.get("telegram_tracking_started_at")
+    tracking_expired = False
+    if tracking_enabled and tracking_started_at:
+        try:
+            tracking_expired = (datetime.utcnow() - tracking_started_at).total_seconds() > TELEGRAM_LIVE_PERIOD_SECONDS
+        except (TypeError, ValueError):
+            pass
+    if age_seconds is not None and age_seconds <= TELEGRAM_LOCATION_STALE_SECONDS:
+        gps_status = "fresh"
+    elif tracking_enabled and not tracking_expired:
+        gps_status = "stale"
+    else:
+        gps_status = "stopped"
     return {
         "id": row["id"],
         "session_id": row["session_id"],
@@ -7676,6 +8137,9 @@ def _assignment_summary(row: dict) -> dict:
         "location_lon": row.get("location_lon"),
         "location_accuracy": row.get("location_accuracy"),
         "location_captured_at": row.get("location_captured_at"),
+        "telegram_tracking_enabled": tracking_enabled,
+        "gps_status": gps_status,
+        "location_age_seconds": age_seconds,
     }
 
 
@@ -7702,7 +8166,7 @@ def _load_assignment_for_token(token: str) -> tuple[dict, list[dict]]:
         raise HTTPException(status_code=410, detail="Срок действия ссылки водителя истёк. Попросите диспетчера выдать новую ссылку.")
     cur.execute(
         """SELECT id, store_id, visit_order, store_name, address, lat, lon,
-                  products, quantity, actual_qty, arrive_by, yandex_url, status,
+                  products, quantity, actual_qty, actual_items_json, arrive_by, yandex_url, status,
                   payment_method, payment_status, driver_comment, rescheduled_date,
                   updated_at, delivered_at
            FROM route_executions WHERE assignment_id=%s ORDER BY visit_order""",
@@ -7732,6 +8196,16 @@ def _load_assignment_for_token(token: str) -> tuple[dict, list[dict]]:
     return dict(assignment), executions
 
 
+def _parse_actual_items(value) -> dict[str, float]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+        return {str(key): max(float(amount), 0) for key, amount in (parsed or {}).items()}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
 def _serialize_execution(row: dict) -> dict:
     planned_qty = float(row.get("quantity") or 0)
     actual_raw = row.get("actual_qty")
@@ -7752,6 +8226,7 @@ def _serialize_execution(row: dict) -> dict:
         "products": row.get("products") or "",
         "quantity": planned_qty,
         "actual_qty": actual_qty,
+        "actual_items": _parse_actual_items(row.get("actual_items_json")),
         "shortfall_qty": max(
             planned_qty - actual_qty,
             0,
@@ -7778,12 +8253,14 @@ def list_route_assignments(session_id: int, request: Request):
     cur.execute(
         """SELECT a.id, a.session_id, a.route_index, a.driver_id, a.driver_name,
                   a.driver_phone, a.vehicle_name, a.route_yandex_url, a.status, a.expires_at, a.updated_at,
+                  d.telegram_tracking_enabled, d.telegram_tracking_started_at,
                   loc.lat AS location_lat, loc.lon AS location_lon,
                   loc.accuracy AS location_accuracy, loc.captured_at AS location_captured_at,
                   COUNT(e.id) AS total_points,
                   COUNT(e.id) FILTER (WHERE e.status IN
                     ('delivered','partial','failed','rescheduled')) AS completed_points
            FROM route_assignments a
+           LEFT JOIN drivers d ON d.id=a.driver_id
            LEFT JOIN route_executions e ON e.assignment_id=a.id
            LEFT JOIN LATERAL (
              SELECT lat, lon, accuracy, captured_at
@@ -7793,7 +8270,7 @@ def list_route_assignments(session_id: int, request: Request):
               LIMIT 1
            ) loc ON TRUE
            WHERE a.session_id=%s AND a.owner_id=%s
-           GROUP BY a.id, loc.lat, loc.lon, loc.accuracy, loc.captured_at
+           GROUP BY a.id, d.telegram_tracking_enabled, d.telegram_tracking_started_at, loc.lat, loc.lon, loc.accuracy, loc.captured_at
            ORDER BY a.route_index""",
         (session_id, uid),
     )
@@ -8396,13 +8873,18 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
             status_code=422,
             detail="Для оплаченной доставки укажите способ оплаты",
         )
+    actual_items_json = (
+        json.dumps(body.actual_items, ensure_ascii=False)
+        if body.actual_items is not None
+        else (current.get("actual_items_json") or "")
+    )
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
         """UPDATE route_executions
            SET status=%s, quantity=CASE WHEN quantity <= 0 AND %s='delivered'
                                         THEN %s ELSE quantity END,
-               actual_qty=%s, payment_method=%s, payment_status=%s,
+               actual_qty=%s, actual_items_json=%s, payment_method=%s, payment_status=%s,
                driver_comment=%s,
                rescheduled_date=CASE WHEN %s='rescheduled' THEN rescheduled_date ELSE NULL END,
                updated_at=NOW(),
@@ -8413,7 +8895,7 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
                      products, quantity, actual_qty, arrive_by, yandex_url, status,
                      payment_method, payment_status, driver_comment, rescheduled_date,
                      updated_at, delivered_at""",
-        (body.status, body.status, planned_qty, actual_qty, payment_method, payment_status, body.driver_comment.strip(),
+        (body.status, body.status, planned_qty, actual_qty, actual_items_json, payment_method, payment_status, body.driver_comment.strip(),
          body.status,
          body.status, execution_id, assignment["id"]),
     )
