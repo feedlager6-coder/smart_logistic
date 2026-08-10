@@ -21,6 +21,8 @@ interface CompanySettings {
   fuel_price: number;
   fuel_consumption: number;
   cost_per_km: number;
+  dispatcher_telegram_username: string;
+  dispatcher_phone: string;
 }
 
 function calcCostPerKm(fuelPrice: number, consumption: number): number {
@@ -616,6 +618,8 @@ export function SettingsPage() {
 
   const [fuelPrice, setFuelPrice] = useState<string>("67");
   const [consumption, setConsumption] = useState<string>("13");
+  const [dispatcherTelegram, setDispatcherTelegram] = useState("");
+  const [dispatcherPhone, setDispatcherPhone] = useState("");
 
   const fuelPriceNum = parseFloat(fuelPrice) || 0;
   const consumptionNum = parseFloat(consumption) || 0;
@@ -627,6 +631,8 @@ export function SettingsPage() {
       .then((data: CompanySettings) => {
         setFuelPrice(String(data.fuel_price));
         setConsumption(String(data.fuel_consumption));
+        setDispatcherTelegram(data.dispatcher_telegram_username || "");
+        setDispatcherPhone(data.dispatcher_phone || "");
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -646,6 +652,8 @@ export function SettingsPage() {
         body: JSON.stringify({
           fuel_price: fuelPriceNum,
           fuel_consumption: consumptionNum,
+          dispatcher_telegram_username: dispatcherTelegram.trim(),
+          dispatcher_phone: dispatcherPhone.trim(),
         }),
       });
       if (!res.ok) {
@@ -794,6 +802,32 @@ export function SettingsPage() {
               <Button onClick={handleSave} disabled={saving} className="gap-2 w-full sm:w-auto">
                 <Save className="w-4 h-4" />
                 {saving ? "Сохраняю…" : "Сохранить настройки"}
+              </Button>
+            </CardContent>
+          </Card>
+
+          <Card className="border-border">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Phone className="w-5 h-5 text-primary" />
+                Контакты диспетчера для водителя
+              </CardTitle>
+              <CardDescription>
+                В Telegram водитель увидит одну кнопку «Диспетчер»: сначала Telegram, затем телефон.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+              <div className="space-y-2">
+                <Label htmlFor="dispatcher_telegram">Telegram username</Label>
+                <Input id="dispatcher_telegram" value={dispatcherTelegram} onChange={e => setDispatcherTelegram(e.target.value)} placeholder="ivan_dispatcher" />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="dispatcher_phone">Телефон</Label>
+                <Input id="dispatcher_phone" value={dispatcherPhone} onChange={e => setDispatcherPhone(e.target.value)} placeholder="+7 900 000-00-00" />
+              </div>
+              <Button onClick={handleSave} disabled={saving} className="gap-2 w-full sm:w-auto sm:col-span-2">
+                <Save className="w-4 h-4" />
+                {saving ? "Сохраняю…" : "Сохранить контакты"}
               </Button>
             </CardContent>
           </Card>

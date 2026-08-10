@@ -172,6 +172,13 @@ export function DriverPage() {
         delete next[execution.id];
         return next;
       });
+      // The browser remains the single GPS source. Stop its 20-second timer
+      // once the driver has just completed the last outstanding point.
+      const wasLastOpenPoint = executions.filter((item) => item.status === "planned").length === 1;
+      if (wasLastOpenPoint && terminalStatuses.has(draft.status)) {
+        setTrackingEnabled(false);
+        setLocationMessage("Рейс завершён — отслеживание остановлено");
+      }
       await refetch();
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "Не удалось сохранить изменения");
