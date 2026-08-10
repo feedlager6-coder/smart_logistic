@@ -133,6 +133,7 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
   const [driverNames, setDriverNames] = useState<Record<number, string>>({});
   const [driverIds, setDriverIds] = useState<Record<number, string>>({});
   const [creatingRoute, setCreatingRoute] = useState<number | null>(null);
+  const [sendingAllDrivers, setSendingAllDrivers] = useState(false);
   const [copiedAssignment, setCopiedAssignment] = useState<number | null>(null);
   const [issuedLinks, setIssuedLinks] = useState<Record<number, { driver_url: string; whatsapp_url: string }>>({});
   const [followUpDates, setFollowUpDates] = useState<Record<number, string>>(
@@ -210,13 +211,51 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
     }
   };
 
-  const sendAllDrivers = () => {
-    const links = routes.map((_, index) => issuedLinks[index]?.whatsapp_url).filter(Boolean) as string[];
-    if (links.length === 0) {
-      window.alert("Сначала назначьте водителей и выпустите ссылки");
+  const sendAllDrivers = async () => {
+    const assignments = routes.map((_, index) => ({
+      routeIndex: index,
+      assignment: data?.assignments?.find((item) => item.route_index === index),
+    })).filter((item) => item.assignment);
+    if (assignments.length === 0) {
+      window.alert("Сначала назначьте хотя бы одного водителя");
       return;
     }
-    links.forEach((link) => window.open(link, "_blank", "noopener,noreferrer"));
+    // Open blank tabs synchronously in the click handler so popup blockers do
+    // not prevent a batch of 10–20 WhatsApp tabs. URLs are filled afterwards.
+    const tabs = assignments.map((item) => ({
+      ...item,
+      tab: window.open("about:blank", "_blank"),
+    }));
+    setSendingAllDrivers(true);
+    let sent = 0;
+    try {
+      for (const item of tabs) {
+        const response = await fetch(`/api/route/assignments/${item.assignment!.id}/share`, {
+          method: "POST",
+          credentials: "include",
+        });
+        const payload = await response.json().catch(() => ({})) as {
+          driver_url?: string;
+          whatsapp_url?: string;
+          detail?: string;
+        };
+        if (!response.ok || !payload.driver_url || !payload.whatsapp_url) {
+          item.tab?.close();
+          continue;
+        }
+        setIssuedLinks((current) => ({
+          ...current,
+          [item.routeIndex]: { driver_url: payload.driver_url!, whatsapp_url: payload.whatsapp_url! },
+        }));
+        if (item.tab) item.tab.location.href = payload.whatsapp_url;
+        else window.open(payload.whatsapp_url, "_blank", "noopener,noreferrer");
+        sent += 1;
+      }
+      if (sent === 0) window.alert("Не удалось подготовить ссылки для WhatsApp");
+    } finally {
+      setSendingAllDrivers(false);
+      await refetch();
+    }
   };
 
   const copyDriverLink = async (assignment: Assignment) => {
@@ -269,8 +308,8 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
             <Button size="sm" variant="outline" onClick={() => window.open(`/api/route/sessions/${sessionId}/report.xlsx`, "_blank")}>
               <Download className="w-4 h-4 mr-1" />Отчёт Excel
             </Button>
-            <Button size="sm" variant="outline" className="text-emerald-700 border-emerald-200" onClick={sendAllDrivers}>
-              Отправить водителям
+            <Button size="sm" variant="outline" className="text-emerald-700 border-emerald-200" onClick={sendAllDrivers} disabled={sendingAllDrivers}>
+              {sendingAllDrivers ? "Готовим ссылки…" : "Отправить водителям"}
             </Button>
             {isLoading && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
           </div>
