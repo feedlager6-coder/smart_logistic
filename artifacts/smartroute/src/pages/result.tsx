@@ -45,6 +45,8 @@ type Assignment = {
   last_location?: { lat: number; lon: number; accuracy?: number; captured_at?: string } | null;
   next_stop?: { store_name: string; address: string } | null;
   next_stop_eta_minutes?: number | null;
+  gps_status?: "fresh" | "stale" | "stopped";
+  location_age_seconds?: number | null;
   vehicle_name: string;
   status: string;
   total_points: number;
@@ -263,10 +265,10 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
     setSendingTelegram(true);
     try {
       const response = await fetch(`/api/telegram/route-sessions/${sessionId}/send`, { method: "POST", credentials: "include" });
-      const payload = await response.json().catch(() => ({})) as { sent?: number; skipped?: number; errors?: string[]; detail?: string };
+      const payload = await response.json().catch(() => ({})) as { sent?: number; total?: number; skipped?: number; errors?: string[]; detail?: string };
       if (!response.ok) throw new Error(payload.detail || "Не удалось отправить маршруты в Telegram");
-      const errorText = payload.errors?.length ? ` Ошибки: ${payload.errors.join("; ")}` : "";
-      window.alert(`Telegram: отправлено ${payload.sent || 0}, пропущено ${payload.skipped || 0}.${errorText}`);
+      const errorText = payload.errors?.length ? `\n\nПричины:\n• ${payload.errors.join("\n• ")}` : "";
+      window.alert(`Telegram\nОтправлено: ${payload.sent || 0} из ${payload.total || 0}\nНе отправлено: ${payload.skipped || 0}${errorText}`);
       await refetch();
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "Не удалось отправить маршруты в Telegram");
@@ -328,7 +330,7 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
               {sendingAllDrivers ? "Готовим ссылки…" : "Открыть WhatsApp для всех"}
             </Button>
             <Button size="sm" variant="outline" className="text-sky-700 border-sky-200" onClick={sendAllTelegram} disabled={sendingTelegram}>
-              {sendingTelegram ? "Отправляем…" : "📨 Отправить маршруты всем"}
+              {sendingTelegram ? "Отправляем…" : "📨 Отправить рейсы всем"}
             </Button>
             {isLoading && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
           </div>
@@ -375,8 +377,8 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                 <div className="rounded-md bg-sky-50 border border-sky-100 px-3 py-2 text-xs text-sky-900">
                   Следующая точка: <span className="font-medium">{assignment.next_stop.store_name}</span>
                   {assignment.next_stop_eta_minutes ? ` · ETA примерно ${assignment.next_stop_eta_minutes} мин` : ""}
-                  {assignment.last_location?.captured_at ? ` · обновлено ${new Date(assignment.last_location.captured_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}` : " · геолокация ещё не получена"}
-                  {assignment.last_location && ` · позиция ${assignment.last_location.lat.toFixed(5)}, ${assignment.last_location.lon.toFixed(5)}`}
+                  {assignment.gps_status === "fresh" ? " · 🟢 GPS обновляется" : assignment.gps_status === "stale" ? " · 🟡 Данные устарели" : " · 🔴 Отслеживание остановлено"}
+                  {assignment.last_location?.captured_at ? ` · последнее обновление ${new Date(assignment.last_location.captured_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}` : " · позиция ещё не получена"}
                 </div>
               )}
               {assignment && (

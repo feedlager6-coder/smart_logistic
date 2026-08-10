@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import {
   Settings, Save, Fuel, Gauge, Calculator, TrendingDown,
-  Users, Key, Plus, Trash2, RotateCcw, Copy, Check, Eye, EyeOff, Phone, Send, MessageCircle, Smartphone,
+  Users, Key, Plus, Trash2, RotateCcw, Copy, Check, Eye, EyeOff, Phone, Send, MessageCircle,
 } from "lucide-react";
 import { useAuth } from "@/context/auth";
 import { UsersPanel } from "@/components/UsersPanel";
@@ -91,15 +91,13 @@ function DriversPanel() {
     toast({ title: "Ссылка скопирована" });
   }
 
-  async function shareTelegramLink(driver: Driver, channel: "whatsapp" | "telegram" | "sms") {
+  async function shareTelegramLink(driver: Driver, channel: "whatsapp" | "telegram") {
     const link = telegramLinks[driver.id] || await createTelegramLink(driver);
     if (!link) return;
     const text = `Здравствуйте, ${driver.name}! Откройте ссылку и нажмите Start, чтобы получать рейсы SmartRoute в Telegram: ${link}`;
     const target = channel === "whatsapp"
       ? `https://wa.me/${driver.phone.replace(/\D/g, "")}?text=${encodeURIComponent(text)}`
-      : channel === "sms"
-        ? `sms:${driver.phone.replace(/\D/g, "")}?body=${encodeURIComponent(text)}`
-        : link;
+      : link;
     window.open(target, "_blank", "noopener,noreferrer");
   }
 
@@ -174,7 +172,6 @@ function DriversPanel() {
                 <Button size="sm" variant="outline" className="gap-1" onClick={() => copyTelegramLink(driver)} disabled={linkLoading === driver.id}><Copy className="w-3.5 h-3.5" />Скопировать ссылку</Button>
                 <Button size="sm" variant="ghost" title="Отправить ссылку в WhatsApp" onClick={() => shareTelegramLink(driver, "whatsapp")}><MessageCircle className="w-3.5 h-3.5 text-emerald-600" />WhatsApp</Button>
                 <Button size="sm" variant="ghost" title="Открыть Telegram" onClick={() => shareTelegramLink(driver, "telegram")}><Send className="w-3.5 h-3.5 text-sky-600" />Telegram</Button>
-                <Button size="sm" variant="ghost" title="Отправить SMS" onClick={() => shareTelegramLink(driver, "sms")}><Smartphone className="w-3.5 h-3.5" />SMS</Button>
               </div>
               <Button size="sm" variant="ghost" className="text-destructive" onClick={() => archiveDriver(driver)}>Убрать</Button>
             </div>
