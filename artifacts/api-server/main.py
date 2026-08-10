@@ -3228,15 +3228,16 @@ def _telegram_driver_assignment(cur, chat_id: int, assignment_id: Optional[int] 
           FROM drivers d
           JOIN route_assignments a ON a.driver_id=d.id
          WHERE d.telegram_chat_id=%s AND d.is_active=TRUE
-           AND (%s IS NULL OR a.id=%s)
-           ORDER BY a.updated_at DESC
-         LIMIT 1
     """
+    params = [chat_id]
+    if assignment_id is not None:
+        query += " AND a.id=%s"
+        params.append(assignment_id)
     if execution_id is not None:
-        query = query.replace("AND a.status <> 'completed'", "AND a.status <> 'completed' AND EXISTS (SELECT 1 FROM route_executions e WHERE e.assignment_id=a.id AND e.id=%s)")
-        cur.execute(query, (chat_id, assignment_id, assignment_id, execution_id))
-    else:
-        cur.execute(query, (chat_id, assignment_id, assignment_id))
+        query += " AND EXISTS (SELECT 1 FROM route_executions e WHERE e.assignment_id=a.id AND e.id=%s)"
+        params.append(execution_id)
+    query += " ORDER BY a.updated_at DESC LIMIT 1"
+    cur.execute(query, tuple(params))
     return cur.fetchone()
 
 
@@ -3283,7 +3284,7 @@ def _telegram_next_data(cur, assignment_id: int) -> dict:
     }
 
 
-def _telegram_card(data: dict, assignment_id: int, driver_url: Optional[str] = None) -> tuple[str, dict]:
+def _telegram_card(data: dict, assignment_id: int, driver_url: Optional[str] = None, show_actions: bool = False) -> tuple[str, dict]:
     assignment = data["assignment"]
     executions = data["executions"]
     next_execution = data["next"]
@@ -3291,19 +3292,23 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: Optional[str] = N
     result = json.loads(assignment.get("result_json") or "{}")
     route = (result.get("routes") or [{}])[int(assignment.get("route_index") or 0)] if result.get("routes") else {}
     total_km = route.get("total_km") or 0
+    navigation_urls = route.get("yandex_urls") or ([assignment.get("route_yandex_url")] if assignment.get("route_yandex_url") else [])
+    split_note = ""
+    if len(navigation_urls) > 1:
+        split_note = f"Маршрут разделён на {len(navigation_urls)} части из-за лимита Яндекс.Навигатора. Сначала откройте часть 1, после последней общей точки — часть 2."
     if next_execution:
-        status_line = "⏳ Ожидает выполнения"
-        if assignment.get("lat") is not None:
-            status_line = "🟢 GPS обновляется" if assignment.get("telegram_tracking_enabled") and data.get("eta") is not None else "🟡 GPS ожидается"
         lines = [
             f"🚚 Рейс на {assignment.get('delivery_date') or 'сегодня'}",
-            f"🚙 {assignment.get('vehicle_name') or 'Машина не указана'} · {route_points} точек · {round(float(total_km), 1)} км",
+            f"{assignment.get('vehicle_name') or 'Машина'} · {route_points} точек · {round(float(total_km), 1)} км",
             "",
-            f"📍 Текущая точка: {next_execution.get('visit_order')}. {next_execution.get('store_name') or 'Без названия'}",
-            f"🏪 {next_execution.get('address') or 'Адрес не указан'}",
-            f"📦 {next_execution.get('products') or 'Товар не указан'}",
-            status_line,
+            f"Точка {next_execution.get('visit_order')} из {route_points}: {next_execution.get('store_name') or 'Без названия'}",
+            next_execution.get('address') or 'Адрес не указан',
+            f"Товар: {next_execution.get('products') or 'не указан'}",
         ]
+        if not show_actions:
+            lines.extend(["", "С чего начать:", "1. Откройте маршрут.", "2. Перед выездом включите отслеживание.", "3. На точке откройте исполнение заявки."])
+        if split_note:
+            lines.append(f"🗺 {split_note}")
         if data.get("eta"):
             lines.append(f"⏱ До следующей точки: ~{data['eta']} мин (оценка)")
         elif assignment.get("lat") is None:
@@ -3315,14 +3320,19 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: Optional[str] = N
             "Все точки обработаны. Спасибо за работу!",
         ]
     keyboard = []
-    if assignment.get("route_yandex_url"):
-        keyboard.append([{"text": "🧭 Открыть маршрут", "url": assignment["route_yandex_url"]}])
-    if driver_url:
-        keyboard.append([
-            {"text": "📦 Исполнение заявки", "callback_data": f"tg:current:{assignment_id}"},
-            {"text": "🌐 Web", "url": driver_url},
+    if len(navigation_urls) == 1:
+        keyboard.append([{"text": "🧭 Открыть маршрут", "url": navigation_urls[0]}])
+    elif len(navigation_urls) > 1:
+        keyboard.extend([
+            [{"text": f"🧭 Часть 1 · точки 1–19", "url": navigation_urls[0]}],
+            *[
+                [{"text": f"🧭 Часть {index + 1} · старт с точки {index * 19}", "url": url}]
+                for index, url in enumerate(navigation_urls[1:], 1)
+            ],
         ])
-    if next_execution:
+    if driver_url:
+        keyboard.append([{ "text": "📦 Исполнение заявки", "callback_data": f"tg:current:{assignment_id}" }])
+    if next_execution and show_actions:
         execution_id = int(next_execution["id"])
         keyboard.extend([
             [{"text": "✅ Доставлено", "callback_data": f"tg:delivered:{execution_id}"}, {"text": "⚠️ Частично", "callback_data": f"tg:partial:{execution_id}"}],
@@ -3333,9 +3343,9 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: Optional[str] = N
     return "\n".join(lines), {"inline_keyboard": keyboard}
 
 
-def _telegram_render_assignment(cur, assignment_id: int, chat_id: int, request: Request, message_id: Optional[int] = None, driver_url: Optional[str] = None):
+def _telegram_render_assignment(cur, assignment_id: int, chat_id: int, request: Request, message_id: Optional[int] = None, driver_url: Optional[str] = None, show_actions: bool = False):
     data = _telegram_next_data(cur, assignment_id)
-    text, markup = _telegram_card(data, assignment_id, driver_url)
+    text, markup = _telegram_card(data, assignment_id, driver_url, show_actions=show_actions)
     payload = {"chat_id": chat_id, "text": text, "reply_markup": markup}
     if message_id:
         payload["message_id"] = message_id
@@ -7753,7 +7763,7 @@ def _telegram_handle_callback(request: Request, callback: dict):
             assignment_id = int(parts[2])
             driver = _telegram_driver_assignment(cur, int(chat_id), assignment_id)
             if driver:
-                _telegram_render_assignment(cur, assignment_id, int(chat_id), request, int(message_id) if message_id else None)
+                _telegram_render_assignment(cur, assignment_id, int(chat_id), request, int(message_id) if message_id else None, show_actions=True)
             return {"ok": True}
 
         execution_id = int(parts[2])
@@ -7773,7 +7783,7 @@ def _telegram_handle_callback(request: Request, callback: dict):
         if action == "delivered":
             _telegram_save_execution(cur, assignment_id, execution_id, "delivered", float(execution.get("quantity") or 0), comment="")
             conn.commit()
-            _telegram_render_assignment(cur, assignment_id, int(chat_id), request, int(message_id) if message_id else None)
+            _telegram_render_assignment(cur, assignment_id, int(chat_id), request, int(message_id) if message_id else None, show_actions=True)
             _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "✅ Точка отмечена как доставленная. При необходимости выберите оплату:", "reply_markup": _telegram_payment_keyboard(execution_id)})
         elif action == "partial" and len(parts) >= 6 and parts[3] == "item":
             cur.execute("SELECT telegram_pending_payload FROM drivers WHERE id=%s", (driver["driver_id"],))
@@ -7803,7 +7813,7 @@ def _telegram_handle_callback(request: Request, callback: dict):
             _telegram_save_execution(cur, assignment_id, execution_id, "partial", actual_qty, actual_items=actual_items)
             cur.execute("UPDATE drivers SET telegram_pending_action=NULL, telegram_pending_execution_id=NULL, telegram_pending_payload=NULL WHERE id=%s", (driver["driver_id"],))
             conn.commit()
-            _telegram_render_assignment(cur, assignment_id, int(chat_id), request, int(message_id) if message_id else None)
+            _telegram_render_assignment(cur, assignment_id, int(chat_id), request, int(message_id) if message_id else None, show_actions=True)
             _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "✅ Частичная доставка сохранена. При необходимости выберите оплату:", "reply_markup": _telegram_payment_keyboard(execution_id)})
         elif action == "partial":
             items = _telegram_parse_products(execution.get("products") or "", float(execution.get("quantity") or 0))
@@ -7829,7 +7839,7 @@ def _telegram_handle_callback(request: Request, callback: dict):
             cur.execute("UPDATE route_executions SET payment_method=%s, payment_status=%s, updated_at=NOW() WHERE id=%s AND assignment_id=%s", (method, status, execution_id, assignment_id))
             conn.commit()
             _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "✅ Данные оплаты сохранены."})
-            _telegram_render_assignment(cur, assignment_id, int(chat_id), request, int(message_id) if message_id else None)
+            _telegram_render_assignment(cur, assignment_id, int(chat_id), request, int(message_id) if message_id else None, show_actions=True)
         return {"ok": True}
     except Exception as exc:
         conn.rollback()
@@ -7904,7 +7914,7 @@ def telegram_webhook(request: Request, payload: dict):
         if text in {"/route", "/myroute"}:
             driver = _telegram_driver_assignment(cur, int(chat_id))
             if driver:
-                _telegram_render_assignment(cur, int(driver["assignment_id"]), int(chat_id), request)
+                _telegram_render_assignment(cur, int(driver["assignment_id"]), int(chat_id), request, show_actions=True)
             else:
                 _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "ℹ️ Активных рейсов пока нет."})
             return {"ok": True}
@@ -7919,7 +7929,7 @@ def telegram_webhook(request: Request, payload: dict):
                 cur.execute("UPDATE drivers SET telegram_pending_action=NULL, telegram_pending_execution_id=NULL, telegram_pending_payload=NULL WHERE id=%s", (pending_driver["id"],))
                 conn.commit()
                 _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "✅ Результат сохранён."})
-                _telegram_render_assignment(cur, int(driver["assignment_id"]), int(chat_id), request)
+                _telegram_render_assignment(cur, int(driver["assignment_id"]), int(chat_id), request, show_actions=True)
             return {"ok": True}
 
         if text in {"/track", "📍 Начать отслеживание"}:
