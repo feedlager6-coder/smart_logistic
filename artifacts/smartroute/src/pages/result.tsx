@@ -303,13 +303,14 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
           <div>
             <CardTitle className="flex items-center gap-2 text-lg"><Users className="w-5 h-5 text-primary" />Исполнение доставок</CardTitle>
             <p className="text-sm text-muted-foreground mt-1">Назначьте рейс водителю и следите за фактическими статусами точек.</p>
+            <p className="text-xs text-muted-foreground mt-1">Откроется отдельный чат WhatsApp для каждого водителя. В каждом чате нужно нажать «Отправить».</p>
           </div>
           <div className="flex items-center gap-2">
             <Button size="sm" variant="outline" onClick={() => window.open(`/api/route/sessions/${sessionId}/report.xlsx`, "_blank")}>
               <Download className="w-4 h-4 mr-1" />Отчёт Excel
             </Button>
             <Button size="sm" variant="outline" className="text-emerald-700 border-emerald-200" onClick={sendAllDrivers} disabled={sendingAllDrivers}>
-              {sendingAllDrivers ? "Готовим ссылки…" : "Отправить водителям"}
+              {sendingAllDrivers ? "Готовим ссылки…" : "Открыть WhatsApp для всех"}
             </Button>
             {isLoading && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
           </div>
