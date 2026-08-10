@@ -3312,13 +3312,14 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: str, dispatcher: 
     route_points = len(executions)
     result = json.loads(assignment.get("result_json") or "{}")
     route = (result.get("routes") or [{}])[int(assignment.get("route_index") or 0)] if result.get("routes") else {}
+    total_km = round(float(route.get("total_km") or 0), 1)
     navigation_urls = route.get("yandex_urls") or ([assignment.get("route_yandex_url")] if assignment.get("route_yandex_url") else [])
     if not next_execution:
         return "🏁 Рейс завершён\n\nВсе точки обработаны. Спасибо за работу!", {"inline_keyboard": []}
 
     lines = [
         "🚚 Рейс на сегодня",
-        f"{assignment.get('vehicle_name') or 'Машина'} · {route_points} точек",
+        f"{assignment.get('vehicle_name') or 'Машина'} · {route_points} точек · {total_km:g} км",
         "",
         "Начните работу по кнопкам ниже.",
     ]
@@ -3341,6 +3342,21 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: str, dispatcher: 
     return "\n".join(lines), {"inline_keyboard": keyboard}
 
 
+def _telegram_remove_reply_keyboard(chat_id: int) -> None:
+    """Remove the obsolete location ReplyKeyboard from chats created by old releases."""
+    try:
+        response = _telegram_api("sendMessage", {
+            "chat_id": chat_id,
+            "text": "\u200b",
+            "reply_markup": {"remove_keyboard": True},
+        })
+        message_id = (response.get("result") or {}).get("message_id")
+        if message_id:
+            _telegram_api("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+    except Exception as exc:
+        logger.info("Telegram reply keyboard cleanup failed: %s", exc)
+
+
 def _telegram_render_assignment(cur, assignment_id: int, chat_id: int, request: Request, message_id: Optional[int] = None, driver_url: Optional[str] = None):
     data = _telegram_next_data(cur, assignment_id)
     if not driver_url:
@@ -3349,6 +3365,7 @@ def _telegram_render_assignment(cur, assignment_id: int, chat_id: int, request: 
                      FROM company_settings WHERE owner_id=%s LIMIT 1""", (data["assignment"]["owner_id"],))
     dispatcher = cur.fetchone() or {}
     text, markup = _telegram_card(data, assignment_id, driver_url, dispatcher)
+    _telegram_remove_reply_keyboard(chat_id)
     payload = {"chat_id": chat_id, "text": text, "reply_markup": markup}
     if message_id:
         payload["message_id"] = message_id
@@ -8117,6 +8134,15 @@ def download_route_report(session_id: int, request: Request):
     )
 
 
+def _utc_iso(value) -> Optional[str]:
+    """Serialize PostgreSQL's UTC TIMESTAMP as an unambiguous API instant."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value.replace(microsecond=0).isoformat() + ("Z" if value.tzinfo is None else "")
+    return str(value)
+
+
 def _assignment_summary(row: dict) -> dict:
     """Serialize an assignment without exposing its one-time token."""
     assignment_status = row.get("status") or "planned"
@@ -8129,20 +8155,16 @@ def _assignment_summary(row: dict) -> dict:
             age_seconds = max(0, int((datetime.utcnow() - captured_at).total_seconds()))
         except (TypeError, ValueError):
             age_seconds = None
-    tracking_enabled = bool(row.get("telegram_tracking_enabled"))
-    tracking_started_at = row.get("telegram_tracking_started_at")
-    tracking_expired = False
-    if tracking_enabled and tracking_started_at:
-        try:
-            tracking_expired = (datetime.utcnow() - tracking_started_at).total_seconds() > TELEGRAM_LIVE_PERIOD_SECONDS
-        except (TypeError, ValueError):
-            pass
+    # GPS is sourced exclusively from /driver/{token}, not Telegram. A missing
+    # position is neutral; it must not be shown as a false red alarm.
     if age_seconds is not None and age_seconds <= TELEGRAM_LOCATION_STALE_SECONDS:
         gps_status = "fresh"
-    elif tracking_enabled and not tracking_expired:
+    elif age_seconds is not None and age_seconds <= 10 * 60:
         gps_status = "stale"
+    elif age_seconds is not None:
+        gps_status = "lost"
     else:
-        gps_status = "stopped"
+        gps_status = "not_started"
     return {
         "id": row["id"],
         "session_id": row["session_id"],
@@ -8162,7 +8184,7 @@ def _assignment_summary(row: dict) -> dict:
         "location_lon": row.get("location_lon"),
         "location_accuracy": row.get("location_accuracy"),
         "location_captured_at": row.get("location_captured_at"),
-        "telegram_tracking_enabled": tracking_enabled,
+        "telegram_tracking_enabled": False,
         "gps_status": gps_status,
         "location_age_seconds": age_seconds,
     }
@@ -8264,8 +8286,8 @@ def _serialize_execution(row: dict) -> dict:
         "driver_comment": row.get("driver_comment") or "",
         "rescheduled_date": str(row["rescheduled_date"]) if row.get("rescheduled_date") else None,
         "remaining_order_date": str(row["remaining_order_date"]) if row.get("remaining_order_date") else None,
-        "updated_at": str(row["updated_at"]) if row.get("updated_at") else None,
-        "delivered_at": str(row["delivered_at"]) if row.get("delivered_at") else None,
+        "updated_at": _utc_iso(row.get("updated_at")),
+        "delivered_at": _utc_iso(row.get("delivered_at")),
     }
 
 
@@ -8333,7 +8355,7 @@ def list_route_assignments(session_id: int, request: Request):
                 "lat": item.pop("location_lat", None),
                 "lon": item.pop("location_lon", None),
                 "accuracy": item.pop("location_accuracy", None),
-                "captured_at": str(item.pop("location_captured_at")) if item.get("location_captured_at") else None,
+                "captured_at": _utc_iso(item.pop("location_captured_at")) if item.get("location_captured_at") else None,
             }
             item["last_location"] = location if location["lat"] is not None else None
             next_stop = next((stop for stop in item["executions"] if stop.get("status") == "planned"), None)
@@ -8821,14 +8843,14 @@ def update_driver_location(token: str, body: DriverLocationInput):
     try:
         cur.execute(
             """INSERT INTO driver_locations (assignment_id, lat, lon, accuracy, captured_at)
-               VALUES (%s,%s,%s,%s,NOW())
+               VALUES (%s,%s,%s,%s,timezone('UTC', NOW()))
                ON CONFLICT (assignment_id) DO UPDATE SET
                  lat=EXCLUDED.lat, lon=EXCLUDED.lon, accuracy=EXCLUDED.accuracy,
                  captured_at=EXCLUDED.captured_at""",
             (assignment["id"], body.lat, body.lon, body.accuracy),
         )
         conn.commit()
-        return {"ok": True, "captured_at": datetime.utcnow().isoformat()}
+        return {"ok": True, "captured_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z"}
     finally:
         cur.close(); conn.close()
 
