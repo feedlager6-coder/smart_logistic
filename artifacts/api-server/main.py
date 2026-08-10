@@ -3187,6 +3187,15 @@ def _telegram_connect_link(raw_token: str) -> str:
     return f"https://t.me/{TELEGRAM_BOT_USERNAME}?start={urllib.parse.quote(raw_token, safe='-_')}"
 
 
+def _telegram_http_url(value: str) -> Optional[str]:
+    """Return only URLs Telegram accepts in inline-button url fields."""
+    candidate = str(value or "").strip()
+    parsed = urllib.parse.urlparse(candidate)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return candidate
+    return None
+
+
 def _issue_assignment_link(cur, assignment_id: int, request: Request) -> tuple[str, str]:
     raw_token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
@@ -3313,7 +3322,12 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: str, dispatcher: 
     result = json.loads(assignment.get("result_json") or "{}")
     route = (result.get("routes") or [{}])[int(assignment.get("route_index") or 0)] if result.get("routes") else {}
     total_km = round(float(route.get("total_km") or 0), 1)
-    navigation_urls = route.get("yandex_urls") or ([assignment.get("route_yandex_url")] if assignment.get("route_yandex_url") else [])
+    raw_navigation_urls = route.get("yandex_urls") or ([assignment.get("route_yandex_url")] if assignment.get("route_yandex_url") else [])
+    navigation_urls = []
+    for raw_navigation_url in raw_navigation_urls:
+        safe_navigation_url = _telegram_http_url(raw_navigation_url)
+        if safe_navigation_url:
+            navigation_urls.append(safe_navigation_url)
     if not next_execution:
         return "🏁 Рейс завершён\n\nВсе точки обработаны. Спасибо за работу!", {"inline_keyboard": []}
 
@@ -3330,7 +3344,11 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: str, dispatcher: 
         else:
             for index, url in enumerate(navigation_urls, start=1):
                 keyboard.append([{"text": f"🧭 Часть {index}", "url": url}])
-    keyboard.append([{"text": "📦 Исполнение", "url": driver_url}])
+    safe_driver_url = _telegram_http_url(driver_url)
+    if safe_driver_url:
+        keyboard.append([{"text": "📦 Исполнение", "url": safe_driver_url}])
+    else:
+        keyboard.append([{"text": "📦 Исполнение", "callback_data": f"tg:execution:{assignment_id}"}])
     username = (dispatcher.get("dispatcher_telegram_username") or "").strip().lstrip("@")
     phone = _normalize_driver_phone(dispatcher.get("dispatcher_phone") or "")
     if username:
@@ -3376,7 +3394,17 @@ def _telegram_render_assignment(cur, assignment_id: int, chat_id: int, request: 
             return _telegram_api("editMessageText", payload)
         except Exception as exc:
             logger.info("Telegram card edit failed, sending a new card: %s", exc)
-    return _telegram_api("sendMessage", {"chat_id": chat_id, "text": text, "reply_markup": markup})
+    try:
+        return _telegram_api("sendMessage", {"chat_id": chat_id, "text": text, "reply_markup": markup})
+    except Exception as exc:
+        # A malformed legacy navigation URL must not block the driver from
+        # receiving the assignment. Retry with the execution link only.
+        logger.warning("Telegram inline route card rejected, retrying compact card: %s", exc)
+        compact_markup = {"inline_keyboard": [
+            row for row in markup.get("inline_keyboard", [])
+            if any(button.get("text") == "📦 Исполнение" for button in row)
+        ]}
+        return _telegram_api("sendMessage", {"chat_id": chat_id, "text": text, "reply_markup": compact_markup})
 
 
 def _telegram_save_execution(cur, assignment_id: int, execution_id: int, status: str, actual_qty: float, actual_items: Optional[dict] = None, comment: str = ""):
@@ -8036,6 +8064,7 @@ def send_route_to_telegram(session_id: int, request: Request):
                     )
                 sent += 1
             except Exception as exc:
+                conn.rollback()
                 skipped += 1
                 errors.append(f"{driver_name}: ошибка Telegram API — {str(exc)[:180]}")
                 logger.exception("Telegram route send failed for assignment %s: %s", assignment["id"], exc)
