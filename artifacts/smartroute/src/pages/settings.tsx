@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import {
   Settings, Save, Fuel, Gauge, Calculator, TrendingDown,
-  Users, Key, Plus, Trash2, RotateCcw, Copy, Check, Eye, EyeOff, Phone,
+  Users, Key, Plus, Trash2, RotateCcw, Copy, Check, Eye, EyeOff, Phone, Send, MessageCircle, Smartphone,
 } from "lucide-react";
 import { useAuth } from "@/context/auth";
 import { UsersPanel } from "@/components/UsersPanel";
@@ -35,6 +35,8 @@ type Driver = {
   phone: string;
   vehicle_name: string;
   is_active: boolean;
+  telegram_connected: boolean;
+  telegram_connected_at: string | null;
 };
 
 function DriversPanel() {
@@ -45,6 +47,8 @@ function DriversPanel() {
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [vehicleName, setVehicleName] = useState("");
+  const [telegramLinks, setTelegramLinks] = useState<Record<number, string>>({});
+  const [linkLoading, setLinkLoading] = useState<number | null>(null);
 
   async function loadDrivers() {
     try {
@@ -59,7 +63,45 @@ function DriversPanel() {
     }
   }
 
-  useEffect(() => { loadDrivers(); }, []);
+  useEffect(() => {
+    loadDrivers();
+    const timer = window.setInterval(loadDrivers, 5000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  async function createTelegramLink(driver: Driver): Promise<string | null> {
+    setLinkLoading(driver.id);
+    try {
+      const response = await fetch(`/api/drivers/${driver.id}/telegram-link`, { method: "POST", credentials: "include" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || "Не удалось создать ссылку Telegram");
+      setTelegramLinks((current) => ({ ...current, [driver.id]: data.telegram_link }));
+      toast({ title: "Ссылка подключения готова", description: "Передайте её водителю удобным способом." });
+      return data.telegram_link as string;
+    } catch (error) {
+      toast({ title: "Не удалось создать ссылку Telegram", description: error instanceof Error ? error.message : "Ошибка", variant: "destructive" });
+    } finally { setLinkLoading(null); }
+    return null;
+  }
+
+  async function copyTelegramLink(driver: Driver) {
+    const link = telegramLinks[driver.id] || await createTelegramLink(driver);
+    if (!link) return;
+    await navigator.clipboard.writeText(link);
+    toast({ title: "Ссылка скопирована" });
+  }
+
+  async function shareTelegramLink(driver: Driver, channel: "whatsapp" | "telegram" | "sms") {
+    const link = telegramLinks[driver.id] || await createTelegramLink(driver);
+    if (!link) return;
+    const text = `Здравствуйте, ${driver.name}! Откройте ссылку и нажмите Start, чтобы получать рейсы SmartRoute в Telegram: ${link}`;
+    const target = channel === "whatsapp"
+      ? `https://wa.me/${driver.phone.replace(/\D/g, "")}?text=${encodeURIComponent(text)}`
+      : channel === "sms"
+        ? `sms:${driver.phone.replace(/\D/g, "")}?body=${encodeURIComponent(text)}`
+        : link;
+    window.open(target, "_blank", "noopener,noreferrer");
+  }
 
   async function addDriver() {
     if (!name.trim() || !phone.trim()) {
@@ -101,7 +143,7 @@ function DriversPanel() {
     <div className="space-y-5">
       <div>
         <h2 className="text-lg font-semibold flex items-center gap-2"><Users className="w-5 h-5 text-primary" />Водители</h2>
-        <p className="text-sm text-muted-foreground mt-1">Телефон используется только для персональной ссылки WhatsApp с готовым сообщением.</p>
+        <p className="text-sm text-muted-foreground mt-1">Подключите водителя к Telegram один раз — после этого рейсы можно отправлять ему автоматически.</p>
       </div>
       <Card className="border-primary/30 bg-primary/5">
         <CardContent className="pt-5">
@@ -122,6 +164,18 @@ function DriversPanel() {
               <div className="min-w-[150px] flex-1 font-medium">{driver.name}</div>
               <div className="flex items-center gap-1.5 text-sm text-muted-foreground"><Phone className="w-3.5 h-3.5" />{driver.phone}</div>
               <div className="text-sm text-muted-foreground min-w-[130px]">{driver.vehicle_name || "Машина не указана"}</div>
+              <div className="min-w-[190px] text-sm">
+                <div className={driver.telegram_connected ? "text-emerald-700" : "text-muted-foreground"}>
+                  {driver.telegram_connected ? "🟢 Подключён" : "⚪ Не подключён"}
+                </div>
+                {driver.telegram_connected_at && <div className="text-xs text-muted-foreground">{new Date(driver.telegram_connected_at).toLocaleString("ru-RU")}</div>}
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5 w-full sm:w-auto sm:max-w-[360px]">
+                <Button size="sm" variant="outline" className="gap-1" onClick={() => copyTelegramLink(driver)} disabled={linkLoading === driver.id}><Copy className="w-3.5 h-3.5" />Скопировать ссылку</Button>
+                <Button size="sm" variant="ghost" title="Отправить ссылку в WhatsApp" onClick={() => shareTelegramLink(driver, "whatsapp")}><MessageCircle className="w-3.5 h-3.5 text-emerald-600" />WhatsApp</Button>
+                <Button size="sm" variant="ghost" title="Открыть Telegram" onClick={() => shareTelegramLink(driver, "telegram")}><Send className="w-3.5 h-3.5 text-sky-600" />Telegram</Button>
+                <Button size="sm" variant="ghost" title="Отправить SMS" onClick={() => shareTelegramLink(driver, "sms")}><Smartphone className="w-3.5 h-3.5" />SMS</Button>
+              </div>
               <Button size="sm" variant="ghost" className="text-destructive" onClick={() => archiveDriver(driver)}>Убрать</Button>
             </div>
           ))}

@@ -134,6 +134,7 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
   const [driverIds, setDriverIds] = useState<Record<number, string>>({});
   const [creatingRoute, setCreatingRoute] = useState<number | null>(null);
   const [sendingAllDrivers, setSendingAllDrivers] = useState(false);
+  const [sendingTelegram, setSendingTelegram] = useState(false);
   const [copiedAssignment, setCopiedAssignment] = useState<number | null>(null);
   const [issuedLinks, setIssuedLinks] = useState<Record<number, { driver_url: string; whatsapp_url: string }>>({});
   const [followUpDates, setFollowUpDates] = useState<Record<number, string>>(
@@ -258,6 +259,20 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
     }
   };
 
+  const sendAllTelegram = async () => {
+    setSendingTelegram(true);
+    try {
+      const response = await fetch(`/api/telegram/route-sessions/${sessionId}/send`, { method: "POST", credentials: "include" });
+      const payload = await response.json().catch(() => ({})) as { sent?: number; skipped?: number; errors?: string[]; detail?: string };
+      if (!response.ok) throw new Error(payload.detail || "Не удалось отправить маршруты в Telegram");
+      const errorText = payload.errors?.length ? ` Ошибки: ${payload.errors.join("; ")}` : "";
+      window.alert(`Telegram: отправлено ${payload.sent || 0}, пропущено ${payload.skipped || 0}.${errorText}`);
+      await refetch();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Не удалось отправить маршруты в Telegram");
+    } finally { setSendingTelegram(false); }
+  };
+
   const copyDriverLink = async (assignment: Assignment) => {
     const link = assignment.driver_url;
     if (!link) return;
@@ -311,6 +326,9 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
             </Button>
             <Button size="sm" variant="outline" className="text-emerald-700 border-emerald-200" onClick={sendAllDrivers} disabled={sendingAllDrivers}>
               {sendingAllDrivers ? "Готовим ссылки…" : "Открыть WhatsApp для всех"}
+            </Button>
+            <Button size="sm" variant="outline" className="text-sky-700 border-sky-200" onClick={sendAllTelegram} disabled={sendingTelegram}>
+              {sendingTelegram ? "Отправляем…" : "📨 Отправить маршруты всем"}
             </Button>
             {isLoading && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
           </div>

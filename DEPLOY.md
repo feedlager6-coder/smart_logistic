@@ -44,6 +44,10 @@ Railway автоматически установит `DATABASE_URL` в пере
 | `JWT_SECRET` | ✅ | Случайная строка ≥32 символов для подписи JWT. `openssl rand -hex 32` |
 | `YANDEX_GEOCODER_API_KEY` | Рекомендуется | Ключ от [developer.tech.yandex.ru](https://developer.tech.yandex.ru/) |
 | `GRAPHHOPPER_API_KEY` | Опционально | Ключ от [graphhopper.com](https://www.graphhopper.com/) |
+| `TELEGRAM_BOT_TOKEN` | Для Telegram | Токен бота от BotFather |
+| `TELEGRAM_BOT_USERNAME` | Для Telegram | Username бота без `@` |
+| `TELEGRAM_WEBHOOK_SECRET` | Для Telegram | Длинный случайный секрет webhook |
+| `PUBLIC_APP_URL` | Для Telegram и ссылок | Публичный HTTPS-адрес Railway без завершающего `/` |
 | `ALLOWED_ORIGINS` | Опционально | `https://your-app.up.railway.app` (для ограничения CORS) |
 | `ORTOOLS_TIME_LIMIT_SECONDS` | Опционально | `2` (увеличить на мощных серверах) |
 | `COOKIE_SAMESITE` | Опционально | `none` (дефолт) — требуется для iframe-контекстов. Альтернатива: `lax` |
