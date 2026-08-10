@@ -3105,6 +3105,18 @@ def whatsapp_driver_url(
     return f"{target}?text={urllib.parse.quote(text)}"
 
 
+def _public_app_url(request: Request) -> str:
+    """Resolve the public origin used inside driver links shared in WhatsApp."""
+    configured = os.environ.get("PUBLIC_APP_URL", "").strip().rstrip("/")
+    if configured:
+        return configured
+    forwarded_host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+    forwarded_proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    if forwarded_host:
+        return f"{forwarded_proto.split(',')[0].strip()}://{forwarded_host.split(',')[0].strip()}"
+    return str(request.base_url).rstrip("/")
+
+
 def store_row_to_dict(row) -> dict:
     return {
         "id": row["id"],
@@ -7756,6 +7768,7 @@ def create_route_assignment(session_id: int, body: AssignmentCreate, request: Re
         # Relative path keeps the link on the public frontend origin when the
         # API is reached through Vite/Replit's development proxy.
         driver_url = f"/driver/{raw_token}"
+        public_driver_url = f"{_public_app_url(request)}{driver_url}"
         assignment.update({
             "total_points": len(route.get("stores") or []),
             "completed_points": 0,
@@ -7763,9 +7776,9 @@ def create_route_assignment(session_id: int, body: AssignmentCreate, request: Re
             "whatsapp_url": whatsapp_driver_url(
                 driver_phone, delivery_date or "", vehicle_name,
                 len(route.get("stores") or []), route.get("total_km") or 0,
-                route.get("yandex_url") or "", driver_url,
+                route.get("yandex_url") or "", public_driver_url,
             ) if driver_phone else whatsapp_assignment_url(
-                vehicle_name, route.get("yandex_url") or "", driver_url,
+                vehicle_name, route.get("yandex_url") or "", public_driver_url,
             ),
         })
         return assignment
@@ -7815,6 +7828,7 @@ def share_route_assignment(assignment_id: int, request: Request):
         )
         conn.commit()
         driver_url = f"/driver/{raw_token}"
+        public_driver_url = f"{_public_app_url(request)}{driver_url}"
         route_url = assignment["route_yandex_url"] or route.get("yandex_url") or ""
         phone = assignment["driver_phone"] or ""
         return {
@@ -7829,11 +7843,11 @@ def share_route_assignment(assignment_id: int, request: Request):
                 total_points,
                 route.get("total_km") or 0,
                 route_url,
-                driver_url,
+                public_driver_url,
             ) if phone else whatsapp_assignment_url(
                 assignment["vehicle_name"] or route.get("vehicle_name") or "",
                 route_url,
-                driver_url,
+                public_driver_url,
             ),
             "expires_at": str(datetime.utcnow() + timedelta(hours=48)),
         }
