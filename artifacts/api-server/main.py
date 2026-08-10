@@ -3191,7 +3191,10 @@ def _configure_telegram_webhook() -> None:
         _telegram_api("setWebhook", {
             "url": f"{PUBLIC_APP_URL}/api/telegram/webhook",
             "secret_token": TELEGRAM_WEBHOOK_SECRET,
-            "allowed_updates": ["message"],
+            # Inline buttons arrive as callback_query; live-location updates
+            # can be delivered through edited_message. Limiting this list to
+            # message silently made the Telegram interface read-only.
+            "allowed_updates": ["message", "edited_message", "callback_query"],
         })
         logger.info("Telegram webhook configured")
     except Exception as exc:
