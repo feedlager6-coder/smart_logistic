@@ -7,7 +7,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check, AlertTriangle, Printer, Info, Settings, Package, Users, Link2, Loader2 } from "lucide-react";
+import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check, AlertTriangle, Printer, Info, Settings, Package, Users, Link2, Loader2, Send } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap } from "react-leaflet";
 import 'leaflet/dist/leaflet.css';
@@ -344,8 +344,9 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
             <Button size="sm" variant="outline" className="text-emerald-700 border-emerald-200" onClick={sendAllDrivers} disabled={sendingAllDrivers}>
               {sendingAllDrivers ? "Готовим ссылки…" : "Открыть WhatsApp для всех"}
             </Button>
-            <Button size="sm" variant="outline" className="text-sky-700 border-sky-200" onClick={sendAllTelegram} disabled={sendingTelegram}>
-              {sendingTelegram ? "Отправляем…" : "📨 Отправить рейсы всем"}
+            <Button size="sm" variant="outline" className="text-sky-700 border-sky-200 gap-1" onClick={sendAllTelegram} disabled={sendingTelegram}>
+              <Send className="w-4 h-4" />
+              {sendingTelegram ? "Отправляем в Telegram…" : "Отправить всем в Telegram"}
             </Button>
             {isLoading && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
           </div>
