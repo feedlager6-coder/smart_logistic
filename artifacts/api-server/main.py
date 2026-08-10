@@ -3336,7 +3336,10 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: str, dispatcher: 
     if username:
         keyboard.append([{"text": "☎️ Диспетчер", "url": f"https://t.me/{username}"}])
     elif phone:
-        keyboard.append([{"text": "☎️ Диспетчер", "url": f"tel:+{phone}"}])
+        # Telegram Bot API accepts HTTP(S) links in inline buttons, but rejects
+        # tel:+ URLs with BUTTON_URL_INVALID and then refuses the whole route
+        # message. The callback sends a tappable phone number instead.
+        keyboard.append([{"text": "☎️ Диспетчер", "callback_data": f"tg:dispatcher:{assignment_id}"}])
     else:
         keyboard.append([{"text": "☎️ Диспетчер", "callback_data": f"tg:dispatcher:{assignment_id}"}])
     return "\n".join(lines), {"inline_keyboard": keyboard}
@@ -8034,7 +8037,7 @@ def send_route_to_telegram(session_id: int, request: Request):
                 sent += 1
             except Exception as exc:
                 skipped += 1
-                errors.append(f"{driver_name}: ошибка Telegram API")
+                errors.append(f"{driver_name}: ошибка Telegram API — {str(exc)[:180]}")
                 logger.exception("Telegram route send failed for assignment %s: %s", assignment["id"], exc)
         conn.commit()
         return {"sent": sent, "total": total_assignments, "skipped": skipped, "errors": errors}
