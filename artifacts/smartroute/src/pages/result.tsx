@@ -36,6 +36,21 @@ type VehicleRouteWithUrls = RouteResult["routes"][number] & {
 const COLORS = ["#0ea5e9", "#f43f5e", "#8b5cf6", "#10b981", "#f59e0b", "#6366f1", "#ec4899", "#14b8a6", "#f97316", "#84cc16"];
 
 type ExecutionStatus = "planned" | "delivered" | "partial" | "failed" | "rescheduled";
+
+function formatRouteDuration(minutes: number): string {
+  const total = Math.max(0, Math.round(minutes));
+  if (total < 60) return `Примерно через ${total} мин`;
+  const hours = Math.floor(total / 60);
+  const rest = total % 60;
+  return `Примерно через ${hours} ч${rest ? ` ${rest} мин` : ""}`;
+}
+
+function formatMoscowTime(value: string): string {
+  return new Date(value).toLocaleTimeString("ru-RU", {
+    timeZone: "Europe/Moscow", hour: "2-digit", minute: "2-digit",
+  });
+}
+
 type Assignment = {
   id: number;
   route_index: number;
@@ -45,7 +60,7 @@ type Assignment = {
   last_location?: { lat: number; lon: number; accuracy?: number; captured_at?: string } | null;
   next_stop?: { store_name: string; address: string } | null;
   next_stop_eta_minutes?: number | null;
-  gps_status?: "fresh" | "stale" | "stopped";
+  gps_status?: "fresh" | "stale" | "lost" | "not_started";
   location_age_seconds?: number | null;
   vehicle_name: string;
   status: string;
@@ -376,9 +391,15 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
               {assignment?.next_stop && (
                 <div className="rounded-md bg-sky-50 border border-sky-100 px-3 py-2 text-xs text-sky-900">
                   Следующая точка: <span className="font-medium">{assignment.next_stop.store_name}</span>
-                  {assignment.next_stop_eta_minutes ? ` · ETA примерно ${assignment.next_stop_eta_minutes} мин` : ""}
-                  {assignment.gps_status === "fresh" ? " · 🟢 GPS обновляется" : assignment.gps_status === "stale" ? " · 🟡 Данные устарели" : " · 🔴 Отслеживание остановлено"}
-                  {assignment.last_location?.captured_at ? ` · последнее обновление ${new Date(assignment.last_location.captured_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}` : " · позиция ещё не получена"}
+                  {assignment.next_stop_eta_minutes ? ` · ${formatRouteDuration(assignment.next_stop_eta_minutes)}` : ""}
+                  {assignment.gps_status === "fresh"
+                    ? " · 🟢 GPS активен"
+                    : assignment.gps_status === "stale"
+                      ? " · 🟡 GPS не обновлялся"
+                      : assignment.gps_status === "lost"
+                        ? " · 🔴 GPS потерян"
+                        : " · ⚪ GPS ещё не включен"}
+                  {assignment.last_location?.captured_at ? ` · последнее обновление ${formatMoscowTime(assignment.last_location.captured_at)}` : " · позиция ещё не получена"}
                 </div>
               )}
               {assignment && (

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { CheckCircle2, CircleAlert, Loader2, MapPin, Truck } from "lucide-react";
@@ -70,6 +70,9 @@ export function DriverPage() {
   const [savingId, setSavingId] = useState<number | null>(null);
   const [trackingEnabled, setTrackingEnabled] = useState(false);
   const [locationMessage, setLocationMessage] = useState("");
+  const [locationDenied, setLocationDenied] = useState(false);
+  const trackingActiveRef = useRef(false);
+  const lastLocationSentAtRef = useRef(0);
   const [drafts, setDrafts] = useState<Record<number, {
     status: Status;
     actual_qty: number | "";
@@ -90,8 +93,41 @@ export function DriverPage() {
   });
 
   useEffect(() => {
+    if (!token || !navigator.geolocation) {
+      setLocationMessage("Этот браузер не поддерживает геолокацию");
+      return;
+    }
+    // Browser remembers a granted permission, so reopening the page starts GPS
+    // immediately and does not make the driver press the button again.
+    const startAutomatically = () => {
+      setLocationDenied(false);
+      setTrackingEnabled(true);
+      setLocationMessage("Запрашиваем разрешение на геолокацию…");
+    };
+    if (navigator.permissions?.query) {
+      navigator.permissions.query({ name: "geolocation" as PermissionName })
+        .then((permission) => {
+          if (permission.state === "denied") {
+            setLocationDenied(true);
+            setLocationMessage("Геолокация выключена в настройках браузера");
+          } else {
+            startAutomatically();
+          }
+        })
+        .catch(startAutomatically);
+    } else {
+      startAutomatically();
+    }
+  }, [token]);
+
+  useEffect(() => {
+    trackingActiveRef.current = trackingEnabled;
     if (!trackingEnabled || !token || !navigator.geolocation) return;
-    const sendLocation = () => navigator.geolocation.getCurrentPosition(async (position) => {
+    const sendLocation = async (position: GeolocationPosition) => {
+      if (!trackingActiveRef.current) return;
+      const now = Date.now();
+      if (now - lastLocationSentAtRef.current < 20_000) return;
+      lastLocationSentAtRef.current = now;
       try {
         const response = await fetch(`/api/driver/${encodeURIComponent(token)}/location`, {
           method: "POST",
@@ -107,14 +143,21 @@ export function DriverPage() {
       } catch {
         setLocationMessage("Не удалось отправить координаты — проверьте связь");
       }
-    }, () => setLocationMessage("Браузер не разрешил доступ к геолокации"), {
+    };
+    const watchId = navigator.geolocation.watchPosition(sendLocation, (error) => {
+      if (error.code === error.PERMISSION_DENIED) {
+        setLocationDenied(true);
+        setTrackingEnabled(false);
+        setLocationMessage("Геолокация выключена в настройках браузера");
+      } else {
+        setLocationMessage("Не удалось определить геолокацию — попробуйте ещё раз");
+      }
+    }, {
       enableHighAccuracy: false,
       maximumAge: 15000,
       timeout: 10000,
     });
-    sendLocation();
-    const timer = window.setInterval(sendLocation, 20000);
-    return () => window.clearInterval(timer);
+    return () => navigator.geolocation.clearWatch(watchId);
   }, [trackingEnabled, token]);
 
   const enableTracking = () => {
@@ -122,6 +165,8 @@ export function DriverPage() {
       setLocationMessage("Этот браузер не поддерживает геолокацию");
       return;
     }
+    setLocationDenied(false);
+    lastLocationSentAtRef.current = 0;
     setTrackingEnabled(true);
     setLocationMessage("Запрашиваем разрешение на геолокацию…");
   };
@@ -230,8 +275,8 @@ export function DriverPage() {
         <Card>
           <CardContent className="p-3 flex flex-wrap items-center justify-between gap-2">
             <div className="text-xs text-muted-foreground">{locationMessage || "Диспетчер может видеть позицию машины"}</div>
-            <Button size="sm" variant={trackingEnabled ? "secondary" : "outline"} onClick={enableTracking} disabled={trackingEnabled}>
-              {trackingEnabled ? "Геолокация включена" : "Разрешить геолокацию"}
+            <Button size={locationDenied ? "lg" : "sm"} className={locationDenied ? "w-full h-12" : ""} variant={trackingEnabled ? "secondary" : "outline"} onClick={enableTracking} disabled={trackingEnabled}>
+              {trackingEnabled ? "Геолокация включена" : locationDenied ? "Включить геолокацию" : "Включить геолокацию"}
             </Button>
           </CardContent>
         </Card>
