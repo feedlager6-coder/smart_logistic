@@ -3745,15 +3745,14 @@ async def startup():
         logger.warning(
             "YANDEX_GEOCODER_API_KEY not set — Yandex Geocoder disabled, falling back to Nominatim"
         )
-    init_db()
+    try:
+        init_db()
+        admin_id = seed_admin_user()  # migrates legacy NULL owner_id data to admin
+        seed_demo_data(owner_id=admin_id)  # seeds only if admin has no stores
+    except Exception as db_err:
+        logger.warning(f"Database setup during startup skipped or encountered error: {db_err}")
     if TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET and PUBLIC_APP_URL:
         threading.Thread(target=_configure_telegram_webhook, daemon=True).start()
-    # NOTE: migrate_moscow_stores() deliberately NOT called here.
-    # It was a one-time dev migration that ran when the DB held old Moscow demo data.
-    # Calling it on every startup is catastrophically dangerous for production clients
-    # in any Russian city with lat > 50 (Moscow, SPb, Novosibirsk, Yekaterinburg, etc.).
-    admin_id = seed_admin_user()  # migrates legacy NULL owner_id data to admin
-    seed_demo_data(owner_id=admin_id)  # seeds only if admin has no stores
 
     # ── Periodic in-memory cleanup ────────────────────────────────────────────
     t = threading.Thread(target=_memory_cleanup_loop, daemon=True)
@@ -3817,6 +3816,8 @@ def _memory_cleanup_loop() -> None:
 def migrate_moscow_stores():
     """Удаляем старые московские демо-магазины (lat > 50), сохраняя всё остальное."""
     conn = get_db()
+    if not conn:
+        return
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
         cur.execute(
@@ -3843,6 +3844,9 @@ def seed_demo_data(owner_id: int = None):
     """Seed demo stores and route sessions for a specific user (owner_id).
     Only seeds if that user has no stores yet."""
     conn = get_db()
+    if not conn:
+        logger.info("Database connection not available. Skipping seed_demo_data.")
+        return
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     if owner_id is not None:
         cur.execute("SELECT COUNT(*) as cnt FROM stores WHERE owner_id = %s", (owner_id,))
@@ -3935,6 +3939,9 @@ def seed_admin_user() -> Optional[int]:
         )
         return None
     conn = get_db()
+    if not conn:
+        logger.info("Database connection not available. Skipping seed_admin_user.")
+        return None
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
         # Use a PostgreSQL advisory lock to prevent race conditions on concurrent startup
