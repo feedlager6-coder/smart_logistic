@@ -1,10 +1,11 @@
-# Self-hosted OSRM Backend for Railway
+# Self-hosted OSRM Backend for Railway (Dagestan & SKFO / Russia)
 FROM ghcr.io/project-osrm/osrm-backend:latest
 
 WORKDIR /data
 
-# Download OSM data for Central Asia / CIS (or replace URL with your specific region from geofabrik.de)
-ARG MAP_URL="http://download.geofabrik.de/asia/kazakhstan-latest.osm.pbf"
+# Download OSM data for North Caucasus (Северо-Кавказский ФО: Дагестан, Чечня, Ставрополь и др.)
+# If you need all of Russia, you can change URL to: http://download.geofabrik.de/russia-latest.osm.pbf
+ARG MAP_URL="http://download.geofabrik.de/russia/north-caucasus-latest.osm.pbf"
 
 RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*
 RUN wget -O map.osm.pbf "${MAP_URL}" && \
@@ -16,3 +17,4 @@ RUN wget -O map.osm.pbf "${MAP_URL}" && \
 EXPOSE 5000
 
 ENTRYPOINT ["osrm-routed", "--algorithm", "mld", "/data/map.osrm"]
+
