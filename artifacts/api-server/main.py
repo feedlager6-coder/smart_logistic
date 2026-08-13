@@ -1785,15 +1785,21 @@ _db_pool: Optional[_psycopg2_pool.ThreadedConnectionPool] = None
 _db_pool_lock = threading.Lock()
 
 
-def _get_pool() -> _psycopg2_pool.ThreadedConnectionPool:
+def _get_pool() -> Optional[_psycopg2_pool.ThreadedConnectionPool]:
     """Return the shared connection pool, creating it on first call (thread-safe)."""
     global _db_pool
+    if not DATABASE_URL.strip():
+        return None
     if _db_pool is None:
         with _db_pool_lock:
             if _db_pool is None:
-                _db_pool = _psycopg2_pool.ThreadedConnectionPool(
-                    minconn=2, maxconn=15, **_db_connect_kwargs()
-                )
+                try:
+                    _db_pool = _psycopg2_pool.ThreadedConnectionPool(
+                        minconn=2, maxconn=15, **_db_connect_kwargs()
+                    )
+                except Exception as err:
+                    logging.warning(f"Could not connect to PostgreSQL database: {err}")
+                    return None
     return _db_pool
 
 
@@ -1847,33 +1853,34 @@ class _PooledConn:
                 pass
 
 
-def get_db() -> _PooledConn:
+def get_db() -> Optional[_PooledConn]:
     """Borrow a connection from the pool.
 
     Supports both URL and key=value DSN formats.
     Falls back to a direct connection if the pool is temporarily exhausted,
     so the server degrades gracefully rather than returning 500.
     """
+    if not DATABASE_URL.strip():
+        return None
     try:
         pool = _get_pool()
+        if pool is None:
+            return None
         raw = pool.getconn()
         raw.autocommit = False
         return _PooledConn(raw, pool)
-    except _psycopg2_pool.PoolError:
-        # Pool exhausted — open a direct connection as a safety valve.
-        logging.warning("DB pool exhausted — opening a direct connection")
-        kwargs = _db_connect_kwargs()
-        if "dsn" in kwargs:
-            conn = psycopg2.connect(kwargs["dsn"])
-        else:
-            conn = psycopg2.connect(**kwargs)
-        conn.autocommit = False
-        return conn  # type: ignore[return-value]
+    except Exception as err:
+        logging.warning(f"Could not acquire DB connection: {err}")
+        return None
 
 
 def init_db():
     conn = get_db()
-    cur = conn.cursor()
+    if not conn:
+        logging.warning("PostgreSQL connection not available. Skipping init_db.")
+        return
+    try:
+        cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS stores (
             id SERIAL PRIMARY KEY,
