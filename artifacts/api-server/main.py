@@ -1875,12 +1875,14 @@ def get_db() -> Optional[_PooledConn]:
 
 
 def init_db():
+    if not DATABASE_URL.strip():
+        logging.warning("DATABASE_URL is not configured. Skipping init_db.")
+        return
     conn = get_db()
     if not conn:
         logging.warning("PostgreSQL connection not available. Skipping init_db.")
         return
-    try:
-        cur = conn.cursor()
+    cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS stores (
             id SERIAL PRIMARY KEY,
