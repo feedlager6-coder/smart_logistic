@@ -306,22 +306,22 @@ export function DriverPage() {
   return (
     <div className="min-h-screen bg-muted/30 pb-8">
       <header className="bg-primary text-primary-foreground px-4 py-4 shadow-sm">
-        <div className="max-w-2xl mx-auto">
+        <div className="max-w-3xl mx-auto">
           <p className="text-xs opacity-75 uppercase tracking-wide">SmartRoute · рейс</p>
           <div className="flex items-center justify-between gap-3 mt-1">
-            <h1 className="text-xl font-bold truncate">{assignment.vehicle_name || "Маршрут доставки"}</h1>
+            <h1 className="text-xl sm:text-2xl font-bold truncate">{assignment.vehicle_name || "Маршрут доставки"}</h1>
             <Truck className="w-6 h-6 shrink-0" />
           </div>
           {assignment.driver_name && <p className="text-sm opacity-85 mt-1">Водитель: {assignment.driver_name}</p>}
           <div className="mt-3">
-            <div className="flex justify-between text-xs mb-1"><span>Прогресс</span><span>{assignment.completed_points} из {assignment.total_points}</span></div>
-            <div className="h-2 rounded-full bg-white/25 overflow-hidden"><div className="h-full bg-white rounded-full transition-all" style={{ width: `${progress}%` }} /></div>
+            <div className="flex justify-between text-xs mb-1"><span>Прогресс рейса</span><span>{assignment.completed_points} из {assignment.total_points} точек</span></div>
+            <div className="h-2.5 rounded-full bg-white/25 overflow-hidden"><div className="h-full bg-white rounded-full transition-all" style={{ width: `${progress}%` }} /></div>
           </div>
-          {assignment.next_stop && <p className="text-xs opacity-90 mt-2">Следующая точка: {assignment.next_stop.store_name}</p>}
+          {assignment.next_stop && <p className="text-xs opacity-90 mt-2 font-medium">Следующая точка: {assignment.next_stop.store_name}</p>}
         </div>
       </header>
 
-      <main className="max-w-2xl mx-auto p-4 space-y-3">
+      <main className="max-w-3xl mx-auto p-4 sm:p-6 space-y-4">
         {/* Geolocation status / prompt banner */}
         <Card className={locationDenied ? "border-destructive/40 bg-destructive/5" : trackingEnabled ? "border-emerald-200 bg-emerald-50/50" : ""}>
           <CardContent className="p-3.5 space-y-2">
@@ -370,41 +370,60 @@ export function DriverPage() {
 
         {/* Quick action bar: Direct button to navigate to current active stop with clean explanation */}
         {(() => {
+          const getPointNavUrl = (point?: { yandex_url?: string; lat?: number | null; lon?: number | null; address?: string }): string => {
+            if (!point) return "";
+            if (point.yandex_url && point.yandex_url.trim()) return point.yandex_url.trim();
+            if (point.lat && point.lon) return `https://yandex.ru/maps/?rtext=~${point.lat},${point.lon}&rtt=auto`;
+            if (point.address && point.address.trim()) return `https://yandex.ru/maps/?text=${encodeURIComponent(point.address.trim())}`;
+            return "";
+          };
+
           const activeStop = executions.find((e) => !terminalStatuses.has(draftFor(e).status));
           if (!activeStop) return null;
 
+          const activeNavUrl = getPointNavUrl(activeStop);
+
           return (
-            <Card className="border-primary/30 bg-primary/5 shadow-xs overflow-hidden">
-              <CardContent className="p-3.5">
-                <div className="flex items-center justify-between gap-3">
+            <Card className="border-2 border-primary/40 bg-primary/5 shadow-sm overflow-hidden">
+              <CardContent className="p-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5 text-xs font-bold text-primary">
-                      <Compass className="w-4 h-4 animate-spin shrink-0" style={{ animationDuration: "6s" }} />
-                      <span>СЛЕДУЮЩАЯ ТОЧКА: №{activeStop.visit_order}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 rounded-md bg-primary text-primary-foreground text-xs font-bold uppercase tracking-wide flex items-center gap-1">
+                        <Compass className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: "6s" }} />
+                        Следующая точка №{activeStop.visit_order}
+                      </span>
+                      <span className="text-xs font-semibold text-muted-foreground">
+                        Заказ: {activeStop.quantity} ед.
+                      </span>
                     </div>
-                    <div className="font-semibold text-sm text-foreground truncate mt-0.5">
+                    <div className="font-bold text-base text-foreground mt-1 truncate">
                       {activeStop.store_name}
                     </div>
-                    <div className="text-xs text-muted-foreground truncate flex items-center gap-1 mt-0.5">
-                      <MapPin className="w-3 h-3 shrink-0 opacity-70" />
-                      <span>{activeStop.address}</span>
+                    <div className="text-xs text-muted-foreground flex items-start gap-1 mt-0.5">
+                      <MapPin className="w-3.5 h-3.5 mt-0.5 shrink-0 text-primary" />
+                      <span className="break-words">{activeStop.address}</span>
                     </div>
                   </div>
 
-                  {activeStop.yandex_url && (
+                  <div className="shrink-0 pt-1 sm:pt-0">
                     <Button
                       size="default"
-                      className="shrink-0 h-11 px-4 font-bold shadow-xs bg-primary hover:bg-primary/90 text-primary-foreground gap-1.5"
-                      onClick={() => window.open(activeStop.yandex_url, "_blank")}
+                      className="w-full sm:w-auto h-11 px-5 font-bold shadow-md bg-primary hover:bg-primary/90 text-primary-foreground gap-2 text-sm"
+                      onClick={() => {
+                        if (activeNavUrl) {
+                          window.open(activeNavUrl, "_blank");
+                        }
+                      }}
+                      disabled={!activeNavUrl}
                     >
                       <Navigation className="w-4 h-4" />
-                      Поехать
+                      Поехать к точке №{activeStop.visit_order}
                     </Button>
-                  )}
+                  </div>
                 </div>
-                <div className="mt-2.5 pt-2 border-t border-primary/15 flex items-center justify-between text-[11px] text-muted-foreground">
-                  <span>💡 Навигатор построит маршрут от вашего текущего положения</span>
-                  <span className="font-medium text-foreground">Заказ: {activeStop.quantity} ед.</span>
+                <div className="mt-3 pt-2.5 border-t border-primary/15 text-[11px] text-muted-foreground flex items-center gap-1">
+                  <span>💡 Нажмите кнопку выше — Яндекс Навигатор построит маршрут от вашего текущего положения.</span>
                 </div>
               </CardContent>
             </Card>
@@ -413,15 +432,28 @@ export function DriverPage() {
 
         {/* List of stops */}
         {(() => {
+          const getPointNavUrl = (point?: { yandex_url?: string; lat?: number | null; lon?: number | null; address?: string }): string => {
+            if (!point) return "";
+            if (point.yandex_url && point.yandex_url.trim()) return point.yandex_url.trim();
+            if (point.lat && point.lon) return `https://yandex.ru/maps/?rtext=~${point.lat},${point.lon}&rtt=auto`;
+            if (point.address && point.address.trim()) return `https://yandex.ru/maps/?text=${encodeURIComponent(point.address.trim())}`;
+            return "";
+          };
+
           const activeExecutionId = executions.find((e) => !terminalStatuses.has(draftFor(e).status))?.id;
 
-          const parseProductItems = (productsStr?: string): string[] => {
+          const parseProductItems = (productsStr?: string, quantity?: number): string[] => {
             if (!productsStr || !productsStr.trim()) return [];
-            const lines = productsStr.split(/[\n;]+/).map((s) => s.trim()).filter(Boolean);
+            const trimmed = productsStr.trim();
+            // If the product string is just equal to the numeric quantity or single digit, ignore to prevent duplicate "1" / "1" labels
+            if (/^\d+(\.\d+)?$/.test(trimmed)) {
+              return [];
+            }
+            const lines = trimmed.split(/[\n;]+/).map((s) => s.trim()).filter(Boolean);
             if (lines.length > 1) return lines;
-            const commaItems = productsStr.split(/,\s*(?=[А-ЯA-Z0-9«"№])/).map((s) => s.trim()).filter(Boolean);
+            const commaItems = trimmed.split(/,\s*(?=[А-ЯA-Z0-9«"№])/).map((s) => s.trim()).filter(Boolean);
             if (commaItems.length > 1) return commaItems;
-            return [productsStr.trim()];
+            return [trimmed];
           };
 
           return executions.map((execution) => {
@@ -430,9 +462,10 @@ export function DriverPage() {
             const isCurrentActive = execution.id === activeExecutionId;
             const hasPhone = Boolean(execution.store_phone && execution.store_phone.trim());
             const cleanPhone = execution.store_phone ? execution.store_phone.replace(/[^\d+]/g, "") : "";
-            const productItems = parseProductItems(execution.products);
+            const productItems = parseProductItems(execution.products, execution.quantity);
             const hasExplicitProducts = productItems.length > 0;
-            const isProductsExpanded = expandedProducts[execution.id] ?? (isCurrentActive && hasExplicitProducts);
+            const isProductsExpanded = expandedProducts[execution.id] ?? false;
+            const navUrl = getPointNavUrl(execution);
 
             return (
               <Card
@@ -442,23 +475,25 @@ export function DriverPage() {
                     ? "border-2 border-primary shadow-md ring-2 ring-primary/20 bg-card"
                     : isTerminal
                       ? "border-emerald-200 bg-emerald-50/20 opacity-90"
-                      : "border-border"
+                      : "border-border bg-card"
                 }`}
               >
                 {isCurrentActive && (
-                  <div className="flex items-center justify-between px-3.5 py-1.5 bg-primary text-primary-foreground text-xs font-bold tracking-wide">
+                  <div className="flex items-center justify-between px-4 py-2 bg-primary text-primary-foreground text-xs font-bold tracking-wide">
                     <div className="flex items-center gap-1.5">
                       <Compass className="w-4 h-4 animate-spin" style={{ animationDuration: "6s" }} />
                       <span>ТЕКУЩАЯ ТОЧКА ДОСТАВКИ</span>
                     </div>
-                    <span className="text-[11px] font-medium opacity-90">Точка №{execution.visit_order}</span>
+                    <span className="text-xs font-semibold bg-white/20 px-2 py-0.5 rounded">
+                      Точка №{execution.visit_order}
+                    </span>
                   </div>
                 )}
 
-                <CardHeader className="pb-2 pt-3.5">
+                <CardHeader className="pb-2 pt-4 px-4 sm:px-5">
                   <div className="flex items-start gap-3">
                     <div
-                      className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
+                      className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${
                         isTerminal
                           ? "bg-emerald-100 text-emerald-700"
                           : isCurrentActive
@@ -466,139 +501,133 @@ export function DriverPage() {
                             : "bg-muted text-muted-foreground font-semibold"
                       }`}
                     >
-                      {isTerminal ? <CheckCircle2 className="w-4 h-4" /> : <span>{execution.visit_order}</span>}
+                      {isTerminal ? <CheckCircle2 className="w-5 h-5" /> : <span className="text-sm">{execution.visit_order}</span>}
                     </div>
 
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-baseline justify-between gap-2">
-                        <CardTitle className="text-base font-semibold">{execution.store_name}</CardTitle>
+                      <div className="flex flex-wrap items-baseline justify-between gap-2">
+                        <CardTitle className="text-base sm:text-lg font-bold">{execution.store_name}</CardTitle>
                         {isTerminal && (
-                          <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full shrink-0">
+                          <span className="text-xs font-semibold text-emerald-700 bg-emerald-100 px-2.5 py-0.5 rounded-full shrink-0">
                             {statusLabels[draft.status]}
                           </span>
                         )}
                       </div>
 
-                      <p className="text-sm text-muted-foreground flex items-start gap-1 mt-1">
-                        <MapPin className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                        <span className="break-words">{execution.address}</span>
+                      <p className="text-sm text-muted-foreground flex items-start gap-1.5 mt-1">
+                        <MapPin className="w-4 h-4 mt-0.5 shrink-0 text-muted-foreground/80" />
+                        <span className="break-words leading-relaxed">{execution.address}</span>
                       </p>
                       {execution.arrive_by && (
                         <p className="text-xs text-primary font-medium mt-1">Ориентир / время: {execution.arrive_by}</p>
                       )}
 
                       {/* Customer & Phone info */}
-                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <div className="mt-2.5 flex flex-wrap items-center gap-2.5">
                         {execution.store_client && (
-                          <div className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                          <div className="inline-flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/40 px-2.5 py-1 rounded-md border">
                             <User className="w-3.5 h-3.5 text-muted-foreground/70" />
-                            <span>Клиент: <strong className="text-foreground font-medium">{execution.store_client}</strong></span>
+                            <span>Клиент: <strong className="text-foreground font-semibold">{execution.store_client}</strong></span>
                           </div>
                         )}
                         {hasPhone ? (
                           <a
                             href={`tel:${cleanPhone}`}
-                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-semibold hover:bg-emerald-100 transition-colors"
+                            className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-bold hover:bg-emerald-100 transition-colors shadow-2xs"
                           >
                             <PhoneCall className="w-3.5 h-3.5" />
                             <span>{execution.store_phone}</span>
                           </a>
                         ) : (
-                          <span className="text-[11px] text-muted-foreground italic flex items-center gap-1">
+                          <span className="text-[11px] text-muted-foreground italic flex items-center gap-1 px-2 py-0.5">
                             <Phone className="w-3 h-3 opacity-50" />
                             Телефон не указан
                           </span>
                         )}
                       </div>
 
-                      {/* Goods / Order Composition Block */}
-                      <div className="mt-3 rounded-lg border bg-muted/25 overflow-hidden">
-                        <div className="p-2.5 flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-1.5 min-w-0">
+                      {/* Goods & Order Info - Spacious, Clear, No Overlaps */}
+                      <div className="mt-3.5 rounded-xl border bg-muted/20 p-3 space-y-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2 min-w-0">
                             <Package className="w-4 h-4 text-primary shrink-0" />
-                            <div className="min-w-0">
-                              <div className="text-xs font-semibold text-foreground flex items-center gap-1.5">
-                                <span>Товары по заявке</span>
-                                {hasExplicitProducts && (
-                                  <span className="text-[10px] font-medium text-muted-foreground bg-background px-1.5 py-0.2 rounded border">
-                                    {productItems.length} поз.
-                                  </span>
-                                )}
-                              </div>
-                              {!hasExplicitProducts && (
-                                <div className="text-[11px] text-muted-foreground truncate">
-                                  Товары по накладной
-                                </div>
-                              )}
-                            </div>
-                          </div>
-
-                          <div className="flex items-center gap-2 shrink-0">
-                            <div className="bg-background px-2.5 py-1 rounded-md border text-right shadow-2xs">
-                              <span className="text-[11px] text-muted-foreground mr-1">Кол-во:</span>
-                              <span className="text-sm font-black text-primary">
-                                {execution.quantity}
+                            <span className="text-xs font-semibold text-foreground">
+                              Заказ к выгрузке:
+                            </span>
+                            {hasExplicitProducts && productItems.length > 1 && (
+                              <span className="text-[11px] font-medium text-muted-foreground bg-background px-2 py-0.5 rounded-full border">
+                                {productItems.length} поз.
                               </span>
-                            </div>
-
-                            {hasExplicitProducts && (
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                className="h-7 px-2 text-xs font-medium bg-background hover:bg-muted text-foreground"
-                                onClick={() =>
-                                  setExpandedProducts((prev) => ({
-                                    ...prev,
-                                    [execution.id]: !isProductsExpanded,
-                                  }))
-                                }
-                              >
-                                {isProductsExpanded ? (
-                                  <>
-                                    Скрыть <ChevronUp className="w-3.5 h-3.5 ml-1" />
-                                  </>
-                                ) : (
-                                  <>
-                                    Состав <ChevronDown className="w-3.5 h-3.5 ml-1" />
-                                  </>
-                                )}
-                              </Button>
                             )}
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0 bg-background px-3 py-1 rounded-lg border shadow-2xs">
+                            <span className="text-xs text-muted-foreground font-medium">Общее кол-во:</span>
+                            <span className="text-base font-black text-primary">{execution.quantity}</span>
                           </div>
                         </div>
 
-                        {/* Expandable list of goods */}
-                        {isProductsExpanded && hasExplicitProducts && (
-                          <div className="px-3 pb-3 pt-1 border-t bg-background space-y-1.5">
-                            <div className="text-[11px] font-semibold text-muted-foreground mb-1">
-                              Перечень позиций по накладной:
-                            </div>
-                            <div className="space-y-1 text-xs">
-                              {productItems.map((item, idx) => (
-                                <div
-                                  key={idx}
-                                  className="flex items-start gap-2 p-1.5 rounded-md bg-muted/40 border border-muted/60"
-                                >
-                                  <span className="w-4 h-4 rounded-full bg-primary/10 text-primary text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">
-                                    {idx + 1}
-                                  </span>
-                                  <span className="text-foreground flex-1 break-words font-medium text-xs">
-                                    {item}
-                                  </span>
+                        {hasExplicitProducts ? (
+                          <div className="pt-1 space-y-1.5">
+                            {productItems.length === 1 ? (
+                              <div className="text-xs font-medium text-foreground bg-background p-2.5 rounded-lg border flex items-center gap-2">
+                                <span className="text-primary font-bold">📦</span>
+                                <span className="flex-1 break-words">{productItems[0]}</span>
+                              </div>
+                            ) : (
+                              <>
+                                <div className="flex items-center justify-between pt-0.5">
+                                  <span className="text-[11px] text-muted-foreground font-medium">Список позиций:</span>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 px-2 text-[11px] text-primary font-semibold hover:bg-background"
+                                    onClick={() =>
+                                      setExpandedProducts((prev) => ({
+                                        ...prev,
+                                        [execution.id]: !isProductsExpanded,
+                                      }))
+                                    }
+                                  >
+                                    {isProductsExpanded ? (
+                                      <>Скрыть состав <ChevronUp className="w-3 h-3 ml-1" /></>
+                                    ) : (
+                                      <>Показать все позиции ({productItems.length}) <ChevronDown className="w-3 h-3 ml-1" /></>
+                                    )}
+                                  </Button>
                                 </div>
-                              ))}
-                            </div>
+                                {isProductsExpanded && (
+                                  <div className="space-y-1.5 pt-1">
+                                    {productItems.map((item, idx) => (
+                                      <div
+                                        key={idx}
+                                        className="flex items-start gap-2 p-2 rounded-lg bg-background border text-xs font-medium text-foreground"
+                                      >
+                                        <span className="w-4 h-4 rounded-full bg-primary/10 text-primary text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">
+                                          {idx + 1}
+                                        </span>
+                                        <span className="flex-1 break-words leading-relaxed">{item}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="text-xs text-muted-foreground bg-background/70 px-3 py-2 rounded-lg border border-dashed flex items-center gap-2">
+                            <span>📋</span>
+                            <span>Товары по накладной (согласно сопроводительным документам)</span>
                           </div>
                         )}
 
                         {isTerminal && (
-                          <div className="px-3 py-1.5 bg-muted/40 border-t text-[11px] flex items-center justify-between text-muted-foreground">
+                          <div className="pt-2 border-t flex items-center justify-between text-xs text-muted-foreground">
                             <span>
-                              Факт: <strong className="text-foreground font-semibold">{execution.actual_qty ?? 0}</strong>
+                              Фактически сдано: <strong className="text-foreground font-bold">{execution.actual_qty ?? 0}</strong>
                             </span>
                             {execution.shortfall_qty > 0 && (
-                              <span className="text-destructive font-semibold">
+                              <span className="text-destructive font-bold">
                                 Недовоз: {execution.shortfall_qty}
                               </span>
                             )}
@@ -610,7 +639,7 @@ export function DriverPage() {
                   </div>
                 </CardHeader>
 
-                <CardContent className="space-y-3 pt-2">
+                <CardContent className="space-y-3 pt-2 px-4 sm:px-5 pb-5">
                   <div className="space-y-2">
                     <span className="text-xs font-semibold text-muted-foreground">Действие по доставке</span>
                     <div className="grid grid-cols-2 gap-2">
@@ -738,7 +767,7 @@ export function DriverPage() {
                       </Button>
                     )}
 
-                    {execution.yandex_url && (
+                    {navUrl && (
                       <Button
                         type="button"
                         variant={isCurrentActive ? "default" : "outline"}
@@ -747,10 +776,10 @@ export function DriverPage() {
                             ? "bg-primary text-primary-foreground font-bold shadow-xs hover:bg-primary/90"
                             : ""
                         }`}
-                        onClick={() => window.open(execution.yandex_url, "_blank")}
+                        onClick={() => window.open(navUrl, "_blank")}
                       >
                         <Navigation className="w-4 h-4 mr-1.5" />
-                        {isCurrentActive ? "Поехать к точке" : "Навигация"}
+                        {isCurrentActive ? "Поехать к точке" : "Маршрут"}
                       </Button>
                     )}
 

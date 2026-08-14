@@ -3362,10 +3362,10 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: str, dispatcher: 
         keyboard.append([{"text": "📦 Исполнение рейса", "callback_data": f"tg:execution:{assignment_id}"}])
     if navigation_urls:
         if len(navigation_urls) == 1:
-            keyboard.append([{"text": "🗺 Общий обзор всех точек", "url": navigation_urls[0]}])
+            keyboard.append([{"text": "🗺 Обзор всех точек", "url": navigation_urls[0]}])
         else:
             for index, url in enumerate(navigation_urls, start=1):
-                keyboard.append([{"text": f"🗺 Обзор (часть {index})", "url": url}])
+                keyboard.append([{"text": f"🗺 Обзор всех точек (часть {index})", "url": url}])
     username = (dispatcher.get("dispatcher_telegram_username") or "").strip().lstrip("@")
     phone = _normalize_driver_phone(dispatcher.get("dispatcher_phone") or "")
     if username:
