@@ -19,6 +19,7 @@ import {
   Compass,
   Undo2,
   ListChecks,
+  Clock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -374,60 +375,93 @@ export function DriverPage() {
 
         {/* Quick action bar: Direct button to navigate to current active stop with clean explanation */}
         {(() => {
-          const getPointNavUrl = (point?: { yandex_url?: string; lat?: number | null; lon?: number | null; address?: string }): string => {
-            if (!point) return "";
-            if (point.yandex_url && point.yandex_url.trim()) return point.yandex_url.trim();
-            if (point.lat && point.lon) return `https://yandex.ru/maps/?rtext=~${point.lat},${point.lon}&rtt=auto`;
-            if (point.address && point.address.trim()) return `https://yandex.ru/maps/?text=${encodeURIComponent(point.address.trim())}`;
-            return "";
-          };
-
           const activeStop = executions.find((e) => !terminalStatuses.has(draftFor(e).status));
           if (!activeStop) return null;
 
-          const activeNavUrl = getPointNavUrl(activeStop);
+          const openNavigatorApp = () => {
+            const lat = activeStop.lat;
+            const lon = activeStop.lon;
+            const address = activeStop.address ? activeStop.address.trim() : "";
+
+            if (lat && lon) {
+              // Deep link to Yandex Navigator app directly
+              const naviAppUrl = `yandexnavi://build_route_on_map?lat_to=${lat}&lon_to=${lon}`;
+              const yandexMapsAppUrl = `yandexmaps://maps.yandex.ru/?rtext=~${lat},${lon}&rtt=auto`;
+              const webUrl = `https://yandex.ru/maps/?rtext=~${lat},${lon}&rtt=auto`;
+
+              const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+              if (isMobile) {
+                // Trigger deep link directly to open native Yandex Navigator app
+                window.location.href = naviAppUrl;
+                // Fallback to web only if app failed to open after 1.8s
+                setTimeout(() => {
+                  if (document.hidden) return;
+                  window.location.href = yandexMapsAppUrl;
+                }, 1200);
+                return;
+              }
+              window.open(webUrl, "_blank");
+              return;
+            }
+
+            if (address) {
+              const encoded = encodeURIComponent(address);
+              const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+              if (isMobile) {
+                window.location.href = `yandexnavi://search?text=${encoded}`;
+                return;
+              }
+              window.open(`https://yandex.ru/maps/?text=${encoded}`, "_blank");
+              return;
+            }
+
+            if (activeStop.yandex_url) {
+              window.open(activeStop.yandex_url, "_blank");
+            }
+          };
 
           return (
-            <Card className="border-2 border-primary/40 bg-primary/5 shadow-sm overflow-hidden">
-              <CardContent className="p-4">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div className="min-w-0 flex-1">
+            <Card className="border-2 border-primary/50 bg-gradient-to-r from-primary/10 via-primary/5 to-background shadow-md overflow-hidden">
+              <CardContent className="p-4 sm:p-5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="min-w-0 flex-1 space-y-1.5">
                     <div className="flex items-center gap-2">
-                      <span className="px-2 py-0.5 rounded-md bg-primary text-primary-foreground text-xs font-bold uppercase tracking-wide flex items-center gap-1">
+                      <span className="px-2.5 py-1 rounded-md bg-primary text-primary-foreground text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-2xs">
                         <Compass className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: "6s" }} />
-                        Следующая точка №{activeStop.visit_order}
+                        Следующая цель: Точка №{activeStop.visit_order}
                       </span>
-                      <span className="text-xs font-semibold text-muted-foreground">
-                        Заказ: {activeStop.quantity} ед.
+                      <span className="text-xs font-bold text-foreground bg-background px-2.5 py-0.5 rounded-md border shadow-2xs">
+                        К сдаче: {activeStop.quantity} ед.
                       </span>
                     </div>
-                    <div className="font-bold text-base text-foreground mt-1 truncate">
+
+                    <div className="font-extrabold text-lg text-foreground truncate">
                       {activeStop.store_name}
                     </div>
-                    <div className="text-xs text-muted-foreground flex items-start gap-1 mt-0.5">
-                      <MapPin className="w-3.5 h-3.5 mt-0.5 shrink-0 text-primary" />
-                      <span className="break-words">{activeStop.address}</span>
+
+                    <div className="text-xs text-muted-foreground flex items-start gap-1.5 leading-relaxed">
+                      <MapPin className="w-4 h-4 mt-0.5 shrink-0 text-primary" />
+                      <span className="break-words font-medium">{activeStop.address}</span>
                     </div>
                   </div>
 
                   <div className="shrink-0 pt-1 sm:pt-0">
                     <Button
-                      size="default"
-                      className="w-full sm:w-auto h-11 px-5 font-bold shadow-md bg-primary hover:bg-primary/90 text-primary-foreground gap-2 text-sm"
-                      onClick={() => {
-                        if (activeNavUrl) {
-                          window.open(activeNavUrl, "_blank");
-                        }
-                      }}
-                      disabled={!activeNavUrl}
+                      size="lg"
+                      className="w-full sm:w-auto h-12 px-6 font-bold shadow-md bg-primary hover:bg-primary/90 text-primary-foreground gap-2.5 text-base rounded-xl transition-transform active:scale-95"
+                      onClick={openNavigatorApp}
                     >
-                      <Navigation className="w-4 h-4" />
-                      Поехать к точке №{activeStop.visit_order}
+                      <Navigation className="w-5 h-5 fill-current" />
+                      Поехать в Навигаторе
                     </Button>
                   </div>
                 </div>
-                <div className="mt-3 pt-2.5 border-t border-primary/15 text-[11px] text-muted-foreground flex items-center gap-1">
-                  <span>💡 Нажмите кнопку выше — Яндекс Навигатор построит маршрут от вашего текущего положения.</span>
+
+                <div className="mt-3.5 pt-2.5 border-t border-primary/15 flex items-center justify-between text-xs text-muted-foreground">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-primary font-bold">📲</span>
+                    <span>Открывает приложение <strong>Яндекс Навигатор</strong> сразу с маршрутом от вашей машины</span>
+                  </div>
                 </div>
               </CardContent>
             </Card>
@@ -623,42 +657,52 @@ export function DriverPage() {
                         )}
                       </div>
 
-                      {/* Goods & Order Info - Spacious, Clear, No Overlaps */}
-                      <div className="mt-3.5 rounded-xl border bg-muted/20 p-3 space-y-2">
-                        <div className="flex items-center justify-between gap-3">
+                      {/* Goods & Order Info - High-Quality, Spacious, Beautiful Design */}
+                      <div className="mt-4 rounded-xl border border-primary/20 bg-gradient-to-br from-muted/30 via-background to-muted/20 p-4 space-y-3 shadow-2xs">
+                        <div className="flex flex-wrap items-center justify-between gap-3 pb-2 border-b border-border/60">
                           <div className="flex items-center gap-2 min-w-0">
-                            <Package className="w-4 h-4 text-primary shrink-0" />
-                            <span className="text-xs font-semibold text-foreground">
-                              Заказ к выгрузке:
-                            </span>
-                            {hasExplicitProducts && productItems.length > 1 && (
-                              <span className="text-[11px] font-medium text-muted-foreground bg-background px-2 py-0.5 rounded-full border">
-                                {productItems.length} поз.
+                            <div className="w-7 h-7 rounded-lg bg-primary/10 text-primary flex items-center justify-center shrink-0">
+                              <Package className="w-4 h-4" />
+                            </div>
+                            <div>
+                              <span className="text-xs font-bold text-foreground uppercase tracking-wide">
+                                Заказ к выгрузке
                               </span>
-                            )}
+                              {hasExplicitProducts && (
+                                <p className="text-[11px] text-muted-foreground">
+                                  {productItems.length === 1 ? "1 наименование" : `${productItems.length} позиций в заказе`}
+                                </p>
+                              )}
+                            </div>
                           </div>
-                          <div className="flex items-center gap-1.5 shrink-0 bg-background px-3 py-1 rounded-lg border shadow-2xs">
-                            <span className="text-xs text-muted-foreground font-medium">Общее кол-во:</span>
-                            <span className="text-base font-black text-primary">{execution.quantity}</span>
+
+                          <div className="flex items-center gap-2 bg-primary/10 border border-primary/25 px-3.5 py-1.5 rounded-lg shadow-2xs">
+                            <span className="text-xs font-semibold text-primary/80">Всего к сдаче:</span>
+                            <span className="text-base font-black text-primary tracking-tight">
+                              {execution.quantity} <span className="text-xs font-bold">ед.</span>
+                            </span>
                           </div>
                         </div>
 
                         {hasExplicitProducts ? (
-                          <div className="pt-1 space-y-1.5">
+                          <div className="space-y-2">
                             {productItems.length === 1 ? (
-                              <div className="text-xs font-medium text-foreground bg-background p-2.5 rounded-lg border flex items-center gap-2">
-                                <span className="text-primary font-bold">📦</span>
-                                <span className="flex-1 break-words">{productItems[0]}</span>
+                              <div className="text-xs font-medium text-foreground bg-background p-3 rounded-lg border flex items-start gap-2.5 shadow-2xs">
+                                <span className="text-base leading-none mt-0.5">📦</span>
+                                <div className="flex-1 min-w-0">
+                                  <span className="font-semibold text-foreground break-words leading-relaxed">{productItems[0]}</span>
+                                  <span className="text-muted-foreground block text-[11px] mt-0.5 font-medium">Количество: {execution.quantity} ед.</span>
+                                </div>
                               </div>
                             ) : (
-                              <>
-                                <div className="flex items-center justify-between pt-0.5">
-                                  <span className="text-[11px] text-muted-foreground font-medium">Список позиций:</span>
+                              <div className="space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-xs text-muted-foreground font-semibold">Список товарных позиций:</span>
                                   <Button
                                     type="button"
                                     variant="ghost"
                                     size="sm"
-                                    className="h-6 px-2 text-[11px] text-primary font-semibold hover:bg-background"
+                                    className="h-6 px-2 text-xs text-primary font-bold hover:bg-primary/10"
                                     onClick={() =>
                                       setExpandedProducts((prev) => ({
                                         ...prev,
@@ -667,45 +711,74 @@ export function DriverPage() {
                                     }
                                   >
                                     {isProductsExpanded ? (
-                                      <>Скрыть состав <ChevronUp className="w-3 h-3 ml-1" /></>
+                                      <>Свернуть список <ChevronUp className="w-3.5 h-3.5 ml-1" /></>
                                     ) : (
-                                      <>Показать все позиции ({productItems.length}) <ChevronDown className="w-3 h-3 ml-1" /></>
+                                      <>Развернуть все позиции ({productItems.length}) <ChevronDown className="w-3.5 h-3.5 ml-1" /></>
                                     )}
                                   </Button>
                                 </div>
-                                {isProductsExpanded && (
-                                  <div className="space-y-1.5 pt-1">
+
+                                {isProductsExpanded ? (
+                                  <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
                                     {productItems.map((item, idx) => (
                                       <div
                                         key={idx}
-                                        className="flex items-start gap-2 p-2 rounded-lg bg-background border text-xs font-medium text-foreground"
+                                        className="flex items-start gap-2.5 p-2.5 rounded-lg bg-background border text-xs font-medium text-foreground shadow-2xs"
                                       >
-                                        <span className="w-4 h-4 rounded-full bg-primary/10 text-primary text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">
+                                        <span className="w-5 h-5 rounded-md bg-primary/10 text-primary text-[11px] font-bold flex items-center justify-center shrink-0 mt-0.5">
                                           {idx + 1}
                                         </span>
                                         <span className="flex-1 break-words leading-relaxed">{item}</span>
                                       </div>
                                     ))}
                                   </div>
+                                ) : (
+                                  <div className="space-y-1.5">
+                                    {productItems.slice(0, 2).map((item, idx) => (
+                                      <div
+                                        key={idx}
+                                        className="flex items-start gap-2 p-2 rounded-lg bg-background/80 border text-xs font-medium text-foreground"
+                                      >
+                                        <span className="w-4 h-4 rounded bg-muted text-muted-foreground text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">
+                                          {idx + 1}
+                                        </span>
+                                        <span className="flex-1 truncate">{item}</span>
+                                      </div>
+                                    ))}
+                                    {productItems.length > 2 && (
+                                      <button
+                                        type="button"
+                                        className="w-full text-center py-1 text-xs text-primary font-semibold hover:underline bg-background/50 rounded border border-dashed"
+                                        onClick={() =>
+                                          setExpandedProducts((prev) => ({
+                                            ...prev,
+                                            [execution.id]: true,
+                                          }))
+                                        }
+                                      >
+                                        + ещё {productItems.length - 2} поз. (нажмите чтобы открыть)
+                                      </button>
+                                    )}
+                                  </div>
                                 )}
-                              </>
+                              </div>
                             )}
                           </div>
                         ) : (
-                          <div className="text-xs text-muted-foreground bg-background/70 px-3 py-2 rounded-lg border border-dashed flex items-center gap-2">
-                            <span>📋</span>
-                            <span>Товары по накладной (согласно сопроводительным документам)</span>
+                          <div className="text-xs text-muted-foreground bg-background p-3 rounded-lg border border-dashed flex items-center gap-2.5">
+                            <span className="text-base">📋</span>
+                            <span className="font-medium">Товары по товарно-сопроводительной накладной (ТТН / УПД)</span>
                           </div>
                         )}
 
                         {isTerminal && (
                           <div className="pt-2 border-t flex items-center justify-between text-xs text-muted-foreground">
                             <span>
-                              Фактически сдано: <strong className="text-foreground font-bold">{execution.actual_qty ?? 0}</strong>
+                              Фактически сдано: <strong className="text-foreground font-bold">{execution.actual_qty ?? 0} ед.</strong>
                             </span>
                             {execution.shortfall_qty > 0 && (
-                              <span className="text-destructive font-bold">
-                                Недовоз: {execution.shortfall_qty}
+                              <span className="text-destructive font-bold bg-destructive/10 px-2 py-0.5 rounded">
+                                Недовоз: {execution.shortfall_qty} ед.
                               </span>
                             )}
                           </div>
@@ -871,12 +944,12 @@ export function DriverPage() {
                     required={draft.status === "rescheduled"}
                   />
 
-                  <div className="flex flex-wrap gap-2 pt-1">
+                  <div className="flex flex-wrap gap-2.5 pt-1.5 items-center">
                     {hasPhone && (
                       <Button
                         type="button"
                         variant="outline"
-                        className="flex-1 min-w-[110px] border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+                        className="flex-1 min-w-[110px] h-11 border-emerald-300 text-emerald-700 hover:bg-emerald-50 font-semibold"
                         onClick={() => {
                           window.location.href = `tel:${cleanPhone}`;
                         }}
@@ -886,24 +959,61 @@ export function DriverPage() {
                       </Button>
                     )}
 
-                    {navUrl && (
+                    {isCurrentActive ? (
                       <Button
                         type="button"
-                        variant={isCurrentActive ? "default" : "outline"}
-                        className={`flex-1 min-w-[120px] ${
-                          isCurrentActive
-                            ? "bg-primary text-primary-foreground font-bold shadow-xs hover:bg-primary/90"
-                            : ""
-                        }`}
-                        onClick={() => window.open(navUrl, "_blank")}
+                        className="flex-1 min-w-[150px] h-11 bg-primary text-primary-foreground font-bold shadow-md hover:bg-primary/90 text-sm rounded-lg"
+                        onClick={() => {
+                          const lat = execution.lat;
+                          const lon = execution.lon;
+                          const address = execution.address ? execution.address.trim() : "";
+
+                          if (lat && lon) {
+                            const naviAppUrl = `yandexnavi://build_route_on_map?lat_to=${lat}&lon_to=${lon}`;
+                            const yandexMapsAppUrl = `yandexmaps://maps.yandex.ru/?rtext=~${lat},${lon}&rtt=auto`;
+                            const webUrl = `https://yandex.ru/maps/?rtext=~${lat},${lon}&rtt=auto`;
+
+                            const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+                            if (isMobile) {
+                              window.location.href = naviAppUrl;
+                              setTimeout(() => {
+                                if (document.hidden) return;
+                                window.location.href = yandexMapsAppUrl;
+                              }, 1200);
+                              return;
+                            }
+                            window.open(webUrl, "_blank");
+                            return;
+                          }
+
+                          if (address) {
+                            const encoded = encodeURIComponent(address);
+                            const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+                            if (isMobile) {
+                              window.location.href = `yandexnavi://search?text=${encoded}`;
+                              return;
+                            }
+                            window.open(`https://yandex.ru/maps/?text=${encoded}`, "_blank");
+                            return;
+                          }
+
+                          if (execution.yandex_url) {
+                            window.open(execution.yandex_url, "_blank");
+                          }
+                        }}
                       >
-                        <Navigation className="w-4 h-4 mr-1.5" />
-                        {isCurrentActive ? "Поехать к точке" : "Маршрут"}
+                        <Navigation className="w-4 h-4 mr-1.5 fill-current" />
+                        Поехать в Навигаторе
                       </Button>
-                    )}
+                    ) : !isTerminal ? (
+                      <div className="flex-1 min-w-[140px] h-11 flex items-center justify-center gap-1.5 text-xs font-semibold text-muted-foreground bg-muted/40 rounded-lg px-3 border border-dashed">
+                        <Clock className="w-3.5 h-3.5 text-muted-foreground/70" />
+                        <span>Точка №{execution.visit_order} (в очереди)</span>
+                      </div>
+                    ) : null}
 
                     <Button
-                      className="flex-1 min-w-[130px] font-semibold"
+                      className="flex-1 min-w-[130px] h-11 font-bold text-sm"
                       onClick={() => saveExecution(execution)}
                       disabled={savingId === execution.id}
                     >
