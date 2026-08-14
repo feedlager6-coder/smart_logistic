@@ -107,6 +107,17 @@ function readFollowUpOrderState(sessionId: number): FollowUpOrderState {
   }
 }
 
+function readIssuedLinksState(sessionId: number): Record<number, { driver_url: string; whatsapp_url: string }> {
+  try {
+    const raw = localStorage.getItem(`smartroute_issued_links_${sessionId}`);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === "object") ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 function formatFollowUpDate(value: string): string {
   return new Date(`${value}T00:00:00`).toLocaleDateString("ru-RU");
 }
@@ -151,10 +162,13 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
   const [driverNames, setDriverNames] = useState<Record<number, string>>({});
   const [driverIds, setDriverIds] = useState<Record<number, string>>({});
   const [creatingRoute, setCreatingRoute] = useState<number | null>(null);
+  const [sharingRoute, setSharingRoute] = useState<number | null>(null);
   const [sendingAllDrivers, setSendingAllDrivers] = useState(false);
   const [sendingTelegram, setSendingTelegram] = useState(false);
   const [copiedAssignment, setCopiedAssignment] = useState<number | null>(null);
-  const [issuedLinks, setIssuedLinks] = useState<Record<number, { driver_url: string; whatsapp_url: string }>>({});
+  const [issuedLinks, setIssuedLinks] = useState<Record<number, { driver_url: string; whatsapp_url: string }>>(
+    () => readIssuedLinksState(sessionId),
+  );
   const [followUpDates, setFollowUpDates] = useState<Record<number, string>>(
     () => readFollowUpOrderState(sessionId).dates,
   );
@@ -187,6 +201,70 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
       JSON.stringify({ dates: followUpDates, createdDates: createdFollowUpDates }),
     );
   }, [sessionId, followUpDates, createdFollowUpDates]);
+
+  useEffect(() => {
+    localStorage.setItem(
+      `smartroute_issued_links_${sessionId}`,
+      JSON.stringify(issuedLinks),
+    );
+  }, [sessionId, issuedLinks]);
+
+  const fetchOrGetLink = async (routeIndex: number, assignmentId: number): Promise<{ driver_url: string; whatsapp_url: string } | null> => {
+    if (issuedLinks[routeIndex]?.driver_url) {
+      return issuedLinks[routeIndex];
+    }
+    try {
+      const response = await fetch(`/api/route/assignments/${assignmentId}/share`, {
+        method: "POST",
+        credentials: "include",
+      });
+      const payload = await response.json().catch(() => ({})) as { driver_url?: string; whatsapp_url?: string; detail?: string };
+      if (!response.ok || !payload.driver_url) {
+        throw new Error(payload.detail || "Не удалось получить ссылку");
+      }
+      const driverUrl = new URL(payload.driver_url, window.location.origin).toString();
+      const whatsappUrl = payload.whatsapp_url
+        ? new URL(payload.whatsapp_url, window.location.origin).toString()
+        : buildAssignmentWhatsAppUrl(driverUrl, getNavSegments(routes[routeIndex] as VehicleRouteWithUrls));
+      const links = { driver_url: driverUrl, whatsapp_url: whatsappUrl };
+      setIssuedLinks((current) => ({
+        ...current,
+        [routeIndex]: links,
+      }));
+      return links;
+    } catch (e) {
+      console.error(e);
+      return null;
+    }
+  };
+
+  const handleCopyDriverLink = async (routeIndex: number, assignment: Assignment) => {
+    let link = issuedLinks[routeIndex]?.driver_url;
+    if (!link) {
+      setSharingRoute(routeIndex);
+      const res = await fetchOrGetLink(routeIndex, assignment.id);
+      setSharingRoute(null);
+      link = res?.driver_url;
+    }
+    if (link) {
+      await navigator.clipboard.writeText(link);
+      setCopiedAssignment(assignment.id);
+      window.setTimeout(() => setCopiedAssignment(null), 1800);
+    }
+  };
+
+  const handleOpenWhatsApp = async (routeIndex: number, assignment: Assignment) => {
+    let wUrl = issuedLinks[routeIndex]?.whatsapp_url;
+    if (!wUrl) {
+      setSharingRoute(routeIndex);
+      const res = await fetchOrGetLink(routeIndex, assignment.id);
+      setSharingRoute(null);
+      wUrl = res?.whatsapp_url;
+    }
+    if (wUrl) {
+      window.open(wUrl, "_blank", "noopener,noreferrer");
+    }
+  };
 
   const createAssignment = async (routeIndex: number) => {
     setCreatingRoute(routeIndex);
@@ -373,10 +451,46 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
-                  {driverUrl ? (
+                  {(driverUrl || assignment) ? (
                     <>
-                      <Button size="sm" variant="outline" className="gap-1.5" onClick={() => navigator.clipboard.writeText(driverUrl).then(() => { setCopiedAssignment(assignment?.id ?? routeIndex); window.setTimeout(() => setCopiedAssignment(null), 1800); })}><Link2 className="w-3.5 h-3.5" />{copiedAssignment === (assignment?.id ?? routeIndex) ? "Скопировано" : "Ссылка водителю"}</Button>
-                      <Button size="sm" variant="outline" className="text-emerald-700 border-emerald-200" onClick={() => window.open(whatsappUrl, "_blank")}>WhatsApp</Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="gap-1.5"
+                        disabled={sharingRoute === routeIndex}
+                        onClick={() => {
+                          if (assignment) {
+                            handleCopyDriverLink(routeIndex, assignment);
+                          } else if (driverUrl) {
+                            navigator.clipboard.writeText(driverUrl).then(() => {
+                              setCopiedAssignment(routeIndex);
+                              window.setTimeout(() => setCopiedAssignment(null), 1800);
+                            });
+                          }
+                        }}
+                      >
+                        {sharingRoute === routeIndex ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Link2 className="w-3.5 h-3.5" />
+                        )}
+                        {copiedAssignment === (assignment?.id ?? routeIndex) ? "Скопировано" : "Ссылка водителю"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="text-emerald-700 border-emerald-200 hover:bg-emerald-50"
+                        disabled={sharingRoute === routeIndex}
+                        onClick={() => {
+                          if (assignment) {
+                            handleOpenWhatsApp(routeIndex, assignment);
+                          } else if (whatsappUrl) {
+                            window.open(whatsappUrl, "_blank");
+                          }
+                        }}
+                      >
+                        WhatsApp
+                      </Button>
                     </>
                   ) : null}
                 </div>
