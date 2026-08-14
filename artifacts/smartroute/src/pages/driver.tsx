@@ -36,6 +36,8 @@ type Execution = {
   store_phone?: string;
   store_client?: string;
   address: string;
+  lat?: number | null;
+  lon?: number | null;
   products: string;
   quantity: number;
   actual_qty: number;
