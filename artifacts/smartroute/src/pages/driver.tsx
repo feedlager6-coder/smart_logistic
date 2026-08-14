@@ -13,6 +13,10 @@ import {
   Truck,
   User,
   AlertTriangle,
+  Package,
+  ChevronDown,
+  ChevronUp,
+  Compass,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -87,6 +91,7 @@ export function DriverPage() {
   const [locationDenied, setLocationDenied] = useState(false);
   const trackingActiveRef = useRef(false);
   const lastLocationSentAtRef = useRef(0);
+  const [expandedProducts, setExpandedProducts] = useState<Record<number, boolean>>({});
   const [drafts, setDrafts] = useState<Record<number, {
     status: Status;
     actual_qty: number | "";
@@ -363,121 +368,223 @@ export function DriverPage() {
           </CardContent>
         </Card>
 
-        {assignment.route_yandex_url && (
-          <Button className="w-full h-11 gap-2" onClick={() => window.open(assignment.route_yandex_url, "_blank")}>
-            <Navigation className="w-4 h-4" />
-            Открыть полный маршрут в Яндекс Навигаторе
-          </Button>
-        )}
+        {/* List of stops */}
+        {(() => {
+          const activeExecutionId = executions.find((e) => !terminalStatuses.has(draftFor(e).status))?.id;
 
-        {executions.map((execution) => {
-          const draft = draftFor(execution);
-          const isTerminal = terminalStatuses.has(draft.status);
-          const hasPhone = Boolean(execution.store_phone && execution.store_phone.trim());
-          const cleanPhone = execution.store_phone ? execution.store_phone.replace(/[^\d+]/g, "") : "";
+          const parseProductItems = (productsStr?: string): string[] => {
+            if (!productsStr || !productsStr.trim()) return [];
+            const lines = productsStr.split(/[\n;]+/).map((s) => s.trim()).filter(Boolean);
+            if (lines.length > 1) return lines;
+            const commaItems = productsStr.split(/,\s*(?=[А-ЯA-Z0-9«"№])/).map((s) => s.trim()).filter(Boolean);
+            if (commaItems.length > 1) return commaItems;
+            return [productsStr.trim()];
+          };
 
-          return (
-            <Card key={execution.id} className={isTerminal ? "border-emerald-200" : ""}>
-              <CardHeader className="pb-3">
-                <div className="flex items-start gap-3">
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${isTerminal ? "bg-emerald-100 text-emerald-700" : "bg-primary/10 text-primary"}`}>
-                    {isTerminal ? <CheckCircle2 className="w-4 h-4" /> : <span className="font-bold">{execution.visit_order}</span>}
+          return executions.map((execution) => {
+            const draft = draftFor(execution);
+            const isTerminal = terminalStatuses.has(draft.status);
+            const isCurrentActive = execution.id === activeExecutionId;
+            const hasPhone = Boolean(execution.store_phone && execution.store_phone.trim());
+            const cleanPhone = execution.store_phone ? execution.store_phone.replace(/[^\d+]/g, "") : "";
+            const productItems = parseProductItems(execution.products);
+            const isProductsExpanded = expandedProducts[execution.id] ?? (isCurrentActive && productItems.length > 0);
+
+            return (
+              <Card
+                key={execution.id}
+                className={`overflow-hidden transition-all ${
+                  isCurrentActive
+                    ? "border-2 border-primary shadow-md ring-2 ring-primary/20 bg-card"
+                    : isTerminal
+                      ? "border-emerald-200 bg-emerald-50/20 opacity-90"
+                      : "border-border"
+                }`}
+              >
+                {isCurrentActive && (
+                  <div className="flex items-center gap-1.5 px-3.5 py-1.5 bg-primary text-primary-foreground text-xs font-bold tracking-wide">
+                    <Compass className="w-4 h-4 animate-spin" style={{ animationDuration: "6s" }} />
+                    <span>ТЕКУЩАЯ ТОЧКА ДОСТАВКИ</span>
                   </div>
-                  <div className="min-w-0 flex-1">
-                    <CardTitle className="text-base font-semibold">{execution.store_name}</CardTitle>
-                    <p className="text-sm text-muted-foreground flex items-start gap-1 mt-1">
-                      <MapPin className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                      <span className="break-words">{execution.address}</span>
-                    </p>
-                    {execution.arrive_by && <p className="text-xs text-primary font-medium mt-1">Ориентир / время: {execution.arrive_by}</p>}
-                    
-                    {/* Customer & Phone info */}
-                    <div className="mt-2 flex flex-wrap items-center gap-2">
-                      {execution.store_client && (
-                        <div className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                          <User className="w-3.5 h-3.5 text-muted-foreground/70" />
-                          <span>Клиент: <strong className="text-foreground font-medium">{execution.store_client}</strong></span>
-                        </div>
-                      )}
-                      {hasPhone ? (
-                        <a
-                          href={`tel:${cleanPhone}`}
-                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-semibold hover:bg-emerald-100 transition-colors"
-                        >
-                          <PhoneCall className="w-3.5 h-3.5" />
-                          <span>{execution.store_phone}</span>
-                        </a>
-                      ) : (
-                        <span className="text-[11px] text-muted-foreground italic flex items-center gap-1">
-                          <Phone className="w-3 h-3 opacity-50" />
-                          Телефон не указан
-                        </span>
-                      )}
+                )}
+
+                <CardHeader className="pb-2 pt-3.5">
+                  <div className="flex items-start gap-3">
+                    <div
+                      className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
+                        isTerminal
+                          ? "bg-emerald-100 text-emerald-700"
+                          : isCurrentActive
+                            ? "bg-primary text-primary-foreground font-bold shadow-xs"
+                            : "bg-muted text-muted-foreground font-semibold"
+                      }`}
+                    >
+                      {isTerminal ? <CheckCircle2 className="w-4 h-4" /> : <span>{execution.visit_order}</span>}
                     </div>
 
-                    {/* Prominent High-Visibility Cargo / Quantity Block */}
-                    <div className="mt-3 p-3 rounded-xl bg-primary/5 border border-primary/15 flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">К выгрузке / Заказ</div>
-                        {execution.products ? (
-                          <div className="text-xs font-medium text-foreground mt-0.5 break-words">
-                            {execution.products}
-                          </div>
-                        ) : (
-                          <div className="text-xs text-muted-foreground mt-0.5">Товары по накладной</div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <CardTitle className="text-base font-semibold">{execution.store_name}</CardTitle>
+                        {isTerminal && (
+                          <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full shrink-0">
+                            {statusLabels[draft.status]}
+                          </span>
                         )}
                       </div>
-                      <div className="text-right shrink-0 bg-background/90 px-3.5 py-2 rounded-lg border shadow-xs">
-                        <div className="text-2xl sm:text-3xl font-black text-primary leading-none">
-                          {execution.quantity}
-                          <span className="text-xs font-bold text-muted-foreground ml-1.5">ед./шт.</span>
+
+                      <p className="text-sm text-muted-foreground flex items-start gap-1 mt-1">
+                        <MapPin className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                        <span className="break-words">{execution.address}</span>
+                      </p>
+                      {execution.arrive_by && (
+                        <p className="text-xs text-primary font-medium mt-1">Ориентир / время: {execution.arrive_by}</p>
+                      )}
+
+                      {/* Customer & Phone info */}
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        {execution.store_client && (
+                          <div className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                            <User className="w-3.5 h-3.5 text-muted-foreground/70" />
+                            <span>Клиент: <strong className="text-foreground font-medium">{execution.store_client}</strong></span>
+                          </div>
+                        )}
+                        {hasPhone ? (
+                          <a
+                            href={`tel:${cleanPhone}`}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-semibold hover:bg-emerald-100 transition-colors"
+                          >
+                            <PhoneCall className="w-3.5 h-3.5" />
+                            <span>{execution.store_phone}</span>
+                          </a>
+                        ) : (
+                          <span className="text-[11px] text-muted-foreground italic flex items-center gap-1">
+                            <Phone className="w-3 h-3 opacity-50" />
+                            Телефон не указан
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Goods / Order Composition Block */}
+                      <div className="mt-3 rounded-lg border bg-muted/20 overflow-hidden">
+                        <div className="p-2.5 flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <Package className="w-4 h-4 text-primary shrink-0" />
+                            <span className="text-xs font-semibold text-foreground">
+                              Товары к выгрузке
+                            </span>
+                            {productItems.length > 0 && (
+                              <span className="text-[11px] font-medium text-muted-foreground bg-background px-1.5 py-0.2 rounded border">
+                                {productItems.length} поз.
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            <div className="text-right">
+                              <span className="text-xs text-muted-foreground mr-1">Кол-во:</span>
+                              <span className="text-sm font-bold text-foreground">
+                                {execution.quantity}
+                              </span>
+                            </div>
+
+                            {productItems.length > 0 && (
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 px-2 text-xs text-primary font-medium hover:bg-background"
+                                onClick={() =>
+                                  setExpandedProducts((prev) => ({
+                                    ...prev,
+                                    [execution.id]: !isProductsExpanded,
+                                  }))
+                                }
+                              >
+                                {isProductsExpanded ? (
+                                  <>
+                                    Скрыть <ChevronUp className="w-3.5 h-3.5 ml-1" />
+                                  </>
+                                ) : (
+                                  <>
+                                    Состав <ChevronDown className="w-3.5 h-3.5 ml-1" />
+                                  </>
+                                )}
+                              </Button>
+                            )}
+                          </div>
                         </div>
+
+                        {/* Expandable list of goods */}
+                        {isProductsExpanded && productItems.length > 0 && (
+                          <div className="px-3 pb-3 pt-1 border-t bg-background space-y-1.5">
+                            <div className="text-[11px] font-semibold text-muted-foreground mb-1">
+                              Перечень позиций по заявке:
+                            </div>
+                            <ul className="space-y-1 text-xs">
+                              {productItems.map((item, idx) => (
+                                <li
+                                  key={idx}
+                                  className="flex items-start gap-2 p-1.5 rounded-md bg-muted/30 border border-muted/50"
+                                >
+                                  <span className="w-4 h-4 rounded-full bg-primary/10 text-primary text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">
+                                    {idx + 1}
+                                  </span>
+                                  <span className="text-foreground flex-1 break-words font-medium">
+                                    {item}
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
                         {isTerminal && (
-                          <div className="text-[11px] font-semibold mt-1 text-muted-foreground">
-                            Факт: <span className="text-foreground font-bold">{execution.actual_qty}</span>
+                          <div className="px-3 py-1.5 bg-muted/40 border-t text-[11px] flex items-center justify-between text-muted-foreground">
+                            <span>
+                              Факт: <strong className="text-foreground font-semibold">{execution.actual_qty ?? 0}</strong>
+                            </span>
                             {execution.shortfall_qty > 0 && (
-                              <span className="text-destructive font-bold ml-1">· недовоз {execution.shortfall_qty}</span>
+                              <span className="text-destructive font-semibold">
+                                Недовоз: {execution.shortfall_qty}
+                              </span>
                             )}
                           </div>
                         )}
                       </div>
+
+                    </div>
+                  </div>
+                </CardHeader>
+
+                <CardContent className="space-y-3 pt-2">
+                  <div className="space-y-2">
+                    <span className="text-xs font-semibold text-muted-foreground">Действие по доставке</span>
+                    <div className="grid grid-cols-2 gap-2">
+                      {(["delivered", "partial", "failed", "rescheduled"] as const).map((status) => (
+                        <Button
+                          key={status}
+                          type="button"
+                          variant={draft.status === status ? "default" : "outline"}
+                          className="h-11 text-sm font-semibold"
+                          onClick={() =>
+                            setDrafts((current) => ({
+                              ...current,
+                              [execution.id]: {
+                                ...draft,
+                                status,
+                                actual_qty: status === "delivered" ? execution.quantity : "",
+                              },
+                            }))
+                          }
+                        >
+                          {statusLabels[status]}
+                        </Button>
+                      ))}
                     </div>
 
-                  </div>
-                </div>
-              </CardHeader>
-
-              <CardContent className="space-y-3">
-                <div className="space-y-2">
-                  <span className="text-xs font-semibold text-muted-foreground">Действие по доставке</span>
-                  <div className="grid grid-cols-2 gap-2">
-                    {(["delivered", "partial", "failed", "rescheduled"] as const).map((status) => (
-                      <Button
-                        key={status}
-                        type="button"
-                        variant={draft.status === status ? "default" : "outline"}
-                        className="h-12 text-sm font-semibold"
-                        onClick={() => setDrafts((current) => ({
-                          ...current,
-                          [execution.id]: {
-                            ...draft,
-                            status,
-                            actual_qty: status === "delivered"
-                              ? execution.quantity
-                              : status === "partial"
-                                ? ""
-                                : "",
-                          },
-                        }))}
-                      >
-                        {statusLabels[status]}
-                      </Button>
-                    ))}
-                  </div>
-                  {(draft.status === "delivered" || draft.status === "partial") && (
-                    <>
+                    {(draft.status === "delivered" || draft.status === "partial") && (
                       <label className="block text-xs font-semibold text-muted-foreground">
-                        Фактически доставлено (шт / ед)
+                        Фактически доставлено (кол-во)
                         <input
                           type="number"
                           min={0}
@@ -498,94 +605,115 @@ export function DriverPage() {
                           }}
                         />
                       </label>
-                    </>
-                  )}
-                  <div className="space-y-2">
-                    <span className="text-xs text-muted-foreground">Способ оплаты</span>
-                    <div className="grid grid-cols-3 gap-2">
-                      {paymentMethods.map((method) => (
-                        <Button
-                          key={method}
-                          type="button"
-                          variant={draft.payment_method === method ? "default" : "outline"}
-                          className="h-11 text-sm"
-                          onClick={() => setDrafts((current) => ({
-                            ...current,
-                            [execution.id]: { ...draft, payment_method: method },
-                          }))}
-                        >
-                          {paymentLabels[method]}
-                        </Button>
-                      ))}
+                    )}
+
+                    <div className="space-y-2">
+                      <span className="text-xs text-muted-foreground">Способ оплаты</span>
+                      <div className="grid grid-cols-3 gap-2">
+                        {paymentMethods.map((method) => (
+                          <Button
+                            key={method}
+                            type="button"
+                            variant={draft.payment_method === method ? "default" : "outline"}
+                            className="h-10 text-sm"
+                            onClick={() =>
+                              setDrafts((current) => ({
+                                ...current,
+                                [execution.id]: { ...draft, payment_method: method },
+                              }))
+                            }
+                          >
+                            {paymentLabels[method]}
+                          </Button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <span className="text-xs text-muted-foreground">Статус оплаты</span>
+                      <div className="grid grid-cols-2 gap-2">
+                        {paymentStatuses.map((paymentStatus) => (
+                          <Button
+                            key={paymentStatus}
+                            type="button"
+                            variant={draft.payment_status === paymentStatus ? "default" : "outline"}
+                            className="h-10 text-sm"
+                            onClick={() =>
+                              setDrafts((current) => ({
+                                ...current,
+                                [execution.id]: { ...draft, payment_status: paymentStatus },
+                              }))
+                            }
+                          >
+                            {paymentStatusLabels[paymentStatus]}
+                          </Button>
+                        ))}
+                      </div>
                     </div>
                   </div>
-                  <div className="space-y-2">
-                    <span className="text-xs text-muted-foreground">Статус оплаты</span>
-                    <div className="grid grid-cols-2 gap-2">
-                      {paymentStatuses.map((paymentStatus) => (
-                        <Button
-                          key={paymentStatus}
-                          type="button"
-                          variant={draft.payment_status === paymentStatus ? "default" : "outline"}
-                          className="h-11 text-sm"
-                          onClick={() => setDrafts((current) => ({
-                            ...current,
-                            [execution.id]: { ...draft, payment_status: paymentStatus },
-                          }))}
-                        >
-                          {paymentStatusLabels[paymentStatus]}
-                        </Button>
-                      ))}
-                    </div>
+
+                  <Textarea
+                    value={draft.driver_comment}
+                    onChange={(event) =>
+                      setDrafts((current) => ({
+                        ...current,
+                        [execution.id]: { ...draft, driver_comment: event.target.value },
+                      }))
+                    }
+                    placeholder={
+                      draft.status === "rescheduled"
+                        ? "Причина переноса (обязательно)"
+                        : "Комментарий водителя (если есть проблемы)"
+                    }
+                    className="min-h-[54px]"
+                    required={draft.status === "rescheduled"}
+                  />
+
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {hasPhone && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="flex-1 min-w-[110px] border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+                        onClick={() => {
+                          window.location.href = `tel:${cleanPhone}`;
+                        }}
+                      >
+                        <Phone className="w-4 h-4 mr-1.5" />
+                        Позвонить
+                      </Button>
+                    )}
+
+                    {execution.yandex_url && (
+                      <Button
+                        type="button"
+                        variant={isCurrentActive ? "default" : "outline"}
+                        className={`flex-1 min-w-[120px] ${
+                          isCurrentActive
+                            ? "bg-primary text-primary-foreground font-bold shadow-xs hover:bg-primary/90"
+                            : ""
+                        }`}
+                        onClick={() => window.open(execution.yandex_url, "_blank")}
+                      >
+                        <Navigation className="w-4 h-4 mr-1.5" />
+                        Навигация
+                      </Button>
+                    )}
+
+                    <Button
+                      className="flex-1 min-w-[130px] font-semibold"
+                      onClick={() => saveExecution(execution)}
+                      disabled={savingId === execution.id}
+                    >
+                      {savingId === execution.id ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+                      Сохранить
+                    </Button>
                   </div>
-                </div>
-
-                <Textarea
-                  value={draft.driver_comment}
-                  onChange={(event) => setDrafts((current) => ({ ...current, [execution.id]: { ...draft, driver_comment: event.target.value } }))}
-                  placeholder={draft.status === "rescheduled" ? "Причина переноса (обязательно)" : "Комментарий водителя (если есть проблемы)"}
-                  className="min-h-[54px]"
-                  required={draft.status === "rescheduled"}
-                />
-
-                <div className="flex flex-wrap gap-2 pt-1">
-                  {hasPhone && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="flex-1 min-w-[120px] border-emerald-200 text-emerald-700 hover:bg-emerald-50"
-                      onClick={() => {
-                        window.location.href = `tel:${cleanPhone}`;
-                      }}
-                    >
-                      <Phone className="w-4 h-4 mr-1.5" />
-                      Позвонить
-                    </Button>
-                  )}
-                  {execution.yandex_url && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="flex-1 min-w-[120px]"
-                      onClick={() => window.open(execution.yandex_url, "_blank")}
-                    >
-                      <MapPin className="w-4 h-4 mr-1.5" />
-                      Навигация
-                    </Button>
-                  )}
-                  <Button
-                    className="flex-1 min-w-[140px] font-semibold"
-                    onClick={() => saveExecution(execution)}
-                    disabled={savingId === execution.id}
-                  >
-                    {savingId === execution.id ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-                    Сохранить
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          );
-        })}
+                </CardContent>
+              </Card>
+            );
+          });
+        })()}
       </main>
     </div>
   );
