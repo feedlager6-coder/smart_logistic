@@ -579,7 +579,6 @@ export function ResultPage() {
   const sessionId = params?.id ? parseInt(params.id) : null;
   const isMobile = useIsMobile();
   const { toast } = useToast();
-  const [copied, setCopied] = useState(false);
   const [copiedNav, setCopiedNav] = useState<number | null>(null);
   const [copiedSeg, setCopiedSeg] = useState<CopiedSegKey | null>(null);
   const [localResult, setLocalResult] = useState<RouteResult | null>(null);
@@ -610,16 +609,6 @@ export function ResultPage() {
   }, [sessionId, setLocation]);
 
   const result = (sessionId ? serverResult : localResult) as RouteResult | null | undefined;
-
-  const handleCopyLink = () => {
-    if (!sessionId) return;
-    const url = `${window.location.origin}${window.location.pathname}`;
-    navigator.clipboard.writeText(url).then(() => {
-      setCopied(true);
-      toast({ title: "Ссылка скопирована", description: "Поделитесь ею с водителем." });
-      setTimeout(() => setCopied(false), 2000);
-    });
-  };
 
   const handleCompleteRoute = async () => {
     if (!sessionId || completingRoute) return;
@@ -1041,11 +1030,16 @@ export function ResultPage() {
           <h1 className="text-3xl font-bold tracking-tight">Результат оптимизации</h1>
           <p className="text-muted-foreground">Маршруты успешно построены</p>
         </div>
-        <div className="flex gap-2 flex-wrap">
+        <div className="flex gap-2 flex-wrap items-center">
           {sessionId && (
-            <Button variant="outline" onClick={handleCopyLink} className="gap-2">
-              {copied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
-              <span className="hidden sm:inline">Копировать ссылку</span>
+            <Button
+              variant="outline"
+              className="gap-2 border-emerald-300 text-emerald-700 hover:bg-emerald-50 font-medium"
+              onClick={handleCompleteRoute}
+              disabled={completingRoute}
+            >
+              {completingRoute ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4 text-emerald-600" />}
+              {completingRoute ? "Завершаем…" : "Завершить рейс"}
             </Button>
           )}
           <Button variant="outline" onClick={() => window.print()} className="gap-2">
@@ -1062,12 +1056,6 @@ export function ResultPage() {
               Построить заново
             </Link>
           </Button>
-          {sessionId && (
-            <Button variant="outline" className="gap-2 border-emerald-300 text-emerald-700" onClick={handleCompleteRoute} disabled={completingRoute}>
-              {completingRoute ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
-              {completingRoute ? "Завершаем…" : "Завершить маршрут"}
-            </Button>
-          )}
         </div>
       </div>
 
