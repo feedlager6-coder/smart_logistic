@@ -410,20 +410,19 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
   return (
     <Card className="print:hidden">
       <CardHeader className="pb-3 border-b bg-muted/20">
-        <div className="flex items-start justify-between gap-3">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
           <div>
             <CardTitle className="flex items-center gap-2 text-lg"><Users className="w-5 h-5 text-primary" />Исполнение доставок</CardTitle>
-            <p className="text-sm text-muted-foreground mt-1">Назначьте рейс водителю и следите за фактическими статусами точек.</p>
-            <p className="text-xs text-muted-foreground mt-1">Откроется отдельный чат WhatsApp для каждого водителя. В каждом чате нужно нажать «Отправить».</p>
+            <p className="text-sm text-muted-foreground mt-0.5">Назначьте рейс водителю и отслеживайте фактический статус точек доставки.</p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <Button size="sm" variant="outline" onClick={() => window.open(`/api/route/sessions/${sessionId}/report.xlsx`, "_blank")}>
               <Download className="w-4 h-4 mr-1" />Отчёт Excel
             </Button>
-            <Button size="sm" variant="outline" className="text-emerald-700 border-emerald-200" onClick={sendAllDrivers} disabled={sendingAllDrivers}>
+            <Button size="sm" variant="outline" className="text-emerald-700 border-emerald-200 hover:bg-emerald-50" onClick={sendAllDrivers} disabled={sendingAllDrivers}>
               {sendingAllDrivers ? "Готовим ссылки…" : "Открыть WhatsApp для всех"}
             </Button>
-            <Button size="sm" variant="outline" className="text-sky-700 border-sky-200 gap-1" onClick={sendAllTelegram} disabled={sendingTelegram}>
+            <Button size="sm" variant="outline" className="text-sky-700 border-sky-200 hover:bg-sky-50 gap-1" onClick={sendAllTelegram} disabled={sendingTelegram}>
               <Send className="w-4 h-4" />
               {sendingTelegram ? "Отправляем в Telegram…" : "Отправить всем в Telegram"}
             </Button>
@@ -441,16 +440,43 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
           const total = assignment?.total_points ?? route.stores.length;
           const percent = total ? Math.round(completed / total * 100) : 0;
           return (
-            <div key={`${route.vehicle_name}-${routeIndex}`} className="p-4 space-y-3">
+            <div key={`${route.vehicle_name}-${routeIndex}`} className="p-4 space-y-3.5">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div className="flex items-center gap-3 min-w-0">
-                  <div className="w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0" style={{ backgroundColor: COLORS[routeIndex % COLORS.length] }}><Car className="w-4 h-4" /></div>
+                  <div className="w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0 shadow-xs" style={{ backgroundColor: COLORS[routeIndex % COLORS.length] }}>
+                    <Car className="w-4 h-4" />
+                  </div>
                   <div className="min-w-0">
-                    <p className="font-semibold truncate">{route.vehicle_name}</p>
-                    <p className="text-xs text-muted-foreground">{completed} из {total} точек завершено{assignment ? ` · ${assignment.status === "completed" ? "рейс завершён" : "рейс активен"}` : ""}</p>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="font-semibold truncate">{route.vehicle_name}</p>
+                      {assignment ? (
+                        <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${
+                          assignment.status === "completed"
+                            ? "bg-emerald-100 text-emerald-800"
+                            : "bg-sky-100 text-sky-800"
+                        }`}>
+                          {assignment.status === "completed" ? "рейс завершён" : "рейс активен"}
+                        </span>
+                      ) : (
+                        <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
+                          водитель не назначен
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground mt-0.5 flex-wrap">
+                      <span>{completed} из {total} точек завершено</span>
+                      {assignment?.expires_at && (
+                        <>
+                          <span>·</span>
+                          <span className="text-muted-foreground/90">
+                            Ссылка активна до {new Date(assignment.expires_at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                          </span>
+                        </>
+                      )}
+                    </div>
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 shrink-0 self-start sm:self-center">
                   {(driverUrl || assignment) ? (
                     <>
                       <Button
@@ -495,11 +521,6 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                   ) : null}
                 </div>
               </div>
-              {assignment?.expires_at && (
-                <p className="text-xs text-muted-foreground">
-                  Ссылка действует до {new Date(assignment.expires_at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
-                </p>
-              )}
               <div className="space-y-1">
                 <div className="flex justify-between text-xs text-muted-foreground"><span>Прогресс рейса</span><span>{percent}%</span></div>
                 <div className="h-2 rounded-full bg-muted overflow-hidden"><div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${percent}%` }} /></div>
