@@ -267,8 +267,14 @@ _gh_plan_limit: int = GRAPHHOPPER_CLUSTER_MAX
 # ── OSRM Matrix API ────────────────────────────────────────────────────────────
 # OSRM (Open Source Routing Machine) uses real OpenStreetMap road data.
 # Public demo server: free, no API key, fair-use policy (≤ 100 locations/request).
-# Override OSRM_BASE_URL env-var to point at a self-hosted instance.
-OSRM_BASE_URL: str = os.environ.get("OSRM_BASE_URL", "https://router.project-osrm.org")
+# Accepts OSRM_URL or OSRM_BASE_URL env var, automatically prepending http:// or https:// if missing.
+_raw_osrm_url = (os.environ.get("OSRM_URL") or os.environ.get("OSRM_BASE_URL") or "https://router.project-osrm.org").strip().rstrip("/")
+if _raw_osrm_url and not _raw_osrm_url.startswith("http://") and not _raw_osrm_url.startswith("https://"):
+    if ".up.railway.app" in _raw_osrm_url or ".railway.app" in _raw_osrm_url:
+        _raw_osrm_url = f"https://{_raw_osrm_url}"
+    else:
+        _raw_osrm_url = f"http://{_raw_osrm_url}"
+OSRM_BASE_URL: str = _raw_osrm_url
 OSRM_MAX_LOCATIONS: int = int(os.environ.get("OSRM_MAX_LOCATIONS", "100"))
 OSRM_RATE_LIMIT_TTL = 30      # seconds to suppress OSRM calls after error/timeout
 
