@@ -8973,8 +8973,6 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
     if body.status not in EXECUTION_STATUSES:
         raise HTTPException(status_code=422, detail="Недопустимый статус доставки")
     assignment, executions = _load_assignment_for_token(token)
-    if assignment.get("status") == "completed":
-        raise HTTPException(status_code=409, detail="Рейс уже завершён")
     current = next((row for row in executions if int(row["id"]) == execution_id), None)
     if not current:
         raise HTTPException(status_code=404, detail="Точка рейса не найдена")
@@ -9024,13 +9022,16 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
                rescheduled_date=CASE WHEN %s='rescheduled' THEN rescheduled_date ELSE NULL END,
                updated_at=NOW(),
                delivered_at=CASE WHEN %s IN ('delivered','partial','failed')
-                                 THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END
+                                 THEN COALESCE(delivered_at, NOW())
+                                 WHEN %s='planned' THEN NULL
+                                 ELSE delivered_at END
            WHERE id=%s AND assignment_id=%s
            RETURNING id, store_id, visit_order, store_name, address, lat, lon,
                      products, quantity, actual_qty, arrive_by, yandex_url, status,
                      payment_method, payment_status, driver_comment, rescheduled_date,
                      updated_at, delivered_at""",
         (body.status, body.status, planned_qty, actual_qty, actual_items_json, payment_method, payment_status, body.driver_comment.strip(),
+         body.status,
          body.status,
          body.status, execution_id, assignment["id"]),
     )

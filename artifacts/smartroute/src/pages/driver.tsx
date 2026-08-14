@@ -17,6 +17,8 @@ import {
   ChevronDown,
   ChevronUp,
   Compass,
+  Undo2,
+  ListChecks,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -59,7 +61,7 @@ type DriverData = {
 };
 
 const statusLabels: Record<Status, string> = {
-  planned: "Запланировано",
+  planned: "Ожидает доставки",
   delivered: "Доставлено",
   partial: "Частично",
   failed: "Не доставлено",
@@ -92,6 +94,8 @@ export function DriverPage() {
   const trackingActiveRef = useRef(false);
   const lastLocationSentAtRef = useRef(0);
   const [expandedProducts, setExpandedProducts] = useState<Record<number, boolean>>({});
+  const [expandedCompletedCards, setExpandedCompletedCards] = useState<Record<number, boolean>>({});
+  const [showAllCompleted, setShowAllCompleted] = useState(false);
   const [drafts, setDrafts] = useState<Record<number, {
     status: Status;
     actual_qty: number | "";
@@ -229,22 +233,22 @@ export function DriverPage() {
     driver_comment: execution.driver_comment,
   };
 
-  const saveExecution = async (execution: Execution) => {
+  const saveExecution = async (execution: Execution, explicitStatus?: Status) => {
     const draft = draftFor(execution);
-    if (draft.status === "planned") {
-      window.alert("Выберите действие по доставке");
-      return;
-    }
+    const targetStatus = explicitStatus || draft.status;
+
     const requestBody = {
-      status: draft.status,
+      status: targetStatus,
       // Quantity is meaningful only for delivered/partial. Omitting it for
-      // failed/rescheduled keeps those actions independent from quantity.
-      ...(draft.status === "delivered" || draft.status === "partial"
+      // failed/rescheduled/planned keeps those actions independent from quantity.
+      ...(targetStatus === "delivered" || targetStatus === "partial"
         ? { actual_qty: draft.actual_qty === "" ? undefined : Number(draft.actual_qty) }
-        : {}),
-      payment_method: draft.payment_method,
-      payment_status: draft.payment_status,
-      driver_comment: draft.driver_comment,
+        : targetStatus === "planned"
+          ? { actual_qty: 0, driver_comment: "" }
+          : {}),
+      payment_method: targetStatus === "planned" ? "none" : draft.payment_method,
+      payment_status: targetStatus === "planned" ? "pending" : draft.payment_status,
+      driver_comment: targetStatus === "planned" ? "" : draft.driver_comment,
     };
     setSavingId(execution.id);
     try {
@@ -270,7 +274,7 @@ export function DriverPage() {
       // The browser remains the single GPS source. Stop its 20-second timer
       // once the driver has just completed the last outstanding point.
       const wasLastOpenPoint = executions.filter((item) => item.status === "planned").length === 1;
-      if (wasLastOpenPoint && terminalStatuses.has(draft.status)) {
+      if (wasLastOpenPoint && terminalStatuses.has(targetStatus)) {
         setTrackingEnabled(false);
         setLocationMessage("Рейс завершён — отслеживание остановлено");
       }
@@ -440,8 +444,6 @@ export function DriverPage() {
             return "";
           };
 
-          const activeExecutionId = executions.find((e) => !terminalStatuses.has(draftFor(e).status))?.id;
-
           const parseProductItems = (productsStr?: string, quantity?: number): string[] => {
             if (!productsStr || !productsStr.trim()) return [];
             const trimmed = productsStr.trim();
@@ -456,7 +458,12 @@ export function DriverPage() {
             return [trimmed];
           };
 
-          return executions.map((execution) => {
+          // Separate active/pending points from already completed points
+          const pendingStops = executions.filter((e) => !terminalStatuses.has(e.status));
+          const completedStops = executions.filter((e) => terminalStatuses.has(e.status));
+          const activeExecutionId = pendingStops[0]?.id;
+
+          const renderExecutionCard = (execution: Execution, isCompactCompleted = false) => {
             const draft = draftFor(execution);
             const isTerminal = terminalStatuses.has(draft.status);
             const isCurrentActive = execution.id === activeExecutionId;
@@ -466,6 +473,58 @@ export function DriverPage() {
             const hasExplicitProducts = productItems.length > 0;
             const isProductsExpanded = expandedProducts[execution.id] ?? false;
             const navUrl = getPointNavUrl(execution);
+            const isCardExpanded = !isCompactCompleted || expandedCompletedCards[execution.id];
+
+            // If it's a completed stop and collapsed, show a clean, compact summary row
+            if (isCompactCompleted && !isCardExpanded) {
+              return (
+                <Card
+                  key={execution.id}
+                  className="border-emerald-200/80 bg-emerald-50/30 transition-all hover:bg-emerald-50/50 shadow-2xs"
+                >
+                  <div className="p-3.5 flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0 flex-1">
+                      <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
+                        <CheckCircle2 className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-sm text-foreground truncate">
+                            №{execution.visit_order} · {execution.store_name}
+                          </span>
+                          <span className="text-[11px] font-semibold text-emerald-800 bg-emerald-100/90 px-2 py-0.5 rounded-full shrink-0">
+                            {statusLabels[execution.status]}
+                          </span>
+                        </div>
+                        <div className="text-xs text-muted-foreground truncate mt-0.5 flex items-center gap-2">
+                          <span>{execution.address}</span>
+                          <span>•</span>
+                          <span>Сдано: {execution.actual_qty ?? execution.quantity} из {execution.quantity} ед.</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-8 px-2.5 text-xs text-muted-foreground hover:text-foreground gap-1"
+                        onClick={() =>
+                          setExpandedCompletedCards((prev) => ({
+                            ...prev,
+                            [execution.id]: true,
+                          }))
+                        }
+                      >
+                        <span>Детали / Изменить</span>
+                        <ChevronDown className="w-3.5 h-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                </Card>
+              );
+            }
 
             return (
               <Card
@@ -474,7 +533,7 @@ export function DriverPage() {
                   isCurrentActive
                     ? "border-2 border-primary shadow-md ring-2 ring-primary/20 bg-card"
                     : isTerminal
-                      ? "border-emerald-200 bg-emerald-50/20 opacity-90"
+                      ? "border-emerald-200 bg-emerald-50/20 opacity-95"
                       : "border-border bg-card"
                 }`}
               >
@@ -507,11 +566,29 @@ export function DriverPage() {
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-baseline justify-between gap-2">
                         <CardTitle className="text-base sm:text-lg font-bold">{execution.store_name}</CardTitle>
-                        {isTerminal && (
-                          <span className="text-xs font-semibold text-emerald-700 bg-emerald-100 px-2.5 py-0.5 rounded-full shrink-0">
-                            {statusLabels[draft.status]}
-                          </span>
-                        )}
+                        <div className="flex items-center gap-2 shrink-0">
+                          {isTerminal && (
+                            <span className="text-xs font-semibold text-emerald-700 bg-emerald-100 px-2.5 py-0.5 rounded-full">
+                              {statusLabels[draft.status]}
+                            </span>
+                          )}
+                          {isCompactCompleted && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 px-2 text-xs text-muted-foreground"
+                              onClick={() =>
+                                setExpandedCompletedCards((prev) => ({
+                                  ...prev,
+                                  [execution.id]: false,
+                                }))
+                              }
+                            >
+                              Свернуть <ChevronUp className="w-3.5 h-3.5 ml-1" />
+                            </Button>
+                          )}
+                        </div>
                       </div>
 
                       <p className="text-sm text-muted-foreground flex items-start gap-1.5 mt-1">
@@ -641,28 +718,70 @@ export function DriverPage() {
 
                 <CardContent className="space-y-3 pt-2 px-4 sm:px-5 pb-5">
                   <div className="space-y-2">
-                    <span className="text-xs font-semibold text-muted-foreground">Действие по доставке</span>
-                    <div className="grid grid-cols-2 gap-2">
-                      {(["delivered", "partial", "failed", "rescheduled"] as const).map((status) => (
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-muted-foreground">Действие по доставке</span>
+                      {isTerminal && (
                         <Button
-                          key={status}
                           type="button"
-                          variant={draft.status === status ? "default" : "outline"}
-                          className="h-11 text-sm font-semibold"
-                          onClick={() =>
-                            setDrafts((current) => ({
-                              ...current,
-                              [execution.id]: {
-                                ...draft,
-                                status,
-                                actual_qty: status === "delivered" ? execution.quantity : "",
-                              },
-                            }))
-                          }
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 px-2 text-xs text-amber-600 hover:text-amber-700 hover:bg-amber-50 gap-1"
+                          onClick={() => {
+                            if (window.confirm("Вернуть эту точку в статус «Ожидает доставки»?")) {
+                              saveExecution(execution, "planned");
+                            }
+                          }}
                         >
-                          {statusLabels[status]}
+                          <Undo2 className="w-3.5 h-3.5" />
+                          <span>Сбросить в «Не доставлено»</span>
                         </Button>
-                      ))}
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      {(["delivered", "partial", "failed", "rescheduled"] as const).map((status) => {
+                        const isSelected = draft.status === status;
+                        return (
+                          <Button
+                            key={status}
+                            type="button"
+                            variant={isSelected ? "default" : "outline"}
+                            className={`h-11 text-sm font-semibold transition-all ${
+                              isSelected
+                                ? status === "delivered"
+                                  ? "bg-emerald-600 hover:bg-emerald-700 text-white"
+                                  : status === "failed"
+                                    ? "bg-destructive hover:bg-destructive/90 text-white"
+                                    : ""
+                                : ""
+                            }`}
+                            onClick={() => {
+                              // If clicking the already selected button, toggle it back to planned
+                              if (isSelected) {
+                                setDrafts((current) => ({
+                                  ...current,
+                                  [execution.id]: {
+                                    ...draft,
+                                    status: "planned",
+                                    actual_qty: execution.quantity,
+                                  },
+                                }));
+                              } else {
+                                setDrafts((current) => ({
+                                  ...current,
+                                  [execution.id]: {
+                                    ...draft,
+                                    status,
+                                    actual_qty: status === "delivered" ? execution.quantity : "",
+                                  },
+                                }));
+                              }
+                            }}
+                          >
+                            {statusLabels[status]}
+                          </Button>
+                        );
+                      })}
                     </div>
 
                     {(draft.status === "delivered" || draft.status === "partial") && (
@@ -795,7 +914,57 @@ export function DriverPage() {
                 </CardContent>
               </Card>
             );
-          });
+          };
+
+          return (
+            <div className="space-y-4">
+              {/* Section 1: Active & Remaining Points */}
+              {pendingStops.length > 0 ? (
+                <div className="space-y-4">
+                  {pendingStops.map((execution) => renderExecutionCard(execution, false))}
+                </div>
+              ) : (
+                <Card className="border-emerald-300 bg-emerald-50 p-6 text-center shadow-xs">
+                  <CheckCircle2 className="w-12 h-12 text-emerald-600 mx-auto mb-2" />
+                  <h3 className="text-lg font-bold text-emerald-900">Все точки рейса выполнены!</h3>
+                  <p className="text-xs text-emerald-700 mt-1">Отличная работа. Ниже можно просмотреть завершённые доставки или при необходимости скорректировать их.</p>
+                </Card>
+              )}
+
+              {/* Section 2: Collapsible Completed Points Group */}
+              {completedStops.length > 0 && (
+                <div className="pt-2 space-y-3">
+                  <div className="flex items-center justify-between px-1">
+                    <div className="flex items-center gap-2">
+                      <ListChecks className="w-4 h-4 text-emerald-600" />
+                      <span className="text-xs font-bold text-foreground uppercase tracking-wide">
+                        Выполненные точки ({completedStops.length} из {executions.length})
+                      </span>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs text-primary font-semibold hover:bg-muted gap-1"
+                      onClick={() => setShowAllCompleted((prev) => !prev)}
+                    >
+                      {showAllCompleted ? (
+                        <>Свернуть все <ChevronUp className="w-3.5 h-3.5" /></>
+                      ) : (
+                        <>Развернуть все <ChevronDown className="w-3.5 h-3.5" /></>
+                      )}
+                    </Button>
+                  </div>
+
+                  <div className="space-y-2.5">
+                    {completedStops.map((execution) =>
+                      renderExecutionCard(execution, !showAllCompleted)
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
         })()}
       </main>
     </div>
