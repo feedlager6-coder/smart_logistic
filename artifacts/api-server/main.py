@@ -3403,7 +3403,6 @@ def _telegram_render_assignment(cur, assignment_id: int, chat_id: int, request: 
                      FROM company_settings WHERE owner_id=%s LIMIT 1""", (data["assignment"]["owner_id"],))
     dispatcher = cur.fetchone() or {}
     text, markup = _telegram_card(data, assignment_id, driver_url, dispatcher)
-    _telegram_remove_reply_keyboard(chat_id)
     payload = {"chat_id": chat_id, "text": text, "reply_markup": markup}
     if message_id:
         payload["message_id"] = message_id
