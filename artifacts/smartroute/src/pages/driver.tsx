@@ -230,7 +230,9 @@ export function DriverPage() {
 
   const draftFor = (execution: Execution) => drafts[execution.id] ?? {
     status: execution.status,
-    actual_qty: execution.actual_qty ?? execution.quantity,
+    actual_qty: execution.status === "delivered" || execution.status === "planned"
+      ? (execution.status === "delivered" && execution.actual_qty !== undefined && execution.actual_qty !== null ? execution.actual_qty : execution.quantity)
+      : (execution.actual_qty ?? 0),
     payment_method: execution.payment_method,
     payment_status: execution.payment_status === "pending" ? "not_paid" : execution.payment_status,
     driver_comment: execution.driver_comment,
@@ -501,7 +503,9 @@ export function DriverPage() {
 
           const renderExecutionCard = (execution: Execution, isCompactCompleted = false) => {
             const draft = draftFor(execution);
-            const isTerminal = terminalStatuses.has(draft.status);
+            const isDraftTerminal = terminalStatuses.has(draft.status);
+            const isSavedTerminal = terminalStatuses.has(execution.status);
+            const isTerminal = isDraftTerminal || isSavedTerminal;
             const isCurrentActive = execution.id === activeExecutionId;
             const hasPhone = Boolean(execution.store_phone && execution.store_phone.trim());
             const cleanPhone = execution.store_phone ? execution.store_phone.replace(/[^\d+]/g, "") : "";
@@ -510,6 +514,23 @@ export function DriverPage() {
             const isProductsExpanded = expandedProducts[execution.id] ?? false;
             const navUrl = getPointNavUrl(execution);
             const isCardExpanded = !isCompactCompleted || expandedCompletedCards[execution.id];
+
+            // Dynamic calculation of actual delivered quantity and shortfall
+            const effectiveDeliveredQty =
+              draft.status === "delivered"
+                ? (draft.actual_qty === "" ? execution.quantity : Number(draft.actual_qty))
+                : draft.status === "partial"
+                  ? (draft.actual_qty === "" ? 0 : Number(draft.actual_qty))
+                  : 0;
+
+            const effectiveShortfall =
+              draft.status === "delivered"
+                ? Math.max(0, execution.quantity - effectiveDeliveredQty)
+                : draft.status === "partial"
+                  ? Math.max(0, execution.quantity - effectiveDeliveredQty)
+                  : draft.status === "failed"
+                    ? execution.quantity
+                    : 0;
 
             // If it's a completed stop and collapsed, show a clean, compact summary row
             if (isCompactCompleted && !isCardExpanded) {
@@ -535,7 +556,14 @@ export function DriverPage() {
                         <div className="text-xs text-muted-foreground truncate mt-0.5 flex items-center gap-2">
                           <span>{execution.address}</span>
                           <span>•</span>
-                          <span>Сдано: {execution.actual_qty ?? execution.quantity} из {execution.quantity} ед.</span>
+                          <span>
+                            Сдано: {execution.status === "delivered" ? execution.quantity : (execution.actual_qty ?? 0)} из {execution.quantity} ед.
+                          </span>
+                          {execution.status !== "delivered" && execution.shortfall_qty > 0 && (
+                            <span className="text-destructive font-semibold">
+                              (недовоз {execution.shortfall_qty} ед.)
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -744,14 +772,17 @@ export function DriverPage() {
                     </div>
                   )}
 
-                  {isTerminal && (
+                  {isDraftTerminal && (
                     <div className="mt-2.5 pt-2 border-t border-border/60 flex items-center justify-between text-xs text-muted-foreground">
                       <span>
-                        Фактически сдано: <strong className="text-foreground font-bold">{execution.actual_qty ?? 0} ед.</strong>
+                        Фактически сдано: <strong className="text-foreground font-bold">{effectiveDeliveredQty} ед.</strong>
+                        {draft.status === "delivered" && effectiveShortfall === 0 && (
+                          <span className="text-emerald-700 font-semibold ml-1.5">(полностью)</span>
+                        )}
                       </span>
-                      {execution.shortfall_qty > 0 && (
+                      {effectiveShortfall > 0 && (
                         <span className="text-destructive font-bold bg-destructive/10 px-2 py-0.5 rounded">
-                          Недовоз: {execution.shortfall_qty} ед.
+                          Недовоз: {effectiveShortfall} ед.
                         </span>
                       )}
                     </div>
@@ -791,10 +822,10 @@ export function DriverPage() {
                             className={`h-11 text-sm font-semibold transition-all ${
                               isSelected
                                 ? status === "delivered"
-                                  ? "bg-emerald-600 hover:bg-emerald-700 text-white"
-                                  : status === "failed"
-                                    ? "bg-destructive hover:bg-destructive/90 text-white"
-                                    : ""
+                                ? "bg-emerald-600 hover:bg-emerald-700 text-white"
+                                : status === "failed"
+                                  ? "bg-destructive hover:bg-destructive/90 text-white"
+                                  : ""
                                 : ""
                             }`}
                             onClick={() => {
@@ -814,7 +845,12 @@ export function DriverPage() {
                                   [execution.id]: {
                                     ...draft,
                                     status,
-                                    actual_qty: status === "delivered" ? execution.quantity : "",
+                                    actual_qty:
+                                      status === "delivered"
+                                        ? execution.quantity
+                                        : status === "partial"
+                                          ? (draft.actual_qty !== "" && draft.actual_qty !== undefined ? draft.actual_qty : execution.quantity)
+                                          : 0,
                                   },
                                 }));
                               }
