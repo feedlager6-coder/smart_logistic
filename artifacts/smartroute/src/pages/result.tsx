@@ -73,6 +73,8 @@ type Assignment = {
     id: number;
     visit_order: number;
     store_name: string;
+    store_phone?: string;
+    store_client?: string;
     address?: string;
     products?: string;
     status: ExecutionStatus;
@@ -239,7 +241,7 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
   };
 
   const handleCopyDriverLink = async (routeIndex: number, assignment: Assignment) => {
-    let link = issuedLinks[routeIndex]?.driver_url;
+    let link: string | undefined = issuedLinks[routeIndex]?.driver_url;
     if (!link) {
       setSharingRoute(routeIndex);
       const res = await fetchOrGetLink(routeIndex, assignment.id);
@@ -254,7 +256,7 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
   };
 
   const handleOpenWhatsApp = async (routeIndex: number, assignment: Assignment) => {
-    let wUrl = issuedLinks[routeIndex]?.whatsapp_url;
+    let wUrl: string | undefined = issuedLinks[routeIndex]?.whatsapp_url;
     if (!wUrl) {
       setSharingRoute(routeIndex);
       const res = await fetchOrGetLink(routeIndex, assignment.id);
@@ -571,6 +573,21 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                       <div className="min-w-[12rem] flex-1">
                         <p className="font-medium leading-snug line-clamp-2 break-words">{execution.store_name}</p>
                         {execution.address && <p className="text-[11px] text-muted-foreground mt-0.5 break-words">{execution.address}</p>}
+                        {(execution.store_phone || execution.store_client) && (
+                          <div className="flex flex-wrap items-center gap-1.5 mt-1 text-[11px]">
+                            {execution.store_client && (
+                              <span className="text-muted-foreground">Клиент: {execution.store_client}</span>
+                            )}
+                            {execution.store_phone && (
+                              <a
+                                href={`tel:${execution.store_phone.replace(/[^\d+]/g, '')}`}
+                                className="text-emerald-700 font-medium hover:underline"
+                              >
+                                📞 {execution.store_phone}
+                              </a>
+                            )}
+                          </div>
+                        )}
                         {execution.status === "planned" && execution.eta_minutes ? (
                           <p className="text-[11px] text-sky-700 mt-1">{formatRouteDuration(execution.eta_minutes)}</p>
                         ) : null}

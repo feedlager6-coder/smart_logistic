@@ -8267,11 +8267,15 @@ def _load_assignment_for_token(token: str) -> tuple[dict, list[dict]]:
         cur.close(); conn.close()
         raise HTTPException(status_code=410, detail="Срок действия ссылки водителя истёк. Попросите диспетчера выдать новую ссылку.")
     cur.execute(
-        """SELECT id, store_id, visit_order, store_name, address, lat, lon,
-                  products, quantity, actual_qty, actual_items_json, arrive_by, yandex_url, status,
-                  payment_method, payment_status, driver_comment, rescheduled_date,
-                  updated_at, delivered_at
-           FROM route_executions WHERE assignment_id=%s ORDER BY visit_order""",
+        """SELECT e.id, e.store_id, e.visit_order, e.store_name, e.address, e.lat, e.lon,
+                  e.products, e.quantity, e.actual_qty, e.actual_items_json, e.arrive_by, e.yandex_url, e.status,
+                  e.payment_method, e.payment_status, e.driver_comment, e.rescheduled_date,
+                  e.updated_at, e.delivered_at,
+                  COALESCE(s.phone, '') AS store_phone,
+                  COALESCE(s.client, '') AS store_client
+           FROM route_executions e
+           LEFT JOIN stores s ON s.id = e.store_id
+           WHERE e.assignment_id=%s ORDER BY e.visit_order""",
         (assignment["id"],),
     )
     executions = [dict(r) for r in cur.fetchall()]
@@ -8322,6 +8326,8 @@ def _serialize_execution(row: dict) -> dict:
         "store_id": row.get("store_id"),
         "visit_order": row["visit_order"],
         "store_name": row.get("store_name") or "",
+        "store_phone": row.get("store_phone") or row.get("phone") or "",
+        "store_client": row.get("store_client") or row.get("client") or "",
         "address": row.get("address") or "",
         "lat": row.get("lat"),
         "lon": row.get("lon"),
@@ -8384,6 +8390,8 @@ def list_route_assignments(session_id: int, request: Request):
                       e.address, e.lat, e.lon, e.products, e.quantity, e.actual_qty, e.arrive_by,
                       e.yandex_url, e.status, e.payment_method, e.payment_status,
                       e.driver_comment, e.rescheduled_date, e.updated_at, e.delivered_at,
+                      COALESCE(s.phone, '') AS store_phone,
+                      COALESCE(s.client, '') AS store_client,
                       (SELECT MAX(o.delivery_date)::text
                          FROM daily_orders o
                         WHERE o.owner_id = a.owner_id
@@ -8396,6 +8404,7 @@ def list_route_assignments(session_id: int, request: Request):
                       ) AS remaining_order_date
                FROM route_executions e
                JOIN route_assignments a ON a.id = e.assignment_id
+               LEFT JOIN stores s ON s.id = e.store_id
                WHERE e.assignment_id = ANY(%s)
                ORDER BY e.assignment_id, e.visit_order""",
             ([row["id"] for row in rows],),

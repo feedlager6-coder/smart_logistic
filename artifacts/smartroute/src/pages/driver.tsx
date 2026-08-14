@@ -1,7 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "wouter";
 import { useQuery } from "@tanstack/react-query";
-import { CheckCircle2, CircleAlert, Loader2, MapPin, Truck } from "lucide-react";
+import {
+  CheckCircle2,
+  CircleAlert,
+  Loader2,
+  MapPin,
+  Navigation,
+  Phone,
+  PhoneCall,
+  RotateCcw,
+  Truck,
+  User,
+  AlertTriangle,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
@@ -14,6 +26,8 @@ type Execution = {
   id: number;
   visit_order: number;
   store_name: string;
+  store_phone?: string;
+  store_client?: string;
   address: string;
   products: string;
   quantity: number;
@@ -109,7 +123,8 @@ export function DriverPage() {
         .then((permission) => {
           if (permission.state === "denied") {
             setLocationDenied(true);
-            setLocationMessage("Геолокация выключена в настройках браузера");
+            setTrackingEnabled(false);
+            setLocationMessage("Геолокация выключена или заблокирована в настройках браузера");
           } else {
             startAutomatically();
           }
@@ -139,21 +154,22 @@ export function DriverPage() {
           }),
         });
         if (!response.ok) throw new Error();
-        setLocationMessage("Геолокация обновляется примерно раз в 20 секунд");
+        setLocationDenied(false);
+        setLocationMessage("Геолокация активна — передаётся диспетчеру (обновление каждые 20 сек)");
       } catch {
-        setLocationMessage("Не удалось отправить координаты — проверьте связь");
+        setLocationMessage("Не удалось отправить координаты — проверьте интернет");
       }
     };
     const watchId = navigator.geolocation.watchPosition(sendLocation, (error) => {
       if (error.code === error.PERMISSION_DENIED) {
         setLocationDenied(true);
         setTrackingEnabled(false);
-        setLocationMessage("Геолокация выключена в настройках браузера");
+        setLocationMessage("Геолокация выключена или заблокирована в браузере");
       } else {
-        setLocationMessage("Не удалось определить геолокацию — попробуйте ещё раз");
+        setLocationMessage("Поиск спутников GPS…");
       }
     }, {
-      enableHighAccuracy: false,
+      enableHighAccuracy: true,
       maximumAge: 15000,
       timeout: 10000,
     });
@@ -166,9 +182,38 @@ export function DriverPage() {
       return;
     }
     setLocationDenied(false);
-    lastLocationSentAtRef.current = 0;
-    setTrackingEnabled(true);
-    setLocationMessage("Запрашиваем разрешение на геолокацию…");
+    setLocationMessage("Запрашиваем доступ к местоположению…");
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        setLocationDenied(false);
+        setTrackingEnabled(true);
+        setLocationMessage("Геолокация включена и активна");
+        lastLocationSentAtRef.current = Date.now();
+        try {
+          await fetch(`/api/driver/${encodeURIComponent(token)}/location`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              lat: pos.coords.latitude,
+              lon: pos.coords.longitude,
+              accuracy: pos.coords.accuracy,
+            }),
+          });
+        } catch {
+          // Ignored initial ping failure
+        }
+      },
+      (error) => {
+        if (error.code === error.PERMISSION_DENIED) {
+          setLocationDenied(true);
+          setTrackingEnabled(false);
+          setLocationMessage("Доступ к геопозиции заблокирован. Разрешите его в настройках браузера и нажмите кнопку снова.");
+        } else {
+          setLocationMessage("Не удалось определить координаты. Попробуйте ещё раз.");
+        }
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    );
   };
 
   const draftFor = (execution: Execution) => drafts[execution.id] ?? {
@@ -272,23 +317,65 @@ export function DriverPage() {
       </header>
 
       <main className="max-w-2xl mx-auto p-4 space-y-3">
-        <Card>
-          <CardContent className="p-3 flex flex-wrap items-center justify-between gap-2">
-            <div className="text-xs text-muted-foreground">{locationMessage || "Диспетчер может видеть позицию машины"}</div>
-            <Button size={locationDenied ? "lg" : "sm"} className={locationDenied ? "w-full h-12" : ""} variant={trackingEnabled ? "secondary" : "outline"} onClick={enableTracking} disabled={trackingEnabled}>
-              {trackingEnabled ? "Геолокация включена" : locationDenied ? "Включить геолокацию" : "Включить геолокацию"}
-            </Button>
+        {/* Geolocation status / prompt banner */}
+        <Card className={locationDenied ? "border-destructive/40 bg-destructive/5" : trackingEnabled ? "border-emerald-200 bg-emerald-50/50" : ""}>
+          <CardContent className="p-3.5 space-y-2">
+            <div className="flex items-start gap-2.5">
+              {trackingEnabled ? (
+                <span className="relative flex h-3 w-3 mt-0.5 shrink-0">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+                </span>
+              ) : locationDenied ? (
+                <AlertTriangle className="w-4 h-4 text-destructive shrink-0 mt-0.5" />
+              ) : (
+                <MapPin className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" />
+              )}
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-medium text-foreground">
+                  {trackingEnabled
+                    ? "🟢 Передача геопозиции активна"
+                    : locationDenied
+                      ? "Геолокация отключена или заблокирована"
+                      : "Передача геопозиции диспетчеру"}
+                </div>
+                <div className="text-[11px] text-muted-foreground mt-0.5">
+                  {locationMessage || (trackingEnabled ? "Диспетчер видит положение машины на карте в реальном времени." : "Включите передачу геопозиции, чтобы диспетчер видел вас на маршруте.")}
+                </div>
+                {locationDenied && (
+                  <div className="text-[11px] text-destructive mt-1 font-medium">
+                    💡 Подсказка: нажмите значок настроек/замка 🔒 в строке браузера, разрешите «Геопозицию» и нажмите кнопку ниже.
+                  </div>
+                )}
+              </div>
+            </div>
+            {!trackingEnabled && (
+              <Button
+                size="sm"
+                className={`w-full ${locationDenied ? "bg-destructive text-destructive-foreground hover:bg-destructive/90" : ""}`}
+                variant={locationDenied ? "default" : "outline"}
+                onClick={enableTracking}
+              >
+                <RotateCcw className="w-3.5 h-3.5 mr-1.5" />
+                {locationDenied ? "Запросить доступ к геолокации повторно" : "Включить передачу геолокации"}
+              </Button>
+            )}
           </CardContent>
         </Card>
+
         {assignment.route_yandex_url && (
           <Button className="w-full h-11 gap-2" onClick={() => window.open(assignment.route_yandex_url, "_blank")}>
-            <MapPin className="w-4 h-4" />
-            Открыть маршрут в Яндекс Навигаторе
+            <Navigation className="w-4 h-4" />
+            Открыть полный маршрут в Яндекс Навигаторе
           </Button>
         )}
+
         {executions.map((execution) => {
           const draft = draftFor(execution);
           const isTerminal = terminalStatuses.has(draft.status);
+          const hasPhone = Boolean(execution.store_phone && execution.store_phone.trim());
+          const cleanPhone = execution.store_phone ? execution.store_phone.replace(/[^\d+]/g, "") : "";
+
           return (
             <Card key={execution.id} className={isTerminal ? "border-emerald-200" : ""}>
               <CardHeader className="pb-3">
@@ -297,25 +384,72 @@ export function DriverPage() {
                     {isTerminal ? <CheckCircle2 className="w-4 h-4" /> : <span className="font-bold">{execution.visit_order}</span>}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <CardTitle className="text-base">{execution.store_name}</CardTitle>
-                    <p className="text-sm text-muted-foreground flex items-start gap-1 mt-1"><MapPin className="w-3.5 h-3.5 mt-0.5 shrink-0" />{execution.address}</p>
-                    {execution.arrive_by && <p className="text-xs text-primary mt-1">Ориентир: {execution.arrive_by}</p>}
-                     {execution.products && <p className="text-xs text-muted-foreground mt-2">Груз: {execution.products}</p>}
-                     <div className="mt-2 rounded-md bg-muted/60 px-2.5 py-2 text-xs">
-                       <span className="font-medium">План: {execution.quantity}</span>
-                       <span className="mx-1.5 text-muted-foreground">·</span>
-                       <span className="font-medium">Доставлено: {execution.actual_qty}</span>
-                       <span className="mx-1.5 text-muted-foreground">·</span>
-                       <span className={execution.shortfall_qty > 0 ? "font-medium text-orange-700" : "font-medium text-emerald-700"}>
-                         Остаток: {execution.shortfall_qty}
-                       </span>
-                     </div>
+                    <CardTitle className="text-base font-semibold">{execution.store_name}</CardTitle>
+                    <p className="text-sm text-muted-foreground flex items-start gap-1 mt-1">
+                      <MapPin className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                      <span className="break-words">{execution.address}</span>
+                    </p>
+                    {execution.arrive_by && <p className="text-xs text-primary font-medium mt-1">Ориентир / время: {execution.arrive_by}</p>}
+                    
+                    {/* Customer & Phone info */}
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      {execution.store_client && (
+                        <div className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                          <User className="w-3.5 h-3.5 text-muted-foreground/70" />
+                          <span>Клиент: <strong className="text-foreground font-medium">{execution.store_client}</strong></span>
+                        </div>
+                      )}
+                      {hasPhone ? (
+                        <a
+                          href={`tel:${cleanPhone}`}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-semibold hover:bg-emerald-100 transition-colors"
+                        >
+                          <PhoneCall className="w-3.5 h-3.5" />
+                          <span>{execution.store_phone}</span>
+                        </a>
+                      ) : (
+                        <span className="text-[11px] text-muted-foreground italic flex items-center gap-1">
+                          <Phone className="w-3 h-3 opacity-50" />
+                          Телефон не указан
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Prominent High-Visibility Cargo / Quantity Block */}
+                    <div className="mt-3 p-3 rounded-xl bg-primary/5 border border-primary/15 flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">К выгрузке / Заказ</div>
+                        {execution.products ? (
+                          <div className="text-xs font-medium text-foreground mt-0.5 break-words">
+                            {execution.products}
+                          </div>
+                        ) : (
+                          <div className="text-xs text-muted-foreground mt-0.5">Товары по накладной</div>
+                        )}
+                      </div>
+                      <div className="text-right shrink-0 bg-background/90 px-3.5 py-2 rounded-lg border shadow-xs">
+                        <div className="text-2xl sm:text-3xl font-black text-primary leading-none">
+                          {execution.quantity}
+                          <span className="text-xs font-bold text-muted-foreground ml-1.5">ед./шт.</span>
+                        </div>
+                        {isTerminal && (
+                          <div className="text-[11px] font-semibold mt-1 text-muted-foreground">
+                            Факт: <span className="text-foreground font-bold">{execution.actual_qty}</span>
+                            {execution.shortfall_qty > 0 && (
+                              <span className="text-destructive font-bold ml-1">· недовоз {execution.shortfall_qty}</span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
                   </div>
                 </div>
               </CardHeader>
+
               <CardContent className="space-y-3">
                 <div className="space-y-2">
-                  <span className="text-xs text-muted-foreground">Действие по доставке</span>
+                  <span className="text-xs font-semibold text-muted-foreground">Действие по доставке</span>
                   <div className="grid grid-cols-2 gap-2">
                     {(["delivered", "partial", "failed", "rescheduled"] as const).map((status) => (
                       <Button
@@ -342,14 +476,15 @@ export function DriverPage() {
                   </div>
                   {(draft.status === "delivered" || draft.status === "partial") && (
                     <>
-                      <label className="block text-xs text-muted-foreground">Фактически доставлено
+                      <label className="block text-xs font-semibold text-muted-foreground">
+                        Фактически доставлено (шт / ед)
                         <input
                           type="number"
                           min={0}
                           max={execution.quantity}
                           step="any"
                           inputMode="decimal"
-                          className="mt-1 w-full h-10 rounded-md border bg-background px-2 text-sm"
+                          className="mt-1 w-full h-11 rounded-md border bg-background px-3 text-base font-bold"
                           value={draft.actual_qty}
                           onChange={(event) => {
                             const value = event.target.value;
@@ -404,16 +539,45 @@ export function DriverPage() {
                     </div>
                   </div>
                 </div>
+
                 <Textarea
                   value={draft.driver_comment}
                   onChange={(event) => setDrafts((current) => ({ ...current, [execution.id]: { ...draft, driver_comment: event.target.value } }))}
-                  placeholder={draft.status === "rescheduled" ? "Причина переноса (обязательно)" : "Комментарий водителя"}
+                  placeholder={draft.status === "rescheduled" ? "Причина переноса (обязательно)" : "Комментарий водителя (если есть проблемы)"}
                   className="min-h-[54px]"
                   required={draft.status === "rescheduled"}
                 />
-                <div className="flex gap-2">
-                  {execution.yandex_url && <Button variant="outline" className="flex-1" onClick={() => window.open(execution.yandex_url, "_blank")}>Навигация</Button>}
-                  <Button className="flex-1" onClick={() => saveExecution(execution)} disabled={savingId === execution.id}>
+
+                <div className="flex flex-wrap gap-2 pt-1">
+                  {hasPhone && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="flex-1 min-w-[120px] border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+                      onClick={() => {
+                        window.location.href = `tel:${cleanPhone}`;
+                      }}
+                    >
+                      <Phone className="w-4 h-4 mr-1.5" />
+                      Позвонить
+                    </Button>
+                  )}
+                  {execution.yandex_url && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="flex-1 min-w-[120px]"
+                      onClick={() => window.open(execution.yandex_url, "_blank")}
+                    >
+                      <MapPin className="w-4 h-4 mr-1.5" />
+                      Навигация
+                    </Button>
+                  )}
+                  <Button
+                    className="flex-1 min-w-[140px] font-semibold"
+                    onClick={() => saveExecution(execution)}
+                    disabled={savingId === execution.id}
+                  >
                     {savingId === execution.id ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
                     Сохранить
                   </Button>
@@ -426,3 +590,4 @@ export function DriverPage() {
     </div>
   );
 }
+
