@@ -450,11 +450,11 @@ export function DriverPage() {
                   <div className="shrink-0 pt-1 sm:pt-0">
                     <Button
                       size="lg"
-                      className="w-full sm:w-auto h-12 px-6 font-bold shadow-md bg-primary hover:bg-primary/90 text-primary-foreground gap-2.5 text-base rounded-xl transition-transform active:scale-95"
+                      className="w-full sm:w-auto min-h-12 px-6 font-bold shadow-md bg-primary hover:bg-primary/90 text-primary-foreground gap-2.5 text-sm sm:text-base rounded-xl transition-transform active:scale-95 whitespace-nowrap"
                       onClick={openNavigatorApp}
                     >
-                      <Navigation className="w-5 h-5 fill-current" />
-                      Поехать в Навигаторе
+                      <Navigation className="w-5 h-5 fill-current shrink-0" />
+                      <span>Поехать в Навигаторе</span>
                     </Button>
                   </div>
                 </div>
@@ -658,140 +658,107 @@ export function DriverPage() {
                           </span>
                         )}
                       </div>
-
-                      {/* Goods & Order Info - High-Quality, Spacious, Beautiful Design */}
-                      <div className="mt-4 rounded-xl border border-primary/20 bg-gradient-to-br from-muted/30 via-background to-muted/20 p-4 space-y-3 shadow-2xs">
-                        <div className="flex flex-wrap items-center justify-between gap-3 pb-2 border-b border-border/60">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <div className="w-7 h-7 rounded-lg bg-primary/10 text-primary flex items-center justify-center shrink-0">
-                              <Package className="w-4 h-4" />
-                            </div>
-                            <div>
-                              <span className="text-xs font-bold text-foreground uppercase tracking-wide">
-                                Заказ к выгрузке
-                              </span>
-                              {hasExplicitProducts && (
-                                <p className="text-[11px] text-muted-foreground">
-                                  {productItems.length === 1 ? "1 наименование" : `${productItems.length} позиций в заказе`}
-                                </p>
-                              )}
-                            </div>
-                          </div>
-
-                          <div className="flex items-center gap-2 bg-primary/10 border border-primary/25 px-3.5 py-1.5 rounded-lg shadow-2xs">
-                            <span className="text-xs font-semibold text-primary/80">Всего к сдаче:</span>
-                            <span className="text-base font-black text-primary tracking-tight">
-                              {execution.quantity} <span className="text-xs font-bold">ед.</span>
-                            </span>
-                          </div>
-                        </div>
-
-                        {hasExplicitProducts ? (
-                          <div className="space-y-2">
-                            {productItems.length === 1 ? (
-                              <div className="text-xs font-medium text-foreground bg-background p-3 rounded-lg border flex items-start gap-2.5 shadow-2xs">
-                                <span className="text-base leading-none mt-0.5">📦</span>
-                                <div className="flex-1 min-w-0">
-                                  <span className="font-semibold text-foreground break-words leading-relaxed">{productItems[0]}</span>
-                                  <span className="text-muted-foreground block text-[11px] mt-0.5 font-medium">Количество: {execution.quantity} ед.</span>
-                                </div>
-                              </div>
-                            ) : (
-                              <div className="space-y-2">
-                                <div className="flex items-center justify-between">
-                                  <span className="text-xs text-muted-foreground font-semibold">Список товарных позиций:</span>
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    className="h-6 px-2 text-xs text-primary font-bold hover:bg-primary/10"
-                                    onClick={() =>
-                                      setExpandedProducts((prev) => ({
-                                        ...prev,
-                                        [execution.id]: !isProductsExpanded,
-                                      }))
-                                    }
-                                  >
-                                    {isProductsExpanded ? (
-                                      <>Свернуть список <ChevronUp className="w-3.5 h-3.5 ml-1" /></>
-                                    ) : (
-                                      <>Развернуть все позиции ({productItems.length}) <ChevronDown className="w-3.5 h-3.5 ml-1" /></>
-                                    )}
-                                  </Button>
-                                </div>
-
-                                {isProductsExpanded ? (
-                                  <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
-                                    {productItems.map((item, idx) => (
-                                      <div
-                                        key={idx}
-                                        className="flex items-start gap-2.5 p-2.5 rounded-lg bg-background border text-xs font-medium text-foreground shadow-2xs"
-                                      >
-                                        <span className="w-5 h-5 rounded-md bg-primary/10 text-primary text-[11px] font-bold flex items-center justify-center shrink-0 mt-0.5">
-                                          {idx + 1}
-                                        </span>
-                                        <span className="flex-1 break-words leading-relaxed">{item}</span>
-                                      </div>
-                                    ))}
-                                  </div>
-                                ) : (
-                                  <div className="space-y-1.5">
-                                    {productItems.slice(0, 2).map((item, idx) => (
-                                      <div
-                                        key={idx}
-                                        className="flex items-start gap-2 p-2 rounded-lg bg-background/80 border text-xs font-medium text-foreground"
-                                      >
-                                        <span className="w-4 h-4 rounded bg-muted text-muted-foreground text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">
-                                          {idx + 1}
-                                        </span>
-                                        <span className="flex-1 truncate">{item}</span>
-                                      </div>
-                                    ))}
-                                    {productItems.length > 2 && (
-                                      <button
-                                        type="button"
-                                        className="w-full text-center py-1 text-xs text-primary font-semibold hover:underline bg-background/50 rounded border border-dashed"
-                                        onClick={() =>
-                                          setExpandedProducts((prev) => ({
-                                            ...prev,
-                                            [execution.id]: true,
-                                          }))
-                                        }
-                                      >
-                                        + ещё {productItems.length - 2} поз. (нажмите чтобы открыть)
-                                      </button>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <div className="text-xs text-muted-foreground bg-background p-3 rounded-lg border border-dashed flex items-center gap-2.5">
-                            <span className="text-base">📋</span>
-                            <span className="font-medium">Товары по товарно-сопроводительной накладной (ТТН / УПД)</span>
-                          </div>
-                        )}
-
-                        {isTerminal && (
-                          <div className="pt-2 border-t flex items-center justify-between text-xs text-muted-foreground">
-                            <span>
-                              Фактически сдано: <strong className="text-foreground font-bold">{execution.actual_qty ?? 0} ед.</strong>
-                            </span>
-                            {execution.shortfall_qty > 0 && (
-                              <span className="text-destructive font-bold bg-destructive/10 px-2 py-0.5 rounded">
-                                Недовоз: {execution.shortfall_qty} ед.
-                              </span>
-                            )}
-                          </div>
-                        )}
-                      </div>
-
                     </div>
                   </div>
                 </CardHeader>
 
-                <CardContent className="space-y-3 pt-2 px-4 sm:px-5 pb-5">
+                {/* Goods & Order Info - Full-width across card, compact and cleanly expandable */}
+                <div className="border-y border-border/80 bg-muted/20 px-4 sm:px-5 py-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2.5">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div className="w-7 h-7 rounded-lg bg-primary/10 text-primary flex items-center justify-center shrink-0">
+                        <Package className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold text-foreground uppercase tracking-wide">
+                            Заказ к выгрузке
+                          </span>
+                          {hasExplicitProducts && productItems.length > 1 && (
+                            <span className="text-[11px] font-semibold text-muted-foreground bg-background px-2 py-0.5 rounded-full border">
+                              {productItems.length} поз.
+                            </span>
+                          )}
+                        </div>
+                        {hasExplicitProducts && productItems.length === 1 && (
+                          <p className="text-xs text-muted-foreground truncate max-w-[240px] sm:max-w-md">
+                            {productItems[0]}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <div className="flex items-center gap-1.5 bg-primary/10 border border-primary/20 px-3 py-1 rounded-lg">
+                        <span className="text-xs font-semibold text-primary/80">Всего:</span>
+                        <span className="text-sm font-black text-primary">
+                          {execution.quantity} <span className="text-[11px] font-bold">ед.</span>
+                        </span>
+                      </div>
+
+                      {hasExplicitProducts && productItems.length > 1 && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 px-2.5 text-xs text-primary font-bold hover:bg-primary/10 gap-1"
+                          onClick={() =>
+                            setExpandedProducts((prev) => ({
+                              ...prev,
+                              [execution.id]: !isProductsExpanded,
+                            }))
+                          }
+                        >
+                          <span>{isProductsExpanded ? "Свернуть" : "Список товаров"}</span>
+                          {isProductsExpanded ? (
+                            <ChevronUp className="w-3.5 h-3.5" />
+                          ) : (
+                            <ChevronDown className="w-3.5 h-3.5" />
+                          )}
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Expanded goods view */}
+                  {hasExplicitProducts && productItems.length > 1 && isProductsExpanded && (
+                    <div className="mt-3 pt-3 border-t border-border/60 space-y-1.5 max-h-64 overflow-y-auto pr-1">
+                      {productItems.map((item, idx) => (
+                        <div
+                          key={idx}
+                          className="flex items-start gap-2.5 p-2.5 rounded-lg bg-background border text-xs font-medium text-foreground shadow-2xs"
+                        >
+                          <span className="w-5 h-5 rounded-md bg-primary/10 text-primary text-[11px] font-bold flex items-center justify-center shrink-0 mt-0.5">
+                            {idx + 1}
+                          </span>
+                          <span className="flex-1 break-words leading-relaxed">{item}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {!hasExplicitProducts && (
+                    <div className="mt-2 text-xs text-muted-foreground flex items-center gap-1.5">
+                      <span>📋</span>
+                      <span>Товары по товарно-сопроводительной накладной (ТТН / УПД)</span>
+                    </div>
+                  )}
+
+                  {isTerminal && (
+                    <div className="mt-2.5 pt-2 border-t border-border/60 flex items-center justify-between text-xs text-muted-foreground">
+                      <span>
+                        Фактически сдано: <strong className="text-foreground font-bold">{execution.actual_qty ?? 0} ед.</strong>
+                      </span>
+                      {execution.shortfall_qty > 0 && (
+                        <span className="text-destructive font-bold bg-destructive/10 px-2 py-0.5 rounded">
+                          Недовоз: {execution.shortfall_qty} ед.
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <CardContent className="space-y-3 pt-4 px-4 sm:px-5 pb-5">
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-semibold text-muted-foreground">Действие по доставке</span>
@@ -946,25 +913,11 @@ export function DriverPage() {
                     required={draft.status === "rescheduled"}
                   />
 
-                  <div className="flex flex-wrap gap-2.5 pt-1.5 items-center">
-                    {hasPhone && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className="flex-1 min-w-[110px] h-11 border-emerald-300 text-emerald-700 hover:bg-emerald-50 font-semibold"
-                        onClick={() => {
-                          window.location.href = `tel:${cleanPhone}`;
-                        }}
-                      >
-                        <Phone className="w-4 h-4 mr-1.5" />
-                        Позвонить
-                      </Button>
-                    )}
-
+                  <div className="space-y-2.5 pt-2">
                     {isCurrentActive ? (
                       <Button
                         type="button"
-                        className="flex-1 min-w-[150px] h-11 bg-primary text-primary-foreground font-bold shadow-md hover:bg-primary/90 text-sm rounded-lg"
+                        className="w-full h-12 bg-primary text-primary-foreground font-bold shadow-md hover:bg-primary/90 text-sm sm:text-base rounded-xl flex items-center justify-center gap-2 whitespace-nowrap transition-transform active:scale-[0.99]"
                         onClick={() => {
                           const lat = execution.lat;
                           const lon = execution.lon;
@@ -1004,24 +957,40 @@ export function DriverPage() {
                           }
                         }}
                       >
-                        <Navigation className="w-4 h-4 mr-1.5 fill-current" />
-                        Поехать в Навигаторе
+                        <Navigation className="w-5 h-5 fill-current shrink-0" />
+                        <span>Поехать в Навигаторе</span>
                       </Button>
                     ) : !isTerminal ? (
-                      <div className="flex-1 min-w-[140px] h-11 flex items-center justify-center gap-1.5 text-xs font-semibold text-muted-foreground bg-muted/40 rounded-lg px-3 border border-dashed">
-                        <Clock className="w-3.5 h-3.5 text-muted-foreground/70" />
-                        <span>Точка №{execution.visit_order} (в очереди)</span>
+                      <div className="w-full py-2 px-3 flex items-center justify-center gap-2 text-xs font-semibold text-muted-foreground bg-muted/40 rounded-lg border border-dashed">
+                        <Clock className="w-4 h-4 text-muted-foreground/70 shrink-0" />
+                        <span>Точка №{execution.visit_order} (в очереди — навигация станет доступна после текущей точки)</span>
                       </div>
                     ) : null}
 
-                    <Button
-                      className="flex-1 min-w-[130px] h-11 font-bold text-sm"
-                      onClick={() => saveExecution(execution)}
-                      disabled={savingId === execution.id}
-                    >
-                      {savingId === execution.id ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-                      Сохранить
-                    </Button>
+                    <div className="flex gap-2.5 items-center">
+                      {hasPhone && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="flex-1 h-11 border-emerald-300 text-emerald-700 hover:bg-emerald-50 font-semibold text-sm whitespace-nowrap"
+                          onClick={() => {
+                            window.location.href = `tel:${cleanPhone}`;
+                          }}
+                        >
+                          <Phone className="w-4 h-4 mr-1.5 shrink-0" />
+                          <span>Позвонить</span>
+                        </Button>
+                      )}
+
+                      <Button
+                        className="flex-1 h-11 font-bold text-sm whitespace-nowrap shadow-xs"
+                        onClick={() => saveExecution(execution)}
+                        disabled={savingId === execution.id}
+                      >
+                        {savingId === execution.id ? <Loader2 className="w-4 h-4 animate-spin mr-2 shrink-0" /> : null}
+                        <span>{isTerminal ? "Сохранить изменения" : "Сохранить"}</span>
+                      </Button>
+                    </div>
                   </div>
                 </CardContent>
               </Card>
