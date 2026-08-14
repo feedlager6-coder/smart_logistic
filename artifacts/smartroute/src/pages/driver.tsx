@@ -368,6 +368,49 @@ export function DriverPage() {
           </CardContent>
         </Card>
 
+        {/* Quick action bar: Direct button to navigate to current active stop with clean explanation */}
+        {(() => {
+          const activeStop = executions.find((e) => !terminalStatuses.has(draftFor(e).status));
+          if (!activeStop) return null;
+
+          return (
+            <Card className="border-primary/30 bg-primary/5 shadow-xs overflow-hidden">
+              <CardContent className="p-3.5">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-primary">
+                      <Compass className="w-4 h-4 animate-spin shrink-0" style={{ animationDuration: "6s" }} />
+                      <span>СЛЕДУЮЩАЯ ТОЧКА: №{activeStop.visit_order}</span>
+                    </div>
+                    <div className="font-semibold text-sm text-foreground truncate mt-0.5">
+                      {activeStop.store_name}
+                    </div>
+                    <div className="text-xs text-muted-foreground truncate flex items-center gap-1 mt-0.5">
+                      <MapPin className="w-3 h-3 shrink-0 opacity-70" />
+                      <span>{activeStop.address}</span>
+                    </div>
+                  </div>
+
+                  {activeStop.yandex_url && (
+                    <Button
+                      size="default"
+                      className="shrink-0 h-11 px-4 font-bold shadow-xs bg-primary hover:bg-primary/90 text-primary-foreground gap-1.5"
+                      onClick={() => window.open(activeStop.yandex_url, "_blank")}
+                    >
+                      <Navigation className="w-4 h-4" />
+                      Поехать
+                    </Button>
+                  )}
+                </div>
+                <div className="mt-2.5 pt-2 border-t border-primary/15 flex items-center justify-between text-[11px] text-muted-foreground">
+                  <span>💡 Навигатор построит маршрут от вашего текущего положения</span>
+                  <span className="font-medium text-foreground">Заказ: {activeStop.quantity} ед.</span>
+                </div>
+              </CardContent>
+            </Card>
+          );
+        })()}
+
         {/* List of stops */}
         {(() => {
           const activeExecutionId = executions.find((e) => !terminalStatuses.has(draftFor(e).status))?.id;
@@ -388,7 +431,8 @@ export function DriverPage() {
             const hasPhone = Boolean(execution.store_phone && execution.store_phone.trim());
             const cleanPhone = execution.store_phone ? execution.store_phone.replace(/[^\d+]/g, "") : "";
             const productItems = parseProductItems(execution.products);
-            const isProductsExpanded = expandedProducts[execution.id] ?? (isCurrentActive && productItems.length > 0);
+            const hasExplicitProducts = productItems.length > 0;
+            const isProductsExpanded = expandedProducts[execution.id] ?? (isCurrentActive && hasExplicitProducts);
 
             return (
               <Card
@@ -402,9 +446,12 @@ export function DriverPage() {
                 }`}
               >
                 {isCurrentActive && (
-                  <div className="flex items-center gap-1.5 px-3.5 py-1.5 bg-primary text-primary-foreground text-xs font-bold tracking-wide">
-                    <Compass className="w-4 h-4 animate-spin" style={{ animationDuration: "6s" }} />
-                    <span>ТЕКУЩАЯ ТОЧКА ДОСТАВКИ</span>
+                  <div className="flex items-center justify-between px-3.5 py-1.5 bg-primary text-primary-foreground text-xs font-bold tracking-wide">
+                    <div className="flex items-center gap-1.5">
+                      <Compass className="w-4 h-4 animate-spin" style={{ animationDuration: "6s" }} />
+                      <span>ТЕКУЩАЯ ТОЧКА ДОСТАВКИ</span>
+                    </div>
+                    <span className="text-[11px] font-medium opacity-90">Точка №{execution.visit_order}</span>
                   </div>
                 )}
 
@@ -465,34 +512,41 @@ export function DriverPage() {
                       </div>
 
                       {/* Goods / Order Composition Block */}
-                      <div className="mt-3 rounded-lg border bg-muted/20 overflow-hidden">
+                      <div className="mt-3 rounded-lg border bg-muted/25 overflow-hidden">
                         <div className="p-2.5 flex items-center justify-between gap-2">
                           <div className="flex items-center gap-1.5 min-w-0">
                             <Package className="w-4 h-4 text-primary shrink-0" />
-                            <span className="text-xs font-semibold text-foreground">
-                              Товары к выгрузке
-                            </span>
-                            {productItems.length > 0 && (
-                              <span className="text-[11px] font-medium text-muted-foreground bg-background px-1.5 py-0.2 rounded border">
-                                {productItems.length} поз.
-                              </span>
-                            )}
+                            <div className="min-w-0">
+                              <div className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                                <span>Товары по заявке</span>
+                                {hasExplicitProducts && (
+                                  <span className="text-[10px] font-medium text-muted-foreground bg-background px-1.5 py-0.2 rounded border">
+                                    {productItems.length} поз.
+                                  </span>
+                                )}
+                              </div>
+                              {!hasExplicitProducts && (
+                                <div className="text-[11px] text-muted-foreground truncate">
+                                  Товары по накладной
+                                </div>
+                              )}
+                            </div>
                           </div>
 
                           <div className="flex items-center gap-2 shrink-0">
-                            <div className="text-right">
-                              <span className="text-xs text-muted-foreground mr-1">Кол-во:</span>
-                              <span className="text-sm font-bold text-foreground">
+                            <div className="bg-background px-2.5 py-1 rounded-md border text-right shadow-2xs">
+                              <span className="text-[11px] text-muted-foreground mr-1">Кол-во:</span>
+                              <span className="text-sm font-black text-primary">
                                 {execution.quantity}
                               </span>
                             </div>
 
-                            {productItems.length > 0 && (
+                            {hasExplicitProducts && (
                               <Button
                                 type="button"
-                                variant="ghost"
+                                variant="outline"
                                 size="sm"
-                                className="h-7 px-2 text-xs text-primary font-medium hover:bg-background"
+                                className="h-7 px-2 text-xs font-medium bg-background hover:bg-muted text-foreground"
                                 onClick={() =>
                                   setExpandedProducts((prev) => ({
                                     ...prev,
@@ -515,26 +569,26 @@ export function DriverPage() {
                         </div>
 
                         {/* Expandable list of goods */}
-                        {isProductsExpanded && productItems.length > 0 && (
+                        {isProductsExpanded && hasExplicitProducts && (
                           <div className="px-3 pb-3 pt-1 border-t bg-background space-y-1.5">
                             <div className="text-[11px] font-semibold text-muted-foreground mb-1">
-                              Перечень позиций по заявке:
+                              Перечень позиций по накладной:
                             </div>
-                            <ul className="space-y-1 text-xs">
+                            <div className="space-y-1 text-xs">
                               {productItems.map((item, idx) => (
-                                <li
+                                <div
                                   key={idx}
-                                  className="flex items-start gap-2 p-1.5 rounded-md bg-muted/30 border border-muted/50"
+                                  className="flex items-start gap-2 p-1.5 rounded-md bg-muted/40 border border-muted/60"
                                 >
                                   <span className="w-4 h-4 rounded-full bg-primary/10 text-primary text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">
                                     {idx + 1}
                                   </span>
-                                  <span className="text-foreground flex-1 break-words font-medium">
+                                  <span className="text-foreground flex-1 break-words font-medium text-xs">
                                     {item}
                                   </span>
-                                </li>
+                                </div>
                               ))}
-                            </ul>
+                            </div>
                           </div>
                         )}
 
@@ -696,7 +750,7 @@ export function DriverPage() {
                         onClick={() => window.open(execution.yandex_url, "_blank")}
                       >
                         <Navigation className="w-4 h-4 mr-1.5" />
-                        Навигация
+                        {isCurrentActive ? "Поехать к точке" : "Навигация"}
                       </Button>
                     )}
 

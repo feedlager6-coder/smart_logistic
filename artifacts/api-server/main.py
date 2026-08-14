@@ -3352,20 +3352,20 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: str, dispatcher: 
         "🚚 Рейс на сегодня",
         f"{assignment.get('vehicle_name') or 'Машина'} · {route_points} точек · {total_km:g} км",
         "",
-        "Начните работу по кнопкам ниже.",
+        "💡 Для удобной работы откройте «📦 Исполнение» — там подсвечена следующая точка и навигация строится по очереди.",
     ]
     keyboard = []
-    if navigation_urls:
-        if len(navigation_urls) == 1:
-            keyboard.append([{"text": "🧭 Маршрут", "url": navigation_urls[0]}])
-        else:
-            for index, url in enumerate(navigation_urls, start=1):
-                keyboard.append([{"text": f"🧭 Часть {index}", "url": url}])
     safe_driver_url = _telegram_http_url(driver_url)
     if safe_driver_url:
-        keyboard.append([{"text": "📦 Исполнение", "url": safe_driver_url}])
+        keyboard.append([{"text": "📦 Исполнение рейса", "url": safe_driver_url}])
     else:
-        keyboard.append([{"text": "📦 Исполнение", "callback_data": f"tg:execution:{assignment_id}"}])
+        keyboard.append([{"text": "📦 Исполнение рейса", "callback_data": f"tg:execution:{assignment_id}"}])
+    if navigation_urls:
+        if len(navigation_urls) == 1:
+            keyboard.append([{"text": "🗺 Общий обзор всех точек", "url": navigation_urls[0]}])
+        else:
+            for index, url in enumerate(navigation_urls, start=1):
+                keyboard.append([{"text": f"🗺 Обзор (часть {index})", "url": url}])
     username = (dispatcher.get("dispatcher_telegram_username") or "").strip().lstrip("@")
     phone = _normalize_driver_phone(dispatcher.get("dispatcher_phone") or "")
     if username:
