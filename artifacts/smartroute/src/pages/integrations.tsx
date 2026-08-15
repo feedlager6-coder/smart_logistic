@@ -633,12 +633,12 @@ function OneCSetupFlow({ onBack, onDone }: SetupFlowProps) {
                 <div>
                   <p className="font-semibold">SmartRoute_Setup.zip</p>
                   <p className="text-xs text-muted-foreground mt-0.5">
-                    Содержит файл SmartRoute.epf и инструкцию. Параметры подключения уже встроены.
+                    Содержит готовый файл кода SmartRoute.bsl с вашим встроенным API-ключом и инструкцию.
                   </p>
                 </div>
                 <Button onClick={handleDownload} className="w-full" size="lg">
                   <Download className="w-4 h-4 mr-2" />
-                  Скачать SmartRoute.epf
+                  Скачать пакет SmartRoute_Setup.zip
                 </Button>
                 {fileDownloaded && (
                   <p className="text-xs text-emerald-600 flex items-center justify-center gap-1.5">
