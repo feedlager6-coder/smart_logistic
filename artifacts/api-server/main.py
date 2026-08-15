@@ -9352,7 +9352,10 @@ _1C_BSL_MODULE = '''// ╔══════════════════
 Функция ПроверитьСоединениеНаСервере()
 	Н = _ПолучитьНастройки();
 
-	РезультатHTTP = _ВыполнитьЗапрос(Н.URL, "GET", "/api/healthz", Н.Ключ);
+	РезультатHTTP = _ВыполнитьЗапрос(Н.URL, "POST", "/api/v1/integration/ping", Н.Ключ);
+	Если НЕ РезультатHTTP.Успех Тогда
+		РезультатHTTP = _ВыполнитьЗапрос(Н.URL, "GET", "/api/healthz", Н.Ключ);
+	КонецЕсли;
 
 	Если РезультатHTTP.Успех Тогда
 		КолМаг = "?";
@@ -9889,6 +9892,38 @@ def _record_integration_sync(request: Request, orders_received: int,
         conn.close()
     except Exception as exc:
         logger.warning("_record_integration_sync error: %s", exc)
+
+
+@app.post("/api/v1/integration/ping")
+@app.post("/api/integrations/ping")
+def ping_integration(request: Request):
+    """Отметка проверки соединения из 1С. Обновляет статус интеграции и пишет лог."""
+    username = getattr(request.state, "username", "")
+    if username.startswith("api_key:"):
+        try:
+            key_id = int(username.split(":")[1])
+            conn = get_db()
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("SELECT id FROM integrations WHERE (config->>'api_key_id')::int = %s AND status != 'disabled'", (key_id,))
+            row = cur.fetchone()
+            if row:
+                integration_id = row["id"]
+                cur.execute("""
+                    INSERT INTO integration_sync_logs
+                        (integration_id, started_at, finished_at, duration_ms, status,
+                         orders_received, stores_matched, stores_unmatched, errors_count, error_detail)
+                    VALUES (%s, NOW(), NOW(), 0, 'success', 0, 0, 0, 0, 'Проверка соединения 1С (Успешно)')
+                """, (integration_id,))
+                cur.execute(
+                    "UPDATE integrations SET last_sync_at=NOW(), status='active' WHERE id=%s",
+                    (integration_id,)
+                )
+                conn.commit()
+            cur.close()
+            conn.close()
+        except Exception as exc:
+            logger.warning("ping_integration error: %s", exc)
+    return {"ok": True, "message": "Соединение активно"}
 
 
 @app.get("/api/integrations")
