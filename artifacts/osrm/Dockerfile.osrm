@@ -1,0 +1,19 @@
+# Self-hosted OSRM Backend for Railway (Dagestan & SKFO)
+FROM ghcr.io/project-osrm/osrm-backend:latest
+
+WORKDIR /data
+
+ARG MAP_URL="https://download.geofabrik.de/russia/north-caucasus-fed-district-latest.osm.pbf"
+
+RUN apt-get update && apt-get install -y wget ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN wget --progress=dot:giga -O map.osm.pbf "${MAP_URL}" && \
+    osrm-extract -p /opt/car.lua map.osm.pbf && \
+    osrm-partition map.osrm && \
+    osrm-customize map.osrm && \
+    rm map.osm.pbf
+
+ENV PORT=8080
+EXPOSE 8080
+
+CMD ["sh", "-c", "osrm-routed --algorithm mld --port ${PORT:-8080} /data/map.osrm"]
+

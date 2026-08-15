@@ -1,0 +1,55 @@
+# ── Version control ───────────────────────────────────────────────────────────
+.git
+.gitignore
+
+# ── Agent / IDE state ─────────────────────────────────────────────────────────
+.agents
+.cache
+.local
+.replit
+.replitignore
+
+# ── Assets not needed in build ────────────────────────────────────────────────
+attached_assets
+
+# ── Build outputs (built fresh inside Docker) ─────────────────────────────────
+**/dist
+**/.next
+**/build
+
+# ── Dependencies (installed fresh inside Docker) ──────────────────────────────
+# Keep root node_modules out; pnpm installs into node_modules inside the image
+node_modules
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+**/__pycache__
+**/*.pyc
+**/*.pyo
+*.egg-info
+.pythonlibs
+
+# ── Env files (secrets must come from Railway env vars, not files) ─────────────
+.env
+.env.local
+.env.*.local
+# Keep .env.example for documentation purposes
+!.env.example
+
+# ── Docs / notes not needed at runtime ───────────────────────────────────────
+SESSION_NOTES.md
+ROADMAP.md
+CONTEXT.md
+TREE.md
+PROJECT_FLOW.md
+CHANGELOG.md
+ARCHITECTURE.md
+API.md
+README.md
+docs/
+
+# ── Dev-only artifacts ────────────────────────────────────────────────────────
+# Exclude all mockup-sandbox source/assets — not needed at runtime
+artifacts/mockup-sandbox/
+# Re-include package.json: pnpm needs it to resolve the workspace graph during
+# `pnpm install --frozen-lockfile` (it is registered as an importer in pnpm-lock.yaml)
+!artifacts/mockup-sandbox/package.json

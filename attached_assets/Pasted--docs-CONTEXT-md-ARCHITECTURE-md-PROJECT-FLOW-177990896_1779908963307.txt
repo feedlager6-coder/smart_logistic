@@ -1,0 +1,188 @@
+Прочитай все файлы в docs/ перед началом работы.
+Особенно CONTEXT.md, ARCHITECTURE.md, PROJECT_FLOW.md.
+
+Твоя задача: полная диагностика и исправление всех багов.
+НЕ меняй архитектуру — только исправляй.
+
+ЭТАП 1 — ДИАГНОСТИКА
+
+Запусти сервер и проверь все endpoints через curl:
+
+1. curl http://localhost:8080/api/healthz
+   → должен вернуть {"status": "ok"}
+
+2. curl http://localhost:8080/api/stores
+   → должен вернуть массив магазинов
+
+3. curl -X POST http://localhost:8080/api/stores \
+   -H "Content-Type: application/json" \
+   -d '{"name":"Тест","address":"Москва ул Ленина 1"}'
+   → должен вернуть 201 с созданным магазином
+
+4. curl http://localhost:8080/api/stores/template \
+   -o test.xlsx
+   → должен скачать файл
+
+5. curl -X POST http://localhost:8080/api/route/build \
+   -H "Content-Type: application/json" \
+   -d '{
+     "store_ids": [1, 2],
+     "vehicles": [
+       {"name": "Газель 1", "capacity_kg": 1500},
+       {"name": "Газель 2", "capacity_kg": 1500}
+     ],
+     "depot_lat": 55.7558,
+     "depot_lon": 37.6173,
+     "use_time_windows": false,
+     "use_unload_time": false
+   }'
+   → должен вернуть маршруты для 2 машин
+
+Выведи результат каждого теста.
+Если есть ошибка — покажи полный traceback из логов сервера.
+
+ЭТАП 2 — ИСПРАВЬ БАГИ
+
+БАГ 1: 404 при POST /api/stores
+
+Проверь в main.py:
+1. Endpoint "/api/stores" существует
+2. Pydantic модель StoreInput валидна
+3. Нет конфликта с другими routes
+
+Если endpoint есть но возвращает 404 —
+проблема скорее всего в Vite proxy.
+Проверь vite.config.ts:
+
+server: {
+  proxy: {
+    '/api': {
+      target: 'http://localhost:8080',
+      changeOrigin: true,
+      rewrite: (path) => path
+    }
+  }
+}
+
+Убедись что target указывает на правильный порт
+где запущен FastAPI (8080 по README).
+
+БАГ 2: 404 при GET /api/stores/template
+
+Проверь порядок регистрации endpoints в main.py.
+/template ОБЯЗАТЕЛЬНО должен быть ДО /{id}:
+
+@app.get("/api/stores/template")  # ← ПЕРВЫМ
+async def download_template(): ...
+
+@app.get("/api/stores/{store_id}")  # ← ВТОРЫМ
+async def get_store(store_id: int): ...
+
+Если порядок неправильный — переставь.
+
+Также проверь что endpoint возвращает
+правильный Content-Type:
+return StreamingResponse(
+    stream,
+    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    headers={"Content-Disposition": "attachment; filename=smartroute_template.xlsx"}
+)
+
+БАГ 3: Сайт ломается при нескольких курьерах
+
+В solve_vrp() найди и исправь:
+
+1. Убедись что vehicles передаётся как список словарей:
+   vehicles = [
+       {"name": "Газель 1", "capacity_kg": 1500},
+       {"name": "Газель 2", "capacity_kg": 1500}
+   ]
+
+2. num_vehicles = len(vehicles) — не хардкод
+
+3. Если capacities указаны — передавай как список int:
+   capacities = [v.get("capacity_kg", 99999) for v in vehicles]
+
+4. В OR-Tools убедись что depot index = 0:
+   manager = pywrapcp.RoutingIndexManager(n, num_vehicles, 0)
+
+5. Добавь обработку ошибок:
+   try:
+       solution = routing.SolveWithParameters(params)
+       if not solution:
+           # Вернуть простое распределение без OR-Tools
+           return fallback_distribution(all_coords, num_vehicles)
+   except Exception as e:
+       logger.error(f"VRP error: {e}", exc_info=True)
+       raise HTTPException(500, f"Ошибка оптимизации: {e}")
+
+6. Функция fallback_distribution для случая когда
+   OR-Tools не находит решение:
+   
+   def fallback_distribution(all_coords, num_vehicles):
+       points = list(range(1, len(all_coords)))
+       routes = [[] for _ in range(num_vehicles)]
+       for i, point in enumerate(points):
+           routes[i % num_vehicles].append(point)
+       return routes
+
+ЭТАП 3 — ПРОИЗВОДИТЕЛЬНОСТЬ для 1000 доставок/день
+
+1. Индексы в PostgreSQL (добавь в init_db):
+   CREATE INDEX IF NOT EXISTS idx_stores_geocode 
+     ON stores(geocode_status);
+   CREATE INDEX IF NOT EXISTS idx_sessions_date 
+     ON route_sessions(date DESC);
+   CREATE INDEX IF NOT EXISTS idx_session_stores_session 
+     ON route_session_stores(session_id);
+
+2. Кэш геокодера в памяти уже есть — убедись что
+   он не очищается между запросами:
+ARCHITECTURE.md
+architecture.md
+
+
+ocode_cache: dict = {}  # global, вне функций
+
+3. Для solve_vrp с большим числом точек
+   увеличь time_limit:
+   if n > 20:
+       params.time_limit.seconds = 30
+   elif n > 10:
+       params.time_limit.seconds = 15
+   else:
+       params.time_limit.seconds = 10
+
+4. Добавь connection pooling для PostgreSQL.
+   Если используешь asyncpg — добавь:
+   pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+
+ЭТАП 4 — ПРОВЕРЬ ВЕСЬ FLOW
+
+После всех исправлений пройди полный сценарий:
+
+Шаг 1: Добавь магазин вручную
+  POST /api/stores {"name": "Тест1", "address": "Москва ул Ленина 5"}
+  → статус 201, координаты найдены
+
+Шаг 2: Скачай шаблон
+  GET /api/stores/template
+  → файл xlsx скачан
+
+Шаг 3: Построй маршрут для 3 машин с 9 магазинами
+  POST /api/route/build с 3 vehicles и 9 store_ids
+  → 3 маршрута, каждый с 3 магазинами, ссылки Яндекс
+
+Шаг 4: Проверь аналитику
+  GET /api/analytics/summary
+  → данные о построенном маршруте
+
+Выведи результат каждого шага.
+
+ЭТАП 5 — ОТЧЁТ
+
+После завершения напиши:
+1. Что было найдено в диагностике
+2. Что исправлено и как
+3. Результаты тестов с реальными данными
+4. Что осталось нерешённым ge

@@ -1,0 +1,371 @@
+{
+  "info": {
+    "name": "SmartRoute Public API v1",
+    "description": "Полный набор запросов к SmartRoute Public API. Перед использованием:\n1. Задайте переменную окружения `base_url` (например: https://my-app.railway.app)\n2. Задайте `api_key` (sr_live_XXXX-XXXX)\n\nАвтор: SmartRoute API Team",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "version": "1.0.0"
+  },
+  "variable": [
+    { "key": "base_url", "value": "https://ВАШ_ДОМЕН",       "type": "string" },
+    { "key": "api_key",  "value": "sr_live_XXXX-XXXX",       "type": "string" },
+    { "key": "store_id", "value": "1",                        "type": "string" },
+    { "key": "session_id", "value": "1",                      "type": "string" }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{api_key}}", "type": "string" }]
+  },
+  "item": [
+    {
+      "name": "🔑 Keys",
+      "item": [
+        {
+          "name": "Get current key info",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/v1/keys/me", "host": ["{{base_url}}"], "path": ["api", "v1", "keys", "me"] },
+            "description": "Метаданные текущего API-ключа (id, name, scopes, is_active, last_used_at)"
+          }
+        }
+      ]
+    },
+    {
+      "name": "🏪 Stores",
+      "item": [
+        {
+          "name": "List stores",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/stores?page=1&page_size=50",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "stores"],
+              "query": [
+                { "key": "page",      "value": "1" },
+                { "key": "page_size", "value": "50" },
+                { "key": "q",         "value": "",    "disabled": true },
+                { "key": "city",      "value": "",    "disabled": true }
+              ]
+            },
+            "description": "Список магазинов с пагинацией. Scope: stores:read"
+          }
+        },
+        {
+          "name": "Get store by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/v1/stores/{{store_id}}", "host": ["{{base_url}}"], "path": ["api", "v1", "stores", "{{store_id}}"] },
+            "description": "Детали конкретного магазина. Scope: stores:read"
+          }
+        },
+        {
+          "name": "Create store",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Магазин Центральный\",\n  \"address\": \"ул. Пушкина, 10\",\n  \"city\": \"Махачкала\",\n  \"time_from\": \"09:00\",\n  \"time_to\": \"18:00\",\n  \"unload_minutes\": 15\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/v1/stores", "host": ["{{base_url}}"], "path": ["api", "v1", "stores"] },
+            "description": "Создать магазин. Scope: stores:write"
+          }
+        },
+        {
+          "name": "Update store",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Магазин Центральный (новое название)\",\n  \"unload_minutes\": 20\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/v1/stores/{{store_id}}", "host": ["{{base_url}}"], "path": ["api", "v1", "stores", "{{store_id}}"] },
+            "description": "Обновить магазин. Scope: stores:write"
+          }
+        },
+        {
+          "name": "Delete store",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/v1/stores/{{store_id}}", "host": ["{{base_url}}"], "path": ["api", "v1", "stores", "{{store_id}}"] },
+            "description": "Удалить магазин. Scope: stores:write"
+          }
+        },
+        {
+          "name": "Batch upsert stores",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"stores\": [\n    {\n      \"name\": \"Магазин Центральный\",\n      \"address\": \"ул. Пушкина, 10\",\n      \"city\": \"Махачкала\"\n    },\n    {\n      \"name\": \"Магазин Северный\",\n      \"address\": \"пр. Ленина, 55\",\n      \"city\": \"Махачкала\",\n      \"time_from\": \"10:00\",\n      \"time_to\": \"20:00\"\n    }\n  ]\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/v1/stores/batch", "host": ["{{base_url}}"], "path": ["api", "v1", "stores", "batch"] },
+            "description": "Массовый upsert магазинов (по name+city). Limit 1000. Scope: stores:write"
+          }
+        }
+      ]
+    },
+    {
+      "name": "📦 Orders",
+      "item": [
+        {
+          "name": "List orders for date",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/orders?date=2026-07-01",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "orders"],
+              "query": [{ "key": "date", "value": "2026-07-01" }]
+            },
+            "description": "Заявки на дату. Scope: orders:read"
+          }
+        },
+        {
+          "name": "Batch import orders",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"delivery_date\": \"2026-07-01\",\n  \"orders\": [\n    {\n      \"store_name\": \"Магазин Центральный\",\n      \"address\": \"ул. Пушкина, 10\",\n      \"city\": \"Махачкала\",\n      \"delivery_date\": \"2026-07-01\",\n      \"quantity\": 48,\n      \"weight_kg\": 120.5,\n      \"products\": \"Молоко×12, Хлеб×24, Масло×12\",\n      \"external_id\": \"ORD-2026-001\"\n    },\n    {\n      \"store_name\": \"Магазин Северный\",\n      \"address\": \"пр. Ленина, 55\",\n      \"city\": \"Махачкала\",\n      \"delivery_date\": \"2026-07-01\",\n      \"quantity\": 32,\n      \"weight_kg\": 80.0,\n      \"external_id\": \"ORD-2026-002\"\n    }\n  ]\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/v1/orders/batch", "host": ["{{base_url}}"], "path": ["api", "v1", "orders", "batch"] },
+            "description": "Массовая загрузка заявок. matched/unmatched в ответе. Scope: orders:write"
+          }
+        },
+        {
+          "name": "Delete orders for date",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/orders?date=2026-07-01",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "orders"],
+              "query": [{ "key": "date", "value": "2026-07-01" }]
+            },
+            "description": "Удалить все заявки на дату. Scope: orders:write"
+          }
+        }
+      ]
+    },
+    {
+      "name": "🚚 Routes",
+      "item": [
+        {
+          "name": "Build routes (VRP)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"store_ids\": [1, 2, 3, 4, 5],\n  \"vehicles\": [\n    { \"name\": \"Авто 1\", \"capacity_kg\": 1500 },\n    { \"name\": \"Авто 2\", \"capacity_kg\": 1000 }\n  ],\n  \"depot_lat\": 42.9849,\n  \"depot_lon\": 47.5046,\n  \"delivery_date\": \"2026-07-01\",\n  \"use_time_windows\": false,\n  \"use_unload_time\": true,\n  \"average_speed\": 40\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/v1/routes/build", "host": ["{{base_url}}"], "path": ["api", "v1", "routes", "build"] },
+            "description": "VRP-оптимизация маршрутов. Возвращает routes + savings + yandex_urls. Scope: routes:build"
+          }
+        },
+        {
+          "name": "List route sessions",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/routes?page=1&page_size=20",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "routes"],
+              "query": [
+                { "key": "page",      "value": "1" },
+                { "key": "page_size", "value": "20" }
+              ]
+            },
+            "description": "История сессий маршрутов. Scope: routes:read"
+          }
+        },
+        {
+          "name": "Get route session",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/v1/routes/{{session_id}}", "host": ["{{base_url}}"], "path": ["api", "v1", "routes", "{{session_id}}"] },
+            "description": "Детали сессии маршрута. Scope: routes:read"
+          }
+        },
+        {
+          "name": "Delete route session",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/v1/routes/{{session_id}}", "host": ["{{base_url}}"], "path": ["api", "v1", "routes", "{{session_id}}"] },
+            "description": "Удалить сессию маршрута. Scope: routes:write"
+          }
+        }
+      ]
+    },
+    {
+      "name": "📊 Analytics",
+      "item": [
+        {
+          "name": "Summary",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/v1/analytics/summary", "host": ["{{base_url}}"], "path": ["api", "v1", "analytics", "summary"] },
+            "description": "Общая сводка: сессии, км, экономия. Scope: analytics:read"
+          }
+        },
+        {
+          "name": "Daily stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/analytics/daily?date_from=2026-06-01&date_to=2026-06-30",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "analytics", "daily"],
+              "query": [
+                { "key": "date_from", "value": "2026-06-01" },
+                { "key": "date_to",   "value": "2026-06-30" }
+              ]
+            },
+            "description": "Ежедневная статистика. Scope: analytics:read"
+          }
+        },
+        {
+          "name": "Monthly stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/analytics/monthly?date_from=2026-01-01&date_to=2026-06-30",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "analytics", "monthly"],
+              "query": [
+                { "key": "date_from", "value": "2026-01-01" },
+                { "key": "date_to",   "value": "2026-06-30" }
+              ]
+            },
+            "description": "Помесячная статистика. Scope: analytics:read"
+          }
+        },
+        {
+          "name": "Top stores",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/v1/analytics/top-stores", "host": ["{{base_url}}"], "path": ["api", "v1", "analytics", "top-stores"] },
+            "description": "Топ-10 магазинов. Scope: analytics:read"
+          }
+        },
+        {
+          "name": "Vehicle load",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/analytics/vehicle-load?date_from=2026-06-01&date_to=2026-06-30",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "analytics", "vehicle-load"],
+              "query": [
+                { "key": "date_from", "value": "2026-06-01" },
+                { "key": "date_to",   "value": "2026-06-30" }
+              ]
+            },
+            "description": "Загрузка транспорта по дням. Scope: analytics:read"
+          }
+        }
+      ]
+    },
+    {
+      "name": "⚙️ Settings",
+      "item": [
+        {
+          "name": "Get settings",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/v1/settings", "host": ["{{base_url}}"], "path": ["api", "v1", "settings"] },
+            "description": "Настройки компании (стоимость км). Scope: settings:read"
+          }
+        },
+        {
+          "name": "Update settings",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fuel_price\": 72.5,\n  \"fuel_consumption\": 13.5\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/v1/settings", "host": ["{{base_url}}"], "path": ["api", "v1", "settings"] },
+            "description": "Обновить настройки. cost_per_km пересчитывается автоматически. Scope: settings:write"
+          }
+        }
+      ]
+    },
+    {
+      "name": "🪝 Webhooks",
+      "item": [
+        {
+          "name": "Webhook ingest (Bearer auth)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"orders\": [\n    {\n      \"store_name\": \"Магазин Центральный\",\n      \"address\": \"ул. Пушкина, 10\",\n      \"delivery_date\": \"2026-07-01\",\n      \"weight_kg\": 120.5,\n      \"quantity\": 48,\n      \"products\": \"Молоко×12, Хлеб×24\",\n      \"external_id\": \"ORD-001\"\n    }\n  ]\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/v1/orders/batch", "host": ["{{base_url}}"], "path": ["api", "v1", "orders", "batch"] },
+            "description": "Приём заявок через Bearer-авторизацию. Scope: orders:write"
+          }
+        },
+        {
+          "name": "Webhook ingest (token in URL)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"orders\": [\n    {\n      \"store_name\": \"Магазин Центральный\",\n      \"address\": \"ул. Пушкина, 10\",\n      \"delivery_date\": \"2026-07-01\",\n      \"weight_kg\": 120.5,\n      \"quantity\": 48\n    }\n  ]\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/v1/webhooks/ingest/{{api_key}}", "host": ["{{base_url}}"], "path": ["api", "v1", "webhooks", "ingest", "{{api_key}}"] },
+            "description": "Приём заявок с токеном в URL (для систем без поддержки заголовков). Scope: webhooks:receive"
+          }
+        }
+      ]
+    },
+    {
+      "name": "🔒 Auth errors (demo)",
+      "item": [
+        {
+          "name": "401 — No auth header",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/v1/stores", "host": ["{{base_url}}"], "path": ["api", "v1", "stores"] },
+            "description": "Пример ответа 401 при отсутствии токена"
+          }
+        },
+        {
+          "name": "403 — Insufficient scope",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/v1/settings", "host": ["{{base_url}}"], "path": ["api", "v1", "settings"] },
+            "description": "Пример ответа 403 при недостаточных правах (если у ключа нет settings:read)"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,520 @@
+# SmartRoute — Developer Onboarding
+
+> Этот документ предназначен для нового разработчика или агента, впервые открывающего репозиторий.
+> Цель: за 10–15 минут понять что это, как работает, и как запустить.
+
+---
+
+## Что это
+
+**SmartRoute** — B2B SaaS для оптимизации маршрутов доставки.
+
+Целевая аудитория: логисты/диспетчеры малого бизнеса (любой российский город). Диспетчер:
+1. Вносит магазины (точки доставки) один раз
+2. Каждый день загружает заявки (вес, объём из 1С/Антор/любой системы)
+3. Нажимает «Построить маршрут» — система за 5–60 сек строит оптимальные маршруты
+4. Отправляет водителям ссылку Яндекс.Навигатора в WhatsApp
+
+---
+
+## Архитектура
+
+```
+Browser (React + Vite)
+       │
+       │  /api/*  (Vite proxy → localhost:8080 в dev)
+       ▼
+FastAPI (Python 3.11) — artifacts/api-server/main.py
+       │
+       ├── PostgreSQL (psycopg2) — stores, users, route_sessions, daily_orders
+       ├── OSRM (router.project-osrm.org) — матрицы расстояний
+       ├── OR-Tools (Google) — VRP solver
+       └── Yandex Geocoder / Nominatim — геокодинг
+```
+
+**Ключевой принцип**: весь бэкенд — один файл `artifacts/api-server/main.py` (~5400 строк). Намеренно для простоты MVP.
+
+---
+
+## Структура файлов
+
+```
+artifacts/
+  api-server/
+    main.py              ← ВЕСЬ бэкенд: FastAPI, VRP, geocoding, auth, DB
+    requirements.txt     ← Python зависимости
+  smartroute/
+    src/
+      pages/             ← Страницы React (home, stores, route, result, orders,
+      │                     analytics, history, settings)
+      components/        ← Компоненты (layout.tsx, sidebar, ui/*)
+      context/auth.tsx   ← Контекст авторизации, JWT cookie
+    vite.config.ts       ← Proxy /api → :8080, BASE_PATH
+    index.html           ← translate="no" (защита от Google Translate)
+
+lib/
+  api-spec/openapi.yaml             ← OpenAPI контракт
+  api-client-react/src/generated/   ← Сгенерированные React Query хуки (НЕ редактировать)
+  zod/src/generated/                ← Сгенерированные Zod схемы
+
+Dockerfile                          ← Для Railway
+railway.toml                        ← Railway config
+DEPLOY.md                           ← Инструкция по деплою Railway
+```
+
+---
+
+## База данных
+
+Все таблицы создаются в `init_db()` при старте (CREATE TABLE IF NOT EXISTS):
+
+| Таблица | Назначение |
+|---------|-----------|
+| `users` | Логин/пароль (bcrypt), plan (trial/basic/pro/enterprise), is_admin |
+| `stores` | Точки доставки: name, address, lat, lon, time_window, unload_minutes, owner_id |
+| `geocode_cache` | Кэш геокодинга: address → lat/lon, hit_count |
+| `route_sessions` | Сохранённые маршруты: result_json (JSONB), total_km, cost_per_km |
+| `route_session_stores` | Связь сессия ↔ магазин (для аналитики) |
+| `company_settings` | Настройки стоимости на компанию: fuel_price, fuel_consumption, cost_per_km |
+| `daily_orders` | Заявки на день: store_id FK (nullable), weight_kg, volume_m3, amount_rub, delivery_date |
+
+**Мульти-пользователь**: каждая таблица имеет `owner_id INTEGER REFERENCES users(id)`. Все запросы фильтруют по `owner_id = get_user_id(request)`.
+
+---
+
+## Авторизация
+
+- **Метод**: JWT в HttpOnly cookie (`smartroute_token`)
+- **Middleware**: `auth_middleware` (до маршрутов) — декодирует JWT, пишет `request.state.user_id`
+- **Получение user_id в эндпоинте**: `uid = get_user_id(request)` — 401 если нет куки
+- **Важно**: Cookie `SameSite=none; Secure=true` — обязательно для работы в Replit iframe
+
+```python
+# Паттерн в каждом защищённом эндпоинте:
+@app.get("/api/some-resource")
+def some_endpoint(request: Request):
+    uid = get_user_id(request)  # ← ВСЕГДА так, не _require_auth
+    ...
+```
+
+---
+
+## VRP — Алгоритм построения маршрутов
+
+Функция `solve_vrp()` в main.py, ~600 строк:
+
+```
+Шаг 1: Матрица расстояний
+  OSRM Table API (публичный, без ключа, реальные дороги OSM)
+  → fallback GraphHopper Matrix API (Free план, ≤5 точек/кластер)
+  → fallback Haversine (прямые расстояния, всегда работает)
+
+Шаг 2: Кластеризация
+  equal-angle sweep sectors — делит stores по углу от депо на N кластеров
+  (N = число машин), каждый кластер идёт к одной машине
+
+Шаг 3: TSP per cluster
+  OR-Tools (Google) — оптимизирует порядок внутри каждого кластера
+  Time windows: опционально (учёт временных окон магазинов)
+
+Шаг 4: Inter-route Or-opt
+  _inter_route_relocate() — перемещает точки между маршрутами если это
+  уменьшает суммарный пробег (обычно −15-40%)
+
+Шаг 5: Балансировка
+  _rebalance_min_stops() — гарантирует ≥ 0.70×avg точек у каждой машины
+  _rebalance_max_stops() — гарантирует ≤ cap точек (если задан лимит)
+  _rebalance_count_balance() — финальный баланс ±1 точки между машинами
+  auto_cap — автолимит = ceil(avg × 1.5) если пользователь не задал
+
+Шаг 6: ETA
+  Параллельный OSRM Table API per маршрут → drive_minutes
+  Fallback: Haversine × 2.0 (средняя городская поправка)
+```
+
+**Известное ограничение**: Sweep-кластеризация не учитывает веса при распределении. `capacity_kg` используется как demand в OR-Tools, но только внутри уже созданных кластеров. При сильно неравномерных весах возможно превышение ёмкости у одной машины.
+
+---
+
+## Заявки на день (daily_orders)
+
+**Сценарий**: диспетчер каждое утро выгружает список заявок из 1С/Антор в Excel, загружает в SmartRoute, затем строит маршрут.
+
+**Поток данных**:
+```
+Excel файл (1С/Антор/Google Sheets)
+    ↓ POST /api/orders/preview
+Автодетект колонок (_detect_column_mapping)
+    ↓ Пользователь подтверждает маппинг
+    ↓ POST /api/orders/import
+Сохранение в daily_orders (сопоставление с stores по fuzzy-matching)
+    ↓ При POST /api/route/build
+Загрузка весов → OR-Tools demands → per-stop weight_kg → per-route total_weight_kg
+```
+
+**Детектирование колонок** (`_detect_column_mapping`):
+- 12 полей: store_name, address, yandex_url, weight_kg, volume_m3, amount_rub, order_number, zone, notes, time_from, time_to, unload_minutes, city
+- Для каждого поля — список ключевых слов (рус + eng), проверяются в порядке от специфичного к общему
+- "Название" → store_name, "Вес, кг" → weight_kg, "Ссылка Яндекс" → yandex_url, "Время с" → time_from
+
+**Сопоставление магазинов** (`_match_store_to_db`):
+- Проход 1: точное совпадение нормализованного имени
+- Проход 2: substring match (одно имя содержится в другом)
+- Проход 3: word overlap ≥ 50% (по нормализованным словам)
+- Несопоставленные строки сохраняются (`store_id = NULL`), в маршрут не попадают
+
+**Повторное сопоставление** (`POST /api/orders/rematch`):
+- Вызывается после создания новых магазинов (массово или по одному)
+- Берёт все daily_orders с store_id IS NULL для сегодня, прогоняет `_match_store_to_db` заново
+- Обновляет store_id в БД для найденных совпадений
+- Возвращает: `{"matched_count": N, "still_unmatched": M}`
+
+---
+
+## Импорт заявок и автоматическое создание магазинов
+
+> Этот раздел описывает полный поток: от загрузки Excel до автовыбора магазинов на маршруте.
+
+### Как работает импорт
+
+```
+Диспетчер загружает Excel (1С / Антор / Google Sheets)
+    ↓ POST /api/orders/preview  (файл разбирается, колонки определяются автоматически)
+Страница показывает:
+  - Статистику: N строк / M сопоставлено / K не найдено
+  - Таблицу маппинга колонок (пользователь может скорректировать)
+  - Предпросмотр всех строк со ВСЕМИ колонками файла (горизонтальный скролл)
+    ↓ Пользователь нажимает "Загрузить"
+    ↓ POST /api/orders/import  (сохраняет в daily_orders, store_id=NULL если не найдено)
+```
+
+### Как работает сопоставление
+
+`_detect_column_mapping` автоматически определяет, какая колонка Excel соответствует каждому полю (по ключевым словам в заголовке). Затем `_match_store_to_db` сопоставляет каждое название точки из заявки с существующими магазинами в БД по трём проходам (точное совпадение → substring → word overlap ≥50%).
+
+### Как работает массовое создание магазинов
+
+После импорта, если есть несопоставленные точки:
+1. В `orders.tsx` сохраняется состояние `pendingUnmatched` — данные о несопоставленных строках (name, address, yandex_url, time_from, time_to, unload_minutes, city) из маппинга колонок Excel
+2. Показывается карточка с кнопкой **"Добавить все N магазинов"**
+3. При нажатии — последовательные `POST /api/stores` для каждого уникального несопоставленного магазина, заполняя все доступные поля из Excel
+4. После создания — `POST /api/orders/rematch` сопоставляет новые магазины с существующими заявками
+5. Данные обновляются в UI автоматически
+
+**Важно**: `pendingUnmatched` живёт только в памяти React-компонента в рамках текущей сессии. При перезагрузке страницы или импорте нового файла данные сбрасываются. Для повторного заполнения нужно загрузить файл заново.
+
+### Как работает автозаполнение формы магазина (кнопка "Добавить")
+
+Кнопка "Добавить" рядом с несопоставленным магазином формирует URL вида:
+```
+/stores?prefill=Название%20Магазина&address=Адрес&yandex_url=...&time_from=09:00&time_to=18:00&unload_minutes=15&city=Ваш%20Город
+```
+`stores.tsx` читает эти параметры при монтировании (`useEffect` on mount) и заполняет форму добавления магазина всеми доступными данными. Пользователю остаётся только проверить и сохранить.
+
+### Как работает автовыбор магазинов
+
+При переходе `/route?from=orders` (кнопка "К маршруту" в orders.tsx):
+1. `route.tsx` проверяет URL-параметр `from=orders`
+2. Ждёт загрузки и `stores`, и `todayOrders`
+3. Собирает Set из `store_id` сопоставленных заявок
+4. Вызывает `setSelectedStores(orderStoreIds)` — отмечает магазины автоматически
+5. Флаг `sessionStorage["smartroute_autoselect_YYYY-MM-DD"]` предотвращает повторный автовыбор при навигации назад/вперёд в рамках одной браузерной сессии
+
+**Важный нюанс**: после успешного импорта (`handleImport` success в orders.tsx) этот ключ **сбрасывается** (`sessionStorage.removeItem`). Это гарантирует, что при повторном переходе "К маршруту" после нового импорта автовыбор сработает заново с актуальными данными.
+
+### Ограничения (текущее состояние)
+
+- `pendingUnmatched` доступен только сразу после импорта в рамках текущей SPA-сессии
+- При перезагрузке страницы — "Добавить все" недоступно, только "Добавить" по одному
+- yandex_url из колонки Excel передаётся в форму магазина, но геокодинг выполняется уже при создании магазина (не в момент импорта)
+- Ограничение fuzzy-matching: схожие названия ("Магазин Весна" vs "Весна-маркет") могут не совпасть → ручная корректировка
+
+---
+
+## Геокодинг
+
+Всегда через `/api/geocode` (никогда прямо из браузера — CORS):
+
+```
+Яндекс Geocoder API (YANDEX_GEOCODER_API_KEY)  ← быстро, точно для РФ
+    → fallback Nominatim (1 req/sec, без ключа)
+    → не найдено → geocode_status = "not_found"
+
+Кэш: таблица geocode_cache (city+address ключ, hit_count)
+```
+
+Ссылки Яндекс Карт: `parse_yandex_link()` парсит `whatshere[point]=LON,LAT` (важно: порядок LON,LAT, не LAT,LON).
+
+---
+
+## Excel-обмен
+
+**Скачивание файлов** (Excel export): через base64 JSON `{"data": "<base64>", "filename": "..."}` — StreamingResponse/binary ломается в Replit proxy. Frontend: `atob(data)` → Blob → `<a download>`.
+
+**Формат магазинов** (7 колонок): Название, Ссылка Яндекс, Адрес, Город, Разгрузка мин, Время с, Время до.
+
+---
+
+## Яндекс.Навигатор
+
+- Лимит 20 точек в URL (склад + 19 магазинов)
+- При > 19 магазинов маршрут разбивается на сегменты автоматически
+- Константа `YANDEX_NAV_MAX_STOPS = 20`
+- Склад всегда первой точкой (Яндекс заменяет на GPS водителя)
+- `yandex_urls: list[str]` — все сегменты; `yandex_url: str` — первый (backward compat)
+
+---
+
+## Основные API эндпоинты
+
+```
+GET    /api/healthz                    — health check (no auth)
+POST   /api/auth/login                 — JWT cookie (rate limit: 5 попыток/15 мин)
+GET    /api/auth/me                    — текущий пользователь
+POST   /api/auth/logout
+
+GET    /api/stores                     — список магазинов
+POST   /api/stores                     — создать магазин
+PUT    /api/stores/{id}                — обновить
+DELETE /api/stores/{id}                — удалить
+POST   /api/stores/{id}/geocode        — геокодировать
+POST   /api/stores/import              — импорт из Excel
+POST   /api/stores/import/preview      — предпросмотр (с дедупликацией)
+GET    /api/stores/export              — экспорт всех магазинов в Excel (base64)
+GET    /api/stores/template            — скачать шаблон Excel (base64)
+
+GET    /api/geocode?address=...        — геокодировать адрес
+GET    /api/geocode?yandex_url=...     — распарсить ссылку Яндекс Карт
+
+POST   /api/orders/preview             — разобрать Excel заявок (multipart/form-data)
+POST   /api/orders/import              — сохранить заявки
+GET    /api/orders?date=YYYY-MM-DD     — получить заявки за дату
+DELETE /api/orders?date=YYYY-MM-DD    — удалить заявки за дату
+
+POST   /api/route/build                — построить маршруты (VRP)
+GET    /api/route/sessions             — история маршрутов (paged)
+GET    /api/route/sessions/{id}        — получить маршрут
+DELETE /api/route/sessions/{id}        — удалить маршрут
+
+GET    /api/analytics/summary          — сводка
+GET    /api/analytics/daily            — по дням (date_from, date_to)
+GET    /api/analytics/monthly          — по месяцам
+GET    /api/analytics/vehicle-load     — загрузка машин
+GET    /api/analytics/top-stores       — топ магазинов
+
+GET    /api/settings                   — настройки компании
+PUT    /api/settings                   — обновить настройки
+
+GET    /api/admin/users                — список пользователей [admin only]
+POST   /api/admin/users                — создать пользователя [admin only]
+PUT    /api/admin/users/{id}           — обновить (plan, note, is_active) [admin only]
+DELETE /api/admin/users/{id}           — удалить пользователя [admin only]
+```
+
+---
+
+## Локальный запуск (Replit)
+
+```bash
+# Запускаем API сервер (Workflow: "Start API Server")
+cd artifacts/api-server && python3 main.py
+# → http://localhost:8080
+
+# Запускаем фронтенд (Workflow: "Start Frontend")
+PORT=5000 BASE_PATH=/ pnpm --filter @workspace/smartroute run dev
+# → http://localhost:5000
+
+# Переменные окружения в Replit:
+# ADMIN_PASSWORD — пароль admin-пользователя (обязательно)
+# JWT_SECRET — секрет для JWT (обязательно в prod, иначе рандомный при каждом старте)
+# PGHOST/PGUSER/PGPASSWORD/PGDATABASE/PGPORT — Replit PostgreSQL (автоматически)
+# YANDEX_GEOCODER_API_KEY — опционально, улучшает геокодинг
+```
+
+---
+
+## Деплой на Railway
+
+```bash
+# В Railway: New Project → Deploy from GitHub
+# + New → Database → PostgreSQL  (auto: DATABASE_URL)
+# Variables: установить ADMIN_PASSWORD, JWT_SECRET, YANDEX_GEOCODER_API_KEY
+# Health check: /api/healthz
+```
+
+FastAPI отдаёт `/api/*` и собранный Vite frontend из `./static/` (один сервис).
+Dockerfile: node:20-slim → pnpm → vite build → python:3.11-slim → uvicorn.
+
+---
+
+## Известные ограничения
+
+| Ограничение | Описание |
+|-------------|---------|
+| Sweep без учёта весов | Кластеризация не учитывает weight_kg при распределении по машинам. Weights используются в OR-Tools demands, но только внутри уже назначенного кластера. При крайне неравных весах capacity может быть нарушена. |
+| Unit demands по умолчанию | Если заявки на день не загружены, каждый магазин = 1 единица груза |
+| OSRM публичный | router.project-osrm.org — публичный, без гарантий uptime. Fallback: Haversine |
+| GraphHopper Free | 5 точек/кластер на Free плане, авто-fallback на OSRM/Haversine |
+| Яндекс Навигатор ≤20 точек | Автоматическая сегментация при превышении |
+| Orval codegen сломан | Orval v8.9.1 в Replit падает с "Failed to resolve input". Для новых эндпоинтов использовать прямой fetch() в компоненте |
+| `_capacitated_cluster_sweep` | Функция определена (~строка 664), но нигде не вызывается — мёртвый код |
+
+---
+
+## Известные архитектурные решения
+
+- **Одиночный файл бэкенд** — намеренно для простоты MVP, не рефакторить без нужды
+- **base64 для Excel** — обход бага Replit proxy (обрезает binary responses)
+- **Cookie SameSite=none** — для работы в Replit iframe/Canvas
+- **Глобальный 401-handler** — QueryCache/MutationCache в App.tsx → DOM event `api:unauthorized` → auth.tsx
+- **`migrate_moscow_stores()` ОТКЛЮЧЕНА** — вызов убран из startup, не возвращать
+
+---
+
+## Быстрые ссылки на ключевые функции в main.py
+
+| Функция | Назначение |
+|---------|-----------|
+| `init_db()` | Создание всех таблиц |
+| `get_db()` | Получение psycopg2 connection |
+| `get_user_id(request)` | Получить uid текущего пользователя (401 если нет) |
+| `solve_vrp(...)` | Весь VRP solver |
+| `geocode_address(addr)` | Геокодирование с кэшем |
+| `parse_yandex_link(url)` | Парсинг ссылок Яндекс Карт |
+| `calculate_savings(...)` | Расчёт экономии (км, топливо, деньги) |
+| `yandex_nav_urls(coords)` | Формирование Яндекс.Навигатор URLs с сегментацией |
+| `_detect_column_mapping(hdrs)` | Автодетект колонок Excel для заявок |
+| `_match_store_to_db(name, stores)` | Fuzzy-matching магазинов по имени |
+| `_inter_route_relocate(routes)` | Or-opt пост-обработка (межмаршрутная оптимизация) |
+| `_cluster_by_weight_sweep(...)` | Ёмкостная sweep-кластеризация (учёт capacity_kg) |
+| `_enforce_capacity(...)` | Бин-паккинг коррекция после кластеризации |
+
+---
+
+## Предупреждение о переполнении грузоподъёмности (Capacity Overflow Warning)
+
+**Проблема**: 2 машины × 1000 кг, 3 заявки × 600 кг. Суммарно 1800 кг ≤ 2000 кг — pre-flight пропускает. Но геометрически невозможно распределить без превышения: 600+600 = 1200 > 1000.
+
+**Решение**: после построения маршрутов `build_route` проверяет `total_weight_kg > capacity_kg` per route и добавляет в `route_warnings`:
+```
+"Невозможно идеально распределить груз: Машина 1: 1200 / 1000 кг (+200 кг).
+ Причина — бин-паккинг..."
+```
+
+**Frontend result.tsx**:
+- Глобальный banner через уже существующий `route_warnings` renderer
+- Per-vehicle: progress bar (зелёный ≤80%, amber 80-100%, красный >100%)
+- Заголовок машины: "1200 кг / 1000 кг" красным при превышении, "1200 кг" синим при норме
+
+**Поле в API response**: `routes[i].capacity_kg` — 0 если не задано (новое поле, backward-compatible).
+
+---
+
+## Несопоставленные магазины (Unmatched Stores UX — Variant C)
+
+**Проблема**: в заявках есть "Магазин Альфа", в базе нет → `store_id = NULL` → не попадает в маршрут → диспетчер не знает почему.
+
+**Решение — Вариант C (inline notification + prefill)**:
+
+1. **`/orders` страница**: после таблицы заявок — карточка amber-цвета "Несопоставленные точки (N)" со списком уникальных неопознанных имён. Каждая строка имеет кнопку "Добавить магазин" → `<a href="/stores?prefill=НАЗВАНИЕ">`.
+
+2. **`/stores` страница**: при наличии `?prefill=NAME` в URL:
+   - `useEffect` на mount → `setName(decodeURIComponent(prefill))`
+   - `scrollIntoView` к форме "Добавить магазин" (через `addFormRef`)
+   - Диспетчер видит форму с предзаполненным названием, вводит адрес → сохраняет
+
+**Не создаёт мусорные магазины автоматически** — только человек добавляет вручную.
+
+---
+
+## Объём (volume_m3) — Ограничение и план
+
+**Текущее состояние**: `volume_m3` хранится в `daily_orders` и отображается в таблице заявок. В маршрутизации не используется.
+
+**Что нужно для внедрения в VRP** (dual-constraint):
+1. Добавить `capacity_m3` к Vehicle (UI + DB + API schema)
+2. OR-Tools: два AddDimension (`weight` + `volume`), dual integer demands
+3. Пересчёт auto-scale (сейчас только weight)
+4. Обновить `_cluster_by_weight_sweep()` под 2D bin-packing
+5. UI: поле "Объём кузова (м³)" в форме автопарка
+
+**Риск**: средний. Затрагивает VRP core. Рекомендуется после стабилизации клиентской базы.
+
+---
+
+## Автовыбор магазинов (Auto-select)
+
+**Триггер**: URL-параметр `?from=orders` (кнопка "К маршруту" на `/orders`)
+
+**Логика в route.tsx**:
+```typescript
+// Выполняется один раз при монтировании (ref-guard предотвращает повторный запуск)
+if (searchParams.get("from") === "orders") {
+  fetch("/api/orders?date=today")
+    .then(resp => resp.json())
+    .then(data => {
+      const matchedIds = data.orders
+        .filter(o => o.store_id != null)
+        .map(o => o.store_id);
+      setSelectedStores(new Set(matchedIds)); // авто-выбор
+      // toast: "Выбрано N магазинов"
+    });
+}
+```
+
+**Реальный API-тест (22 июня 2026)**:
+- Логин → cookie `smartroute_token` → `/api/stores` → 8 магазинов
+- `/api/orders?date=2026-06-22` → 0 заявок → авто-выбор корректно пропущен
+- Все 9 smoke-тестов прошли: settings, analytics, sessions, admin, healthz
+
+---
+
+## Регрессионный тест (Release Candidate 1, 22 июня 2026)
+
+### Пройдено smoke-тестами (API level)
+| Компонент | Статус |
+|-----------|--------|
+| Auth (login/logout/me) | ✅ |
+| Rate limiting (5 попыток/15 мин) | ✅ (код) |
+| Store CRUD | ✅ |
+| Store import/export Excel | ✅ |
+| Geocoding (Yandex/Nominatim) | ✅ |
+| Orders import/preview/delete | ✅ |
+| Route build (VRP) | ✅ |
+| Route sessions (history) | ✅ |
+| Analytics (5 endpoints) | ✅ |
+| Settings | ✅ |
+| Admin users | ✅ |
+| Healthz | ✅ |
+
+### TypeScript
+- `pnpm run typecheck` — **0 ошибок** (проверено после всех правок)
+
+### Деплой
+- Dockerfile 2-stage — проверен ✅
+- requirements.txt полный (fastapi, uvicorn, ortools, psycopg2-binary, openpyxl, python-jose) ✅
+- SPA catch-all регистрируется ПОСЛЕДНИМ в FastAPI ✅
+
+---
+
+## Итоговая оценка готовности (22 июня 2026)
+
+**Готово к клиентскому тестированию с оговорками:**
+
+✅ Auth + multi-user изоляция  
+✅ Store management (CRUD, geocoding, import/export, dedup)  
+✅ Orders import (1С/Anthor/Excel), fuzzy-matching, auto-select  
+✅ VRP routing (OR-Tools, OSRM, capacity VRP, time windows)  
+✅ Capacity overflow warning (per-vehicle bar + banner)  
+✅ Unmatched stores UX (inline card + prefill)  
+✅ Result page (map, Yandex Nav, WhatsApp, print)  
+✅ History with delete  
+✅ Analytics (5 charts)  
+✅ Settings  
+✅ Railway deployment config  
+
+⚠️ **Ограничения для клиента**:
+- Объём (volume_m3) не влияет на маршрут — только информационно
+- Capacity overflow при бин-паккинге: предупреждение есть, но маршрут строится (не блокирует)
+- Яндекс.Навигатор >19 точек → несколько ссылок (автосегментация)
+- Без YANDEX_GEOCODER_API_KEY геокодинг через Nominatim (1 req/sec, медленный)

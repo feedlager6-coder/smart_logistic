@@ -1,0 +1,326 @@
+PROMPT FOR REPLIT AGENT
+
+You are joining an existing production project called SmartRoute.
+
+This repository already contains several iterations of a 1C integration. Previous agents implemented part of the functionality, but the architecture and UX are still not satisfactory.
+
+Before writing ANY code you MUST understand the current state of the project.
+
+⸻
+
+PHASE 1 — FULL AUDIT (NO CODING)
+
+Do not modify anything.
+
+Read and analyze the entire project.
+
+Especially inspect:
+
+backend
+integrations endpoints
+API key system
+integrations UI
+current 1C implementation
+downloaded package generation
+current BSL module
+artifacts/integrations
+database schema
+stores model
+orders import flow
+matching logic
+automatic store creation
+documentation
+
+Then produce a report.
+
+The report MUST answer:
+
+1. Current architecture
+
+Describe exactly how the current 1C integration works.
+
+Do NOT assume.
+
+Only describe what actually exists.
+
+⸻
+
+2. What is already implemented
+
+List every completed feature.
+
+Examples:
+
+package generation
+API endpoints
+integration wizard
+logging
+automatic store creation
+specialist page
+BSL generation
+status handling
+etc.
+
+⸻
+
+3. What is partially implemented
+
+Explain what exists but is incomplete.
+
+⸻
+
+4. What is completely missing
+
+⸻
+
+5. Technical debt
+
+List every architectural issue.
+
+Explain WHY it is a problem.
+
+⸻
+
+6. UX problems
+
+Review the entire onboarding.
+
+Assume the user is:
+
+logistics director
+dispatcher
+office employee
+
+NOT a programmer.
+
+Identify everything that would confuse them.
+
+⸻
+
+PHASE 2 — REDESIGN
+
+Do NOT immediately code.
+
+First design the FINAL architecture.
+
+Think like the architect of a commercial SaaS.
+
+Research how serious logistics software integrates with 1C.
+
+The design must maximize:
+
+simplicity
+reliability
+maintainability
+minimum programmer work
+minimum client effort
+
+⸻
+
+The integration must satisfy this goal:
+
+A customer should be able to connect 1C in under 30 minutes.
+
+The logistics director should understand the process without reading technical documentation.
+
+The 1C specialist should only install one EPF file and configure a few fields.
+
+Nothing more.
+
+⸻
+
+Design:
+
+User flow
+
+Director
+
+↓
+
+Specialist
+
+↓
+
+Connected
+
+↓
+
+Automatic synchronization
+
+⸻
+
+Data flow
+
+1C
+
+↓
+
+SmartRoute
+
+↓
+
+Orders
+
+↓
+
+Automatic store creation
+
+↓
+
+Geocoding
+
+↓
+
+Routing
+
+⸻
+
+Sync scope
+
+Determine exactly what SHOULD be synchronized.
+
+For each entity explain WHY.
+
+Examples:
+
+Orders
+
+Stores
+
+Drivers
+
+Vehicles
+
+Statuses
+
+Warehouses
+
+Counterparties
+
+Addresses
+
+Phones
+
+Comments
+
+External IDs
+
+⸻
+
+PHASE 3 — EPF DESIGN
+
+Python cannot generate a real EPF.
+
+Therefore:
+
+Design the REAL EPF.
+
+Think of it as if a professional 1C developer will build it.
+
+You must produce:
+
+Full EPF specification
+
+Every screen
+
+Every button
+
+Every field
+
+Every action
+
+Every setting
+
+Every validation
+
+Every message
+
+Every log
+
+Every error
+
+Every automatic action
+
+Every scheduled task
+
+Every synchronization
+
+Everything.
+
+The specification should be detailed enough that a 1C developer can implement it without making design decisions.
+
+⸻
+
+PHASE 4 — BSL MODULE
+
+Rewrite the BSL module completely.
+
+The BSL should become the definitive version that will later be embedded into the EPF.
+
+It should support:
+
+Automatic store creation
+
+Counterparty external IDs
+
+Phone synchronization
+
+Order synchronization
+
+Improved logging
+
+Error handling
+
+Retries
+
+Clear configuration
+
+Automatic scheduling support
+
+Clean architecture
+
+Production quality
+
+⸻
+
+PHASE 5 — IMPLEMENTATION
+
+Only AFTER the audit and design are complete begin implementation.
+
+Reuse existing code whenever possible.
+
+Do NOT rewrite working components.
+
+Improve them.
+
+Keep backward compatibility.
+
+⸻
+
+PHASE 6 — FINAL REPORT
+
+Provide:
+
+Completed
+
+Modified
+
+New architecture
+
+Remaining work
+
+Risks
+
+Recommendations
+
+⸻
+
+IMPORTANT
+
+Do NOT rush into coding.
+
+Architecture first.
+
+Quality over speed.
+
+The goal is to build the BEST 1C integration possible for SmartRoute.
