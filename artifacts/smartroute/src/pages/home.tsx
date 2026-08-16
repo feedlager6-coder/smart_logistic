@@ -42,15 +42,15 @@ export function HomePage() {
           </p>
         </div>
 
-        <div className="relative z-10 pt-4 flex gap-4">
-          <Link href="/route">
-            <Button size="lg" className="h-12 px-8 text-base shadow-lg shadow-primary/20 gap-2">
+        <div className="relative z-10 pt-4 flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-4 w-full px-4 max-w-md sm:max-w-none">
+          <Link href="/route" className="w-full sm:w-auto">
+            <Button size="lg" className="w-full sm:w-auto h-12 px-6 sm:px-8 text-base shadow-lg shadow-primary/20 gap-2 font-semibold">
               <Map className="w-5 h-5" />
               Построить маршруты
             </Button>
           </Link>
-          <Link href="/stores">
-            <Button size="lg" variant="outline" className="h-12 px-8 text-base gap-2">
+          <Link href="/stores" className="w-full sm:w-auto">
+            <Button size="lg" variant="outline" className="w-full sm:w-auto h-12 px-6 sm:px-8 text-base gap-2 font-semibold">
               <Box className="w-5 h-5" />
               База магазинов
             </Button>
