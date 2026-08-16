@@ -268,6 +268,35 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
     }
   };
 
+  const handleOpenTelegram = async (routeIndex: number, assignment: Assignment) => {
+    let link: string | undefined = issuedLinks[routeIndex]?.driver_url;
+    if (!link) {
+      setSharingRoute(routeIndex);
+      const res = await fetchOrGetLink(routeIndex, assignment.id);
+      setSharingRoute(null);
+      link = res?.driver_url;
+    }
+    const fullDriverUrl = link
+      ? (link.startsWith("http") ? link : `${window.location.origin}${link}`)
+      : "";
+    const navSegments = getNavSegments(routes[routeIndex] as VehicleRouteWithUrls);
+    const navText = navSegments.length > 0
+      ? navSegments.map((url, idx) => `🗺 Яндекс Навигатор${navSegments.length > 1 ? ` ${idx + 1}` : ""}: ${url}`).join("\n")
+      : "";
+    const route = routes[routeIndex];
+    const totalKm = Math.round(route?.total_km ?? 0);
+    const totalPoints = route?.stores?.length ?? 0;
+    const textLines = [
+      `🚚 SmartRoute: рейс ${route.vehicle_name}`,
+      `📍 Точек: ${totalPoints} · Пробег: ${totalKm} км`,
+      fullDriverUrl ? `📱 Ссылка для водителя (отметки и заказы):\n${fullDriverUrl}` : "",
+      navText,
+    ].filter(Boolean);
+    const text = textLines.join("\n\n");
+    const tgUrl = `https://t.me/share/url?url=${encodeURIComponent(fullDriverUrl || window.location.href)}&text=${encodeURIComponent(text)}`;
+    window.open(tgUrl, "_blank", "noopener,noreferrer");
+  };
+
   const createAssignment = async (routeIndex: number) => {
     setCreatingRoute(routeIndex);
     const existingAssignment = data?.assignments?.find((item) => item.route_index === routeIndex);
@@ -478,13 +507,13 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                     </div>
                   </div>
                 </div>
-                <div className="flex items-center gap-2 shrink-0 self-start sm:self-center">
+                <div className="flex items-center gap-1.5 shrink-0 self-start sm:self-center flex-wrap">
                   {(driverUrl || assignment) ? (
                     <>
                       <Button
                         size="sm"
                         variant="outline"
-                        className="gap-1.5"
+                        className="gap-1.5 h-8 text-xs"
                         disabled={sharingRoute === routeIndex}
                         onClick={() => {
                           if (assignment) {
@@ -507,7 +536,7 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                       <Button
                         size="sm"
                         variant="outline"
-                        className="text-emerald-700 border-emerald-200 hover:bg-emerald-50"
+                        className="text-emerald-700 border-emerald-200 hover:bg-emerald-50 h-8 text-xs font-medium"
                         disabled={sharingRoute === routeIndex}
                         onClick={() => {
                           if (assignment) {
@@ -518,6 +547,24 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                         }}
                       >
                         WhatsApp
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="text-sky-700 border-sky-200 hover:bg-sky-50 h-8 text-xs font-medium gap-1"
+                        disabled={sharingRoute === routeIndex}
+                        onClick={() => {
+                          if (assignment) {
+                            handleOpenTelegram(routeIndex, assignment);
+                          } else if (driverUrl) {
+                            const fullDriverUrl = driverUrl.startsWith("http") ? driverUrl : `${window.location.origin}${driverUrl}`;
+                            const tgUrl = `https://t.me/share/url?url=${encodeURIComponent(fullDriverUrl)}&text=${encodeURIComponent(`🚚 SmartRoute: рейс ${routes[routeIndex].vehicle_name}\n\n📱 Ссылка для водителя:\n${fullDriverUrl}`)}`;
+                            window.open(tgUrl, "_blank");
+                          }
+                        }}
+                      >
+                        <Send className="w-3 h-3" />
+                        Telegram
                       </Button>
                     </>
                   ) : null}
@@ -596,12 +643,6 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                          План: {execution.quantity ?? 0} · Доставлено: {execution.actual_qty ?? 0} · Остаток: {execution.shortfall_qty ?? 0} шт.
                        </span>
                       <span className={`rounded-full px-2 py-0.5 whitespace-nowrap ${executionStatusClass[execution.status]}`}>{executionStatusLabels[execution.status]}</span>
-                      {isMixedCargo(execution.products) && (
-                        <div className="basis-full flex items-start gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-amber-800">
-                          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                          <span>Смешанный груз: при частичной доставке укажите недоставленные товары в комментарии.</span>
-                        </div>
-                      )}
                       <span className="whitespace-nowrap text-muted-foreground">
                         {execution.payment_method === "cash" ? "Наличные" :
                           execution.payment_method === "card" ? "Карта" :
@@ -970,7 +1011,7 @@ export function ResultPage() {
         {/* Header */}
         <div className="bg-primary text-primary-foreground px-4 py-3 flex items-center justify-between">
           <div>
-            <p className="text-xs opacity-80">Режим водителя</p>
+            <p className="text-xs opacity-80">Маршрут доставки</p>
             <h1 className="font-bold text-lg leading-tight">
               {activeRoute?.vehicle_name ?? "Маршрут"}
             </h1>
@@ -979,6 +1020,42 @@ export function ResultPage() {
             <p className="text-xs opacity-80">Пробег</p>
             <p className="font-bold">{Math.round(activeRoute?.total_km ?? 0)} км</p>
           </div>
+        </div>
+
+        {/* Manager Action Bar on Mobile */}
+        <div className="flex items-center justify-between gap-2 px-3 py-2 bg-background border-b overflow-x-auto">
+          {sessionId && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="border-emerald-300 text-emerald-700 hover:bg-emerald-50 text-xs font-semibold h-8 shrink-0 gap-1.5"
+              onClick={handleCompleteRoute}
+              disabled={completingRoute}
+            >
+              {completingRoute ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5 text-emerald-600" />}
+              {completingRoute ? "Завершаем…" : "Завершить рейс"}
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="outline"
+            className="text-xs h-8 shrink-0 gap-1.5"
+            onClick={() => sessionId ? window.open(`/api/route/sessions/${sessionId}/report.xlsx`, "_blank") : null}
+            disabled={!sessionId}
+          >
+            <Download className="w-3.5 h-3.5" />
+            Excel
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="text-xs h-8 shrink-0 text-muted-foreground"
+            asChild
+          >
+            <Link href="/route">
+              + Новый расчёт
+            </Link>
+          </Button>
         </div>
 
         {/* Vehicle switcher */}

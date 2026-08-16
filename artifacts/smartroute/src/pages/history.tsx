@@ -139,73 +139,138 @@ export function HistoryPage() {
               </Button>
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow className="hover:bg-transparent">
-                    <TableHead className="pl-6">Дата</TableHead>
-                    <TableHead className="text-center">Машин</TableHead>
-                    <TableHead className="text-center">Точек</TableHead>
-                    <TableHead className="text-right">Пробег</TableHead>
-                    <TableHead className="text-right">Экономия км</TableHead>
-                    <TableHead className="text-right">Выгода</TableHead>
-                    <TableHead className="pr-6 text-right"></TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {sessions?.items.map((s) => (
-                    <TableRow key={s.id} className="group">
-                      <TableCell className="pl-6">
-                        <div className="font-medium">{formatDate(s.date)}</div>
-                        <div className="text-xs text-muted-foreground">{formatTime(s.created_at)}</div>
-                      </TableCell>
-                      <TableCell className="text-center">
-                        <Badge variant="secondary">{s.num_vehicles}</Badge>
-                      </TableCell>
-                      <TableCell className="text-center font-medium">{s.num_points}</TableCell>
-                      <TableCell className="text-right font-mono text-sm">{s.total_km} км</TableCell>
-                      <TableCell className="text-right">
-                        <span className="text-emerald-600 dark:text-emerald-400 font-medium">
-                          −{s.saved_km} км
-                        </span>
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <span className="text-emerald-600 dark:text-emerald-400 font-medium">
-                          {Number(s.saved_rub).toLocaleString("ru-RU")} ₽
-                        </span>
-                      </TableCell>
-                      <TableCell className="pr-6 text-right">
-                        <div className="flex items-center justify-end gap-1">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            asChild
-                            className="opacity-60 group-hover:opacity-100 transition-opacity"
-                          >
-                            <Link href={`/result/${s.id}`}>
-                              <ExternalLink className="w-4 h-4 mr-1" />
-                              Открыть
-                            </Link>
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
-                            title="Удалить маршрут"
-                            onClick={() => {
-                              setDeleteId(s.id);
-                              setDeleteDate(formatDate(s.date));
-                            }}
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </Button>
-                        </div>
-                      </TableCell>
+            <>
+              {/* Desktop Table View */}
+              <div className="hidden md:block overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="hover:bg-transparent">
+                      <TableHead className="pl-6">Дата</TableHead>
+                      <TableHead className="text-center">Машин</TableHead>
+                      <TableHead className="text-center">Точек</TableHead>
+                      <TableHead className="text-right">Пробег</TableHead>
+                      <TableHead className="text-right">Экономия км</TableHead>
+                      <TableHead className="text-right">Выгода</TableHead>
+                      <TableHead className="pr-6 text-right">Действия</TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
+                  </TableHeader>
+                  <TableBody>
+                    {sessions?.items.map((s) => (
+                      <TableRow key={s.id} className="group">
+                        <TableCell className="pl-6">
+                          <div className="font-semibold text-foreground">{formatDate(s.date)}</div>
+                          <div className="text-xs text-muted-foreground">{formatTime(s.created_at)}</div>
+                        </TableCell>
+                        <TableCell className="text-center">
+                          <Badge variant="secondary">{s.num_vehicles}</Badge>
+                        </TableCell>
+                        <TableCell className="text-center font-medium">{s.num_points}</TableCell>
+                        <TableCell className="text-right font-mono text-sm">{s.total_km} км</TableCell>
+                        <TableCell className="text-right">
+                          <span className="text-emerald-600 dark:text-emerald-400 font-medium">
+                            −{s.saved_km} км
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <span className="text-emerald-600 dark:text-emerald-400 font-medium">
+                            {Number(s.saved_rub).toLocaleString("ru-RU")} ₽
+                          </span>
+                        </TableCell>
+                        <TableCell className="pr-6 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              asChild
+                              className="h-8 px-3 text-xs font-medium"
+                            >
+                              <Link href={`/result/${s.id}`}>
+                                <ExternalLink className="w-3.5 h-3.5 mr-1" />
+                                Открыть
+                              </Link>
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                              title="Удалить маршрут"
+                              onClick={() => {
+                                setDeleteId(s.id);
+                                setDeleteDate(formatDate(s.date));
+                              }}
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+
+              {/* Mobile Card List View */}
+              <div className="block md:hidden divide-y divide-border">
+                {sessions?.items.map((s) => (
+                  <div key={s.id} className="p-4 space-y-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="font-bold text-base text-foreground">{formatDate(s.date)}</div>
+                        <div className="text-xs text-muted-foreground">{formatTime(s.created_at)}</div>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <Badge variant="outline" className="text-xs font-medium">
+                          {s.num_vehicles} {s.num_vehicles === 1 ? "машина" : s.num_vehicles < 5 ? "машины" : "машин"}
+                        </Badge>
+                        <Badge variant="secondary" className="text-xs font-medium">
+                          {s.num_points} {s.num_points === 1 ? "точка" : s.num_points < 5 ? "точки" : "точек"}
+                        </Badge>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2 bg-muted/40 p-2.5 rounded-lg text-xs">
+                      <div>
+                        <span className="text-muted-foreground block text-[11px]">Пробег</span>
+                        <span className="font-bold text-foreground">{s.total_km} км</span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground block text-[11px]">Экономия</span>
+                        <span className="font-bold text-emerald-600">−{s.saved_km} км</span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground block text-[11px]">Выгода</span>
+                        <span className="font-bold text-emerald-600">{Number(s.saved_rub).toLocaleString("ru-RU")} ₽</span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 pt-1">
+                      <Button
+                        size="sm"
+                        className="flex-1 h-10 font-semibold gap-1.5"
+                        asChild
+                      >
+                        <Link href={`/result/${s.id}`}>
+                          <ExternalLink className="w-4 h-4" />
+                          Открыть маршрут
+                        </Link>
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-10 px-3 text-destructive border-destructive/30 hover:bg-destructive/10 hover:text-destructive gap-1.5"
+                        onClick={() => {
+                          setDeleteId(s.id);
+                          setDeleteDate(formatDate(s.date));
+                        }}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                        <span>Удалить</span>
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
           )}
 
           {sessions && sessions.total > PAGE_SIZE && (
