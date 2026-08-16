@@ -595,20 +595,31 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                 </Button>
               )}
               {!assignment && (
-                <div className="flex gap-2">
+                <div className="flex flex-col sm:flex-row gap-2 pt-1">
                   <select
-                    className="h-9 min-w-0 flex-1 rounded-md border bg-background px-3 text-sm"
+                    className="w-full sm:w-1/2 h-10 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground focus:outline-none focus:ring-2 focus:ring-primary shadow-xs"
                     value={driverIds[routeIndex] ?? ""}
                     onChange={(event) => setDriverIds((current) => ({ ...current, [routeIndex]: event.target.value }))}
                   >
-                    <option value="">Водитель из справочника</option>
+                    <option value="">👤 Выберите водителя из справочника</option>
                     {(driversData?.drivers ?? []).map((driver) => (
                       <option key={driver.id} value={driver.id}>{driver.name}{driver.vehicle_name ? ` — ${driver.vehicle_name}` : ""}</option>
                     ))}
                   </select>
-                  <input className="h-9 flex-1 rounded-md border bg-background px-3 text-sm" placeholder="Имя водителя (необязательно)" value={driverNames[routeIndex] ?? ""} onChange={(event) => setDriverNames((current) => ({ ...current, [routeIndex]: event.target.value }))} />
-                  <Button size="sm" onClick={() => createAssignment(routeIndex)} disabled={creatingRoute === routeIndex}>
-                    {creatingRoute === routeIndex ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Link2 className="w-4 h-4 mr-1" />}Назначить
+                  <input
+                    className="w-full sm:w-1/2 h-10 rounded-md border border-input bg-background px-3 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary shadow-xs"
+                    placeholder="Или введите имя водителя"
+                    value={driverNames[routeIndex] ?? ""}
+                    onChange={(event) => setDriverNames((current) => ({ ...current, [routeIndex]: event.target.value }))}
+                  />
+                  <Button
+                    size="sm"
+                    className="w-full sm:w-auto h-10 px-5 font-bold shrink-0 shadow-xs"
+                    onClick={() => createAssignment(routeIndex)}
+                    disabled={creatingRoute === routeIndex}
+                  >
+                    {creatingRoute === routeIndex ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Link2 className="w-4 h-4 mr-1.5" />}
+                    Назначить
                   </Button>
                 </div>
               )}
@@ -639,9 +650,11 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                           <p className="text-[11px] text-sky-700 mt-1">{formatRouteDuration(execution.eta_minutes)}</p>
                         ) : null}
                       </div>
-                       <span className="whitespace-nowrap text-muted-foreground">
-                         План: {execution.quantity ?? 0} · Доставлено: {execution.actual_qty ?? 0} · Остаток: {execution.shortfall_qty ?? 0} шт.
-                       </span>
+                      {execution.products && (
+                        <span className="basis-full text-foreground bg-muted/40 px-2 py-1 rounded text-xs leading-relaxed font-medium">
+                          📦 {formatProductsString(execution.products)}
+                        </span>
+                      )}
                       <span className={`rounded-full px-2 py-0.5 whitespace-nowrap ${executionStatusClass[execution.status]}`}>{executionStatusLabels[execution.status]}</span>
                       <span className="whitespace-nowrap text-muted-foreground">
                         {execution.payment_method === "cash" ? "Наличные" :
@@ -1023,7 +1036,7 @@ export function ResultPage() {
         </div>
 
         {/* Manager Action Bar on Mobile */}
-        <div className="flex items-center justify-between gap-2 px-3 py-2 bg-background border-b overflow-x-auto">
+        <div className="flex items-center gap-1.5 px-3 py-2 bg-background border-b overflow-x-auto">
           {sessionId && (
             <Button
               size="sm"
@@ -1039,21 +1052,40 @@ export function ResultPage() {
           <Button
             size="sm"
             variant="outline"
-            className="text-xs h-8 shrink-0 gap-1.5"
-            onClick={() => sessionId ? window.open(`/api/route/sessions/${sessionId}/report.xlsx`, "_blank") : null}
-            disabled={!sessionId}
+            className="text-xs h-8 shrink-0 gap-1.5 font-medium"
+            onClick={() => window.print()}
           >
-            <Download className="w-3.5 h-3.5" />
-            Excel
+            <Printer className="w-3.5 h-3.5 text-primary" />
+            Маршрутный лист
           </Button>
           <Button
             size="sm"
+            variant="outline"
+            className="text-xs h-8 shrink-0 gap-1.5 font-medium"
+            onClick={handlePrintLoading}
+          >
+            <Package className="w-3.5 h-3.5 text-primary" />
+            Загрузочный лист
+          </Button>
+          {sessionId && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-xs h-8 shrink-0 gap-1.5"
+              onClick={() => window.open(`/api/route/sessions/${sessionId}/report.xlsx`, "_blank")}
+            >
+              <Download className="w-3.5 h-3.5" />
+              Excel
+            </Button>
+          )}
+          <Button
+            size="sm"
             variant="ghost"
-            className="text-xs h-8 shrink-0 text-muted-foreground"
+            className="text-xs h-8 shrink-0 text-muted-foreground ml-auto"
             asChild
           >
             <Link href="/route">
-              + Новый расчёт
+              + Новый
             </Link>
           </Button>
         </div>
@@ -1163,75 +1195,33 @@ export function ResultPage() {
           ))}
         </div>
 
-        {/* Footer actions */}
-        <div className="sticky bottom-0 border-t bg-background p-4 space-y-2">
+        {/* Footer actions - Clean Yandex Navigator */}
+        <div className="sticky bottom-0 border-t bg-background p-3.5 space-y-2 shadow-lg">
           {activeSegments.length > 1 ? (
-            <>
+            <div className="space-y-2">
               {activeSegments.map((url, segIdx) => {
-                const segKey: CopiedSegKey = `${activeVehicleIndex}-${segIdx}`;
                 const stopFrom = segIdx * 20 + 1;
                 const stopTo = Math.min((segIdx + 1) * 20, activeRoute?.stores.length ?? 0);
                 return (
-                  <div key={segIdx} className="flex gap-2">
-                    <Button
-                      className="flex-1 h-11 gap-2"
-                      onClick={() => window.open(url, "_blank")}
-                    >
-                      <Navigation className="w-4 h-4" />
-                      Часть {segIdx + 1} (ост. {stopFrom}–{stopTo})
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      className="h-11 w-11 shrink-0"
-                      title="Скопировать ссылку"
-                      onClick={() => handleCopySeg(url, activeVehicleIndex, segIdx)}
-                    >
-                      {copiedSeg === segKey
-                        ? <Check className="w-4 h-4 text-emerald-500" />
-                        : <Copy className="w-4 h-4" />}
-                    </Button>
-                  </div>
+                  <Button
+                    key={segIdx}
+                    className="w-full h-12 gap-2 text-sm font-bold shadow-sm"
+                    onClick={() => window.open(url, "_blank")}
+                  >
+                    <Navigation className="w-4 h-4 fill-current" />
+                    Часть {segIdx + 1}: Я.Навигатор (ост. {stopFrom}–{stopTo})
+                  </Button>
                 );
               })}
-              <Button
-                variant="outline"
-                className="w-full h-11 gap-2 text-emerald-600 border-emerald-200"
-                onClick={() => window.open(activeRoute?.whatsapp_url, "_blank")}
-              >
-                <Share2 className="w-4 h-4" />
-                WhatsApp
-              </Button>
-            </>
-          ) : (
-            <div className="flex gap-2">
-              <Button
-                className="flex-1 h-12 gap-2"
-                onClick={() => window.open(activeRoute?.yandex_url, "_blank")}
-              >
-                <Navigation className="w-5 h-5" />
-                Я.Навигатор
-              </Button>
-              <Button
-                variant="outline"
-                size="icon"
-                className="h-12 w-12 shrink-0"
-                title="Скопировать ссылку маршрута"
-                onClick={() => handleCopyNav(activeRoute?.yandex_url ?? '', activeVehicleIndex)}
-              >
-                {copiedNav === activeVehicleIndex
-                  ? <Check className="w-5 h-5 text-emerald-500" />
-                  : <Copy className="w-5 h-5" />}
-              </Button>
-              <Button
-                variant="outline"
-                className="flex-1 h-12 gap-2 text-emerald-600 border-emerald-200"
-                onClick={() => window.open(activeRoute?.whatsapp_url, "_blank")}
-              >
-                <Share2 className="w-5 h-5" />
-                WhatsApp
-              </Button>
             </div>
+          ) : (
+            <Button
+              className="w-full h-12 gap-2 text-base font-bold shadow-md"
+              onClick={() => window.open(activeRoute?.yandex_url, "_blank")}
+            >
+              <Navigation className="w-5 h-5 fill-current" />
+              Я.Навигатор
+            </Button>
           )}
         </div>
           </>
@@ -1695,13 +1685,11 @@ export function ResultPage() {
                   </ScrollArea>
                 </CardContent>
 
-                {/* Footer: split or single */}
+                {/* Footer: focused on Yandex Navigator */}
                 <div className="p-4 border-t bg-muted/10 print:hidden">
                   {isSplit ? (
                     <div className="space-y-2">
-                      {/* Per-segment buttons */}
                       {segments.map((url, segIdx) => {
-                        const segKey: CopiedSegKey = `${i}-${segIdx}`;
                         const stopFrom = segIdx * 20 + 1;
                         const stopTo = Math.min((segIdx + 1) * 20, route.stores.length);
                         return (
@@ -1711,58 +1699,24 @@ export function ResultPage() {
                               <span className="block text-[10px]">ост. {stopFrom}–{stopTo}</span>
                             </div>
                             <Button
-                              className="flex-1 h-9 gap-1.5 text-sm"
+                              className="flex-1 h-9 gap-1.5 text-sm font-semibold"
                               onClick={() => window.open(url, "_blank")}
                             >
-                              <Navigation className="w-3.5 h-3.5" />
-                              Открыть
-                            </Button>
-                            <Button
-                              variant="outline"
-                              size="icon"
-                              className="h-9 w-9 shrink-0"
-                              title="Скопировать ссылку"
-                              onClick={() => handleCopySeg(url, i, segIdx)}
-                            >
-                              {copiedSeg === segKey
-                                ? <Check className="w-3.5 h-3.5 text-emerald-500" />
-                                : <Copy className="w-3.5 h-3.5" />}
+                              <Navigation className="w-3.5 h-3.5 fill-current" />
+                              Я.Навигатор (ост. {stopFrom}–{stopTo})
                             </Button>
                           </div>
                         );
                       })}
-                      {/* WhatsApp below segments */}
-                      <Button
-                        variant="outline"
-                        className="w-full gap-2 text-emerald-600 border-emerald-200 hover:bg-emerald-50 mt-1"
-                        onClick={() => window.open(route.whatsapp_url, "_blank")}
-                      >
-                        <Share2 className="w-4 h-4" />
-                        WhatsApp
-                      </Button>
                     </div>
                   ) : (
-                    <div className="flex gap-2">
-                      <Button className="flex-1 gap-2" onClick={() => window.open(route.yandex_url, "_blank")}>
-                        <Navigation className="w-4 h-4" />
-                        Я.Навигатор
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="icon"
-                        className="shrink-0"
-                        title="Скопировать ссылку маршрута в буфер"
-                        onClick={() => handleCopyNav(route.yandex_url ?? '', i)}
-                      >
-                        {copiedNav === i
-                          ? <Check className="w-4 h-4 text-emerald-500" />
-                          : <Copy className="w-4 h-4" />}
-                      </Button>
-                      <Button variant="outline" className="flex-1 gap-2 text-emerald-600 border-emerald-200 hover:bg-emerald-50" onClick={() => window.open(route.whatsapp_url, "_blank")}>
-                        <Share2 className="w-4 h-4" />
-                        WhatsApp
-                      </Button>
-                    </div>
+                    <Button
+                      className="w-full h-10 gap-2 font-bold"
+                      onClick={() => window.open(route.yandex_url, "_blank")}
+                    >
+                      <Navigation className="w-4 h-4 fill-current" />
+                      Я.Навигатор
+                    </Button>
                   )}
                 </div>
               </Card>

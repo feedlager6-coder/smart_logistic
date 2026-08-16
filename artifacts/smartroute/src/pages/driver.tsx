@@ -360,7 +360,6 @@ export function DriverPage() {
       rescheduledCount > 0 ? `🔄 Перенесено: ${rescheduledCount}` : "",
       plannedCount > 0 ? `⏳ В процессе / ожидает: ${plannedCount}` : "",
       `----------------------------------`,
-      `📦 Товар: план ${totalPlanQty} ед. / сдано ${totalDeliveredQty} ед.${totalShortfallQty > 0 ? ` (недовоз: ${totalShortfallQty} ед.)` : ""}`,
       `💵 Оплаты: Наличные (${cashPaidCount}), Карта (${cardPaidCount}), Перевод (${transferPaidCount})${notPaidCount > 0 ? `, Не оплачено: ${notPaidCount}` : ""}`,
       `----------------------------------`,
       `СПИСОК ТОЧЕК:`,
@@ -368,8 +367,8 @@ export function DriverPage() {
         const st = statusLabels[e.status];
         const pay = `${paymentLabels[e.payment_method]} (${paymentStatusLabels[e.payment_status]})`;
         const comment = e.driver_comment ? ` | Примечание: ${e.driver_comment}` : "";
-        const delivered = e.status === "delivered" ? (e.actual_qty ?? e.quantity) : (e.actual_qty ?? 0);
-        return `${e.visit_order}. ${e.store_name} — ${st} (план: ${e.quantity}, факт: ${delivered} ед.) | ${pay}${comment}`;
+        const productsStr = formatProductsLine(e.products) ? ` | Заказ: ${formatProductsLine(e.products)}` : "";
+        return `${e.visit_order}. ${e.store_name}${productsStr} — ${st} | ${pay}${comment}`;
       }),
     ].filter(Boolean);
     return lines.join("\n");
@@ -458,13 +457,12 @@ export function DriverPage() {
                 <p className="text-[11px] text-muted-foreground mt-1">точек без замечаний</p>
               </Card>
               <Card className="p-3.5 bg-background shadow-xs">
-                <p className="text-xs text-muted-foreground font-medium">Товар (план / факт)</p>
-                <p className="text-xl font-black text-foreground mt-0.5">{totalDeliveredQty} <span className="text-xs text-muted-foreground font-normal">/ {totalPlanQty} ед.</span></p>
-                {totalShortfallQty > 0 ? (
-                  <p className="text-[11px] text-destructive font-bold mt-1">Недовоз: {totalShortfallQty} ед.</p>
-                ) : (
-                  <p className="text-[11px] text-emerald-600 font-semibold mt-1">100% сдача</p>
-                )}
+                <p className="text-xs text-muted-foreground font-medium">Замечания / недовоз</p>
+                <p className="text-2xl font-black text-foreground mt-0.5">{partialCount + failedCount + rescheduledCount}</p>
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  {partialCount > 0 ? `Частично: ${partialCount} ` : ""}{failedCount > 0 ? `Не сдано: ${failedCount} ` : ""}{rescheduledCount > 0 ? `Перенос: ${rescheduledCount}` : ""}
+                  {partialCount === 0 && failedCount === 0 && rescheduledCount === 0 ? "Все точки без проблем" : ""}
+                </p>
               </Card>
               <Card className="p-3.5 bg-background shadow-xs">
                 <p className="text-xs text-muted-foreground font-medium">Оплаты (оплачено)</p>
@@ -529,8 +527,7 @@ export function DriverPage() {
                       <th className="px-3 py-2.5 w-10 text-center">№</th>
                       <th className="px-3 py-2.5 min-w-[140px]">Магазин / Контрагент</th>
                       <th className="px-3 py-2.5 min-w-[160px]">Адрес доставки</th>
-                      <th className="px-3 py-2.5 text-center">План</th>
-                      <th className="px-3 py-2.5 text-center">Факт</th>
+                      <th className="px-3 py-2.5 min-w-[180px]">Товары в заявке</th>
                       <th className="px-3 py-2.5 min-w-[120px]">Статус доставки</th>
                       <th className="px-3 py-2.5 min-w-[130px]">Оплата</th>
                       <th className="px-3 py-2.5 min-w-[150px]">Примечание водителя</th>
@@ -538,7 +535,6 @@ export function DriverPage() {
                   </thead>
                   <tbody className="divide-y divide-border">
                     {executions.map((e) => {
-                      const delivered = e.status === "delivered" ? (e.actual_qty ?? e.quantity) : (e.actual_qty ?? 0);
                       const isComplete = e.status === "delivered";
                       const isPartial = e.status === "partial";
                       const isFailed = e.status === "failed";
@@ -556,13 +552,8 @@ export function DriverPage() {
                           <td className="px-3 py-2.5 text-muted-foreground">
                             {e.address}
                           </td>
-                          <td className="px-3 py-2.5 text-center font-medium">
-                            {e.quantity} ед.
-                          </td>
-                          <td className="px-3 py-2.5 text-center font-bold">
-                            <span className={isComplete ? "text-emerald-700" : isPartial ? "text-amber-700" : isFailed ? "text-destructive" : ""}>
-                              {delivered} ед.
-                            </span>
+                          <td className="px-3 py-2.5 text-foreground font-medium">
+                            {formatProductsLine(e.products) || <span className="text-muted-foreground/60 italic">По накладной</span>}
                           </td>
                           <td className="px-3 py-2.5">
                             <span
@@ -707,9 +698,6 @@ export function DriverPage() {
                             <Compass className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: "6s" }} />
                             Следующая цель: Точка №{activeStop.visit_order}
                           </span>
-                          <span className="text-xs font-bold text-foreground bg-background px-2.5 py-0.5 rounded-md border shadow-2xs">
-                            К сдаче: {activeStop.quantity} ед.
-                          </span>
                         </div>
 
                         <div className="font-extrabold text-lg text-foreground truncate">
@@ -800,14 +788,11 @@ export function DriverPage() {
                             </div>
                             <div className="text-xs text-muted-foreground truncate mt-0.5 flex items-center gap-2">
                               <span>{execution.address}</span>
-                              <span>•</span>
-                              <span>
-                                Сдано: {execution.status === "delivered" ? execution.quantity : (execution.actual_qty ?? 0)} из {execution.quantity} ед.
-                              </span>
-                              {execution.status !== "delivered" && execution.shortfall_qty > 0 && (
-                                <span className="text-destructive font-semibold">
-                                  (недовоз {execution.shortfall_qty} ед.)
-                                </span>
+                              {productsLine && (
+                                <>
+                                  <span>•</span>
+                                  <span className="text-foreground font-medium truncate max-w-[200px] sm:max-w-xs">{productsLine}</span>
+                                </>
                               )}
                             </div>
                           </div>
@@ -937,44 +922,19 @@ export function DriverPage() {
 
                     {/* Goods & Order Info - Clean single line display without awkward numbering */}
                     <div className="border-y border-border/80 bg-muted/20 px-4 sm:px-5 py-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="flex items-start gap-2.5 min-w-0 flex-1">
-                          <div className="w-7 h-7 rounded-lg bg-primary/10 text-primary flex items-center justify-center shrink-0 mt-0.5">
-                            <Package className="w-4 h-4" />
-                          </div>
-                          <div className="min-w-0 flex-1 space-y-0.5">
-                            <span className="text-xs font-bold text-foreground uppercase tracking-wide">
-                              Заказ к выгрузке:
-                            </span>
-                            <p className="text-xs text-foreground font-medium break-words leading-relaxed">
-                              {productsLine || "Товары по товарно-сопроводительной накладной (ТТН / УПД)"}
-                            </p>
-                          </div>
+                      <div className="flex items-start gap-2.5 min-w-0">
+                        <div className="w-7 h-7 rounded-lg bg-primary/10 text-primary flex items-center justify-center shrink-0 mt-0.5">
+                          <Package className="w-4 h-4" />
                         </div>
-
-                        <div className="flex items-center gap-1.5 bg-primary/10 border border-primary/20 px-3 py-1.5 rounded-lg shrink-0">
-                          <span className="text-xs font-semibold text-primary/80">Всего:</span>
-                          <span className="text-sm font-black text-primary">
-                            {execution.quantity} <span className="text-[11px] font-bold">ед.</span>
+                        <div className="min-w-0 flex-1 space-y-0.5">
+                          <span className="text-xs font-bold text-foreground uppercase tracking-wide">
+                            Заказ к выгрузке:
                           </span>
+                          <p className="text-xs sm:text-sm text-foreground font-medium break-words leading-relaxed">
+                            {productsLine || "Товары по товарно-сопроводительной накладной (ТТН / УПД)"}
+                          </p>
                         </div>
                       </div>
-
-                      {isDraftTerminal && (
-                        <div className="mt-2.5 pt-2 border-t border-border/60 flex items-center justify-between text-xs text-muted-foreground">
-                          <span>
-                            Фактически сдано: <strong className="text-foreground font-bold">{effectiveDeliveredQty} ед.</strong>
-                            {draft.status === "delivered" && effectiveShortfall === 0 && (
-                              <span className="text-emerald-700 font-semibold ml-1.5">(полностью)</span>
-                            )}
-                          </span>
-                          {effectiveShortfall > 0 && (
-                            <span className="text-destructive font-bold bg-destructive/10 px-2 py-0.5 rounded">
-                              Недовоз: {effectiveShortfall} ед.
-                            </span>
-                          )}
-                        </div>
-                      )}
                     </div>
 
                     <CardContent className="space-y-3 pt-4 px-4 sm:px-5 pb-5">
