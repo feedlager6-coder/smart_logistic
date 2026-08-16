@@ -8169,8 +8169,8 @@ def download_route_report(session_id: int, request: Request):
     sheet.title = "Отчёт по рейсу"
     headers = [
         "Машина", "Водитель", "Телефон", "Дата", "№ точки", "Контрагент",
-        "Адрес", "Статус", "План", "Доставлено", "Остаток", "Товар",
-        "Способ оплаты", "Статус оплаты", "Комментарий", "Дата переноса",
+        "Адрес", "Статус доставки", "Товары в заявке", "Способ оплаты",
+        "Статус оплаты", "Комментарий водителя", "Дата переноса",
         "Общий пробег, км",
     ]
     sheet.append(headers)
@@ -8180,28 +8180,52 @@ def download_route_report(session_id: int, request: Request):
         cell.fill = header_fill
         cell.alignment = openpyxl.styles.Alignment(horizontal="center", vertical="center", wrap_text=True)
     total_km = float(session.get("total_km") or 0)
+    status_map = {
+        "planned": "Ожидает доставки",
+        "delivered": "Доставлено",
+        "partial": "Частично",
+        "failed": "Не доставлено",
+        "rescheduled": "Перенесено",
+        "loaded": "Загружено",
+        "on_route": "В пути",
+        "completed": "Завершено",
+    }
+    payment_method_map = {
+        "cash": "Наличные",
+        "card": "Карта",
+        "transfer": "Перевод",
+        "none": "Без оплаты",
+    }
+    payment_status_map = {
+        "pending": "Ожидает оплаты",
+        "paid": "Оплачено",
+        "not_paid": "Не оплачено",
+    }
     for row in rows:
-        planned = float(row.get("quantity") or 0)
-        actual = float(row.get("actual_qty") or 0)
+        raw_status = row.get("status") or "planned"
+        status_ru = status_map.get(raw_status, raw_status)
+        raw_pm = row.get("payment_method") or "none"
+        pm_ru = payment_method_map.get(raw_pm, raw_pm)
+        raw_ps = row.get("payment_status") or "pending"
+        ps_ru = payment_status_map.get(raw_ps, raw_ps)
+        products_val = (row.get("products") or "").strip()
         sheet.append([
             row.get("vehicle_name") or "", row.get("driver_name") or "", row.get("driver_phone") or "",
             session.get("date") or "", row.get("visit_order") or "", row.get("store_name") or "",
-            row.get("address") or "", row.get("status") or "planned", planned, actual,
-            max(planned - actual, 0), row.get("products") or "", row.get("payment_method") or "none",
-            row.get("payment_status") or "pending", row.get("driver_comment") or "",
+            row.get("address") or "", status_ru, products_val, pm_ru,
+            ps_ru, row.get("driver_comment") or "",
             str(row["rescheduled_date"]) if row.get("rescheduled_date") else "", total_km,
         ])
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
-    widths = [16, 20, 16, 13, 10, 30, 34, 16, 12, 14, 12, 30, 18, 18, 34, 16, 18]
+    widths = [16, 20, 16, 13, 10, 30, 34, 20, 36, 18, 18, 34, 16, 18]
     for index, width in enumerate(widths, 1):
         sheet.column_dimensions[openpyxl.utils.get_column_letter(index)].width = width
     for row in sheet.iter_rows(min_row=2):
         for cell in row:
             cell.alignment = openpyxl.styles.Alignment(vertical="top", wrap_text=True)
-    for col in (9, 10, 11, 17):
-        for cell in list(sheet.iter_cols(min_col=col, max_col=col, min_row=2))[0]:
-            cell.number_format = "0.0"
+    for cell in list(sheet.iter_cols(min_col=14, max_col=14, min_row=2))[0]:
+        cell.number_format = "0.0"
     output = io.BytesIO()
     workbook.save(output)
     output.seek(0)
