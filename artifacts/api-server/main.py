@@ -3356,11 +3356,14 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: str, dispatcher: 
     phone = _normalize_driver_phone(dispatcher.get("dispatcher_phone") or "")
 
     if not next_execution:
+        is_completed = assignment.get("status") == "completed"
+        title = "🏁 Рейс завершён диспетчером!" if is_completed else "✅ Все точки рейса выполнены!"
+        subtext = "📄 Итоговая ведомость смены и PDF-отчёт:" if is_completed else "⏳ Ожидайте закрытия смены диспетчером.\n📄 Вы можете просмотреть ведомость смены:"
         lines = [
-            "🏁 Все точки рейса выполнены!",
+            title,
             f"{assignment.get('vehicle_name') or 'Машина'} · Обработано {route_points} точек",
             "",
-            "📄 Откройте ведомость смены, чтобы проверить кассовый баланс и скачать PDF-отчёт:",
+            subtext,
         ]
         completed_keyboard = []
         if safe_driver_url:
@@ -8173,19 +8176,24 @@ def download_route_report(session_id: int, request: Request):
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
         cur.execute(
-            "SELECT id, date, total_km, result_json FROM route_sessions WHERE id=%s AND owner_id=%s",
+            "SELECT id, date, total_km, result_json, is_completed, completed_at FROM route_sessions WHERE id=%s AND owner_id=%s",
             (session_id, uid),
         )
         session = cur.fetchone()
         if not session:
             raise HTTPException(status_code=404, detail="Маршрут не найден")
         cur.execute(
-            """SELECT a.vehicle_name, a.driver_name, a.driver_phone, a.route_index,
+            """SELECT a.id AS assignment_id, a.vehicle_name, a.driver_name, a.driver_phone, a.route_index,
+                      a.status AS assignment_status,
                       e.visit_order, e.store_name, e.address, e.status,
-                      e.quantity, e.actual_qty, e.products, e.payment_method,
-                      e.payment_status, e.driver_comment, e.rescheduled_date
+                      e.quantity, e.actual_qty, e.products, e.amount_rub, e.actual_amount_rub,
+                      e.payment_method, e.payment_status, e.driver_comment, e.rescheduled_date,
+                      e.delivered_at,
+                      COALESCE(s.phone, '') AS store_phone,
+                      COALESCE(s.client, '') AS store_client
                  FROM route_assignments a
                  LEFT JOIN route_executions e ON e.assignment_id=a.id
+                 LEFT JOIN stores s ON s.id=e.store_id
                 WHERE a.session_id=%s AND a.owner_id=%s
                 ORDER BY a.route_index, e.visit_order""",
             (session_id, uid),
@@ -8194,22 +8202,45 @@ def download_route_report(session_id: int, request: Request):
     finally:
         cur.close(); conn.close()
 
+    session_result = json.loads(session.get("result_json") or "{}")
+    session_routes = session_result.get("routes") or []
+
     workbook = openpyxl.Workbook()
-    sheet = workbook.active
-    sheet.title = "Отчёт по рейсу"
-    headers = [
-        "Машина", "Водитель", "Телефон", "Дата", "№ точки", "Контрагент",
-        "Адрес", "Статус доставки", "Товары в заявке", "Способ оплаты",
-        "Статус оплаты", "Комментарий водителя", "Дата переноса",
-        "Общий пробег, км",
-    ]
-    sheet.append(headers)
-    header_fill = openpyxl.styles.PatternFill("solid", fgColor="1D4ED8")
-    for cell in sheet[1]:
-        cell.font = openpyxl.styles.Font(bold=True, color="FFFFFF")
-        cell.fill = header_fill
-        cell.alignment = openpyxl.styles.Alignment(horizontal="center", vertical="center", wrap_text=True)
-    total_km = float(session.get("total_km") or 0)
+    
+    # ── Colors & Styles ────────────────────────────────────────────────────────
+    font_family = "Calibri"
+    title_font = openpyxl.styles.Font(name=font_family, size=14, bold=True, color="1E3A8A")
+    section_font = openpyxl.styles.Font(name=font_family, size=11, bold=True, color="1E293B")
+    header_font = openpyxl.styles.Font(name=font_family, size=10, bold=True, color="FFFFFF")
+    bold_font = openpyxl.styles.Font(name=font_family, size=10, bold=True)
+    regular_font = openpyxl.styles.Font(name=font_family, size=10)
+    muted_font = openpyxl.styles.Font(name=font_family, size=9, color="64748B", italic=True)
+
+    header_fill = openpyxl.styles.PatternFill("solid", fgColor="1E3A8A") # Navy Blue
+    sub_header_fill = openpyxl.styles.PatternFill("solid", fgColor="3B82F6") # Blue
+    summary_card_fill = openpyxl.styles.PatternFill("solid", fgColor="F1F5F9") # Slate 100
+    total_fill = openpyxl.styles.PatternFill("solid", fgColor="E2E8F0") # Slate 200
+
+    # Status fills
+    status_fills = {
+        "delivered": openpyxl.styles.PatternFill("solid", fgColor="DCFCE7"), # Light green
+        "partial": openpyxl.styles.PatternFill("solid", fgColor="FEF3C7"), # Light amber
+        "failed": openpyxl.styles.PatternFill("solid", fgColor="FEE2E2"), # Light red
+        "rescheduled": openpyxl.styles.PatternFill("solid", fgColor="F3E8FF"), # Light purple
+        "planned": openpyxl.styles.PatternFill("solid", fgColor="F1F5F9"), # Light gray
+    }
+    status_fonts = {
+        "delivered": openpyxl.styles.Font(name=font_family, size=10, bold=True, color="166534"),
+        "partial": openpyxl.styles.Font(name=font_family, size=10, bold=True, color="92400E"),
+        "failed": openpyxl.styles.Font(name=font_family, size=10, bold=True, color="991B1B"),
+        "rescheduled": openpyxl.styles.Font(name=font_family, size=10, bold=True, color="6B21A8"),
+        "planned": openpyxl.styles.Font(name=font_family, size=10, color="475569"),
+    }
+
+    thin_border_side = openpyxl.styles.Side(border_style="thin", color="CBD5E1")
+    cell_border = openpyxl.styles.Border(left=thin_border_side, right=thin_border_side, top=thin_border_side, bottom=thin_border_side)
+    thick_bottom_border = openpyxl.styles.Border(left=thin_border_side, right=thin_border_side, top=thin_border_side, bottom=openpyxl.styles.Side(border_style="medium", color="1E3A8A"))
+
     status_map = {
         "planned": "Ожидает доставки",
         "delivered": "Доставлено",
@@ -8231,35 +8262,304 @@ def download_route_report(session_id: int, request: Request):
         "paid": "Оплачено",
         "not_paid": "Не оплачено",
     }
-    for row in rows:
-        raw_status = row.get("status") or "planned"
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SHEET 1: Сводка по рейсу (Summary Sheet)
+    # ══════════════════════════════════════════════════════════════════════════
+    ws_summary = workbook.active
+    ws_summary.title = "Сводка по рейсу"
+    ws_summary.views.sheetView[0].showGridLines = True
+
+    # Title
+    delivery_date_str = str(session.get("date") or date.today().isoformat())
+    ws_summary["A1"] = f"SmartRoute — Сводный отчёт по рейсу #{session_id}"
+    ws_summary["A1"].font = title_font
+    ws_summary["A2"] = f"Дата выполнения: {delivery_date_str} | Статус рейса: {'Завершён' if session.get('is_completed') else 'В процессе'}"
+    ws_summary["A2"].font = muted_font
+
+    # Aggregate driver stats
+    drivers_dict = {}
+    total_points = 0
+    total_delivered = 0
+    total_partial = 0
+    total_failed = 0
+    total_rescheduled = 0
+    total_planned = 0
+    total_cash = 0.0
+    total_card = 0.0
+    total_transfer = 0.0
+    total_unpaid = 0.0
+
+    for r in rows:
+        r_idx = r.get("route_index") or 0
+        drv_key = (r_idx, r.get("vehicle_name") or f"Машина {r_idx + 1}", r.get("driver_name") or "Не назначен", r.get("driver_phone") or "")
+        if drv_key not in drivers_dict:
+            route_km = 0.0
+            if r_idx < len(session_routes):
+                route_km = float(session_routes[r_idx].get("total_km") or 0)
+            drivers_dict[drv_key] = {
+                "points": 0, "delivered": 0, "partial": 0, "failed": 0, "rescheduled": 0, "planned": 0,
+                "cash": 0.0, "card": 0.0, "transfer": 0.0, "unpaid": 0.0,
+                "total_order_sum": 0.0, "km": route_km,
+                "status": r.get("assignment_status") or "planned",
+            }
+        
+        if r.get("visit_order") is not None:
+            total_points += 1
+            drivers_dict[drv_key]["points"] += 1
+            st = r.get("status") or "planned"
+            amt = float(r.get("amount_rub") or 0)
+            drivers_dict[drv_key]["total_order_sum"] += amt
+
+            if st == "delivered":
+                total_delivered += 1
+                drivers_dict[drv_key]["delivered"] += 1
+            elif st == "partial":
+                total_partial += 1
+                drivers_dict[drv_key]["partial"] += 1
+            elif st == "failed":
+                total_failed += 1
+                drivers_dict[drv_key]["failed"] += 1
+            elif st == "rescheduled":
+                total_rescheduled += 1
+                drivers_dict[drv_key]["rescheduled"] += 1
+            else:
+                total_planned += 1
+                drivers_dict[drv_key]["planned"] += 1
+
+            pm = r.get("payment_method") or "none"
+            ps = r.get("payment_status") or "pending"
+            if ps == "paid":
+                if pm == "cash":
+                    total_cash += amt
+                    drivers_dict[drv_key]["cash"] += amt
+                elif pm == "card":
+                    total_card += amt
+                    drivers_dict[drv_key]["card"] += amt
+                elif pm == "transfer":
+                    total_transfer += amt
+                    drivers_dict[drv_key]["transfer"] += amt
+            elif ps == "not_paid":
+                total_unpaid += amt
+                drivers_dict[drv_key]["unpaid"] += amt
+
+    # Summary KPI Table
+    ws_summary["A4"] = "Ключевые показатели смены"
+    ws_summary["A4"].font = section_font
+    
+    kpis = [
+        ("Всего автомобилей / маршрутов", len(drivers_dict)),
+        ("Всего точек доставки", total_points),
+        ("Успешно доставлено", total_delivered),
+        ("Частичных доставок", total_partial),
+        ("Отказов (не доставлено)", total_failed),
+        ("Перенесено на другую дату", total_rescheduled),
+        ("Собрано наличных (к сдаче в кассу)", total_cash),
+        ("Оплачено картой", total_card),
+        ("Оплачено переводом", total_transfer),
+        ("Не оплачено (долг/дебиторка)", total_unpaid),
+        ("Общий пробег всех машин, км", float(session.get("total_km") or 0)),
+    ]
+
+    for row_idx, (label, val) in enumerate(kpis, start=5):
+        ws_summary.cell(row=row_idx, column=1, value=label).font = regular_font
+        c = ws_summary.cell(row=row_idx, column=2, value=val)
+        c.font = bold_font
+        if "Собрано" in label or "Оплачено" in label or "Не оплачено" in label:
+            c.number_format = "#,##0.00 ₽"
+        elif "пробег" in label:
+            c.number_format = "0.0 км"
+        else:
+            c.number_format = "#,##0"
+        ws_summary.cell(row=row_idx, column=1).border = cell_border
+        c.border = cell_border
+
+    # Driver Breakdown Table
+    table_start_row = len(kpis) + 7
+    ws_summary.cell(row=table_start_row - 1, column=1, value="Сводка по водителям").font = section_font
+
+    driver_headers = [
+        "№", "Автомобиль", "Водитель", "Телефон", "Точек", "Доставлено",
+        "Отказ/Перенос", "Наличные, ₽", "Карта/Перевод, ₽", "Не оплачено, ₽", "Пробег, км", "Статус"
+    ]
+    for col_idx, h in enumerate(driver_headers, start=1):
+        cell = ws_summary.cell(row=table_start_row, column=col_idx, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = openpyxl.styles.Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = cell_border
+
+    cur_row = table_start_row + 1
+    for idx, ((r_idx, v_name, d_name, d_phone), d_stat) in enumerate(sorted(drivers_dict.items()), start=1):
+        ws_summary.cell(row=cur_row, column=1, value=idx).alignment = openpyxl.styles.Alignment(horizontal="center")
+        ws_summary.cell(row=cur_row, column=2, value=v_name)
+        ws_summary.cell(row=cur_row, column=3, value=d_name)
+        ws_summary.cell(row=cur_row, column=4, value=d_phone)
+        ws_summary.cell(row=cur_row, column=5, value=d_stat["points"]).alignment = openpyxl.styles.Alignment(horizontal="center")
+        ws_summary.cell(row=cur_row, column=6, value=d_stat["delivered"]).alignment = openpyxl.styles.Alignment(horizontal="center")
+        ws_summary.cell(row=cur_row, column=7, value=d_stat["failed"] + d_stat["rescheduled"]).alignment = openpyxl.styles.Alignment(horizontal="center")
+        
+        c_cash = ws_summary.cell(row=cur_row, column=8, value=d_stat["cash"])
+        c_cash.number_format = "#,##0.00 ₽"
+        
+        c_card = ws_summary.cell(row=cur_row, column=9, value=d_stat["card"] + d_stat["transfer"])
+        c_card.number_format = "#,##0.00 ₽"
+        
+        c_unpaid = ws_summary.cell(row=cur_row, column=10, value=d_stat["unpaid"])
+        c_unpaid.number_format = "#,##0.00 ₽"
+        
+        c_km = ws_summary.cell(row=cur_row, column=11, value=d_stat["km"])
+        c_km.number_format = "0.0"
+        
+        st_text = "Завершён" if d_stat["status"] == "completed" or (d_stat["points"] > 0 and d_stat["planned"] == 0) else "В процессе"
+        ws_summary.cell(row=cur_row, column=12, value=st_text).alignment = openpyxl.styles.Alignment(horizontal="center")
+
+        for col_idx in range(1, len(driver_headers) + 1):
+            cell = ws_summary.cell(row=cur_row, column=col_idx)
+            cell.font = regular_font
+            cell.border = cell_border
+        cur_row += 1
+
+    # Total row
+    ws_summary.cell(row=cur_row, column=1, value="ИТОГО").font = bold_font
+    ws_summary.cell(row=cur_row, column=1).alignment = openpyxl.styles.Alignment(horizontal="center")
+    ws_summary.cell(row=cur_row, column=5, value=total_points).font = bold_font
+    ws_summary.cell(row=cur_row, column=5).alignment = openpyxl.styles.Alignment(horizontal="center")
+    ws_summary.cell(row=cur_row, column=6, value=total_delivered).font = bold_font
+    ws_summary.cell(row=cur_row, column=6).alignment = openpyxl.styles.Alignment(horizontal="center")
+    ws_summary.cell(row=cur_row, column=7, value=total_failed + total_rescheduled).font = bold_font
+    ws_summary.cell(row=cur_row, column=7).alignment = openpyxl.styles.Alignment(horizontal="center")
+    
+    tot_cash_c = ws_summary.cell(row=cur_row, column=8, value=total_cash)
+    tot_cash_c.font = bold_font
+    tot_cash_c.number_format = "#,##0.00 ₽"
+    
+    tot_card_c = ws_summary.cell(row=cur_row, column=9, value=total_card + total_transfer)
+    tot_card_c.font = bold_font
+    tot_card_c.number_format = "#,##0.00 ₽"
+    
+    tot_unpaid_c = ws_summary.cell(row=cur_row, column=10, value=total_unpaid)
+    tot_unpaid_c.font = bold_font
+    tot_unpaid_c.number_format = "#,##0.00 ₽"
+    
+    tot_km_c = ws_summary.cell(row=cur_row, column=11, value=float(session.get("total_km") or 0))
+    tot_km_c.font = bold_font
+    tot_km_c.number_format = "0.0"
+
+    for col_idx in range(1, len(driver_headers) + 1):
+        cell = ws_summary.cell(row=cur_row, column=col_idx)
+        cell.fill = total_fill
+        cell.border = thick_bottom_border
+
+    # Adjust widths for summary sheet
+    summary_widths = [6, 22, 22, 18, 10, 14, 16, 16, 18, 16, 14, 14]
+    for idx, width in enumerate(summary_widths, 1):
+        ws_summary.column_dimensions[openpyxl.utils.get_column_letter(idx)].width = width
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SHEET 2: Детализация точек (Detailed Stops Sheet)
+    # ══════════════════════════════════════════════════════════════════════════
+    ws_details = workbook.create_sheet(title="Детализация точек")
+    ws_details.views.sheetView[0].showGridLines = True
+
+    detail_headers = [
+        "Машина", "Водитель", "Телефон", "Дата", "№ точки", "Клиент / Контрагент",
+        "Адрес доставки", "Телефон клиента", "Статус доставки", "План (кол-во)",
+        "Факт (кол-во)", "Недовоз", "Товары", "Сумма заявки, ₽", "Способ оплаты",
+        "Статус оплаты", "Комментарий водителя", "Дата переноса", "Время отметки"
+    ]
+    ws_details.append(detail_headers)
+    for cell in ws_details[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = openpyxl.styles.Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = cell_border
+    ws_details.row_dimensions[1].height = 28
+
+    for row_idx, r in enumerate(rows, start=2):
+        raw_status = r.get("status") or "planned"
         status_ru = status_map.get(raw_status, raw_status)
-        raw_pm = row.get("payment_method") or "none"
+        raw_pm = r.get("payment_method") or "none"
         pm_ru = payment_method_map.get(raw_pm, raw_pm)
-        raw_ps = row.get("payment_status") or "pending"
+        raw_ps = r.get("payment_status") or "pending"
         ps_ru = payment_status_map.get(raw_ps, raw_ps)
-        products_val = (row.get("products") or "").strip()
-        sheet.append([
-            row.get("vehicle_name") or "", row.get("driver_name") or "", row.get("driver_phone") or "",
-            session.get("date") or "", row.get("visit_order") or "", row.get("store_name") or "",
-            row.get("address") or "", status_ru, products_val, pm_ru,
-            ps_ru, row.get("driver_comment") or "",
-            str(row["rescheduled_date"]) if row.get("rescheduled_date") else "", total_km,
-        ])
-    sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = sheet.dimensions
-    widths = [16, 20, 16, 13, 10, 30, 34, 20, 36, 18, 18, 34, 16, 18]
-    for index, width in enumerate(widths, 1):
-        sheet.column_dimensions[openpyxl.utils.get_column_letter(index)].width = width
-    for row in sheet.iter_rows(min_row=2):
-        for cell in row:
-            cell.alignment = openpyxl.styles.Alignment(vertical="top", wrap_text=True)
-    for cell in list(sheet.iter_cols(min_col=14, max_col=14, min_row=2))[0]:
-        cell.number_format = "0.0"
+        
+        plan_qty = float(r.get("quantity") or 0)
+        actual_raw = r.get("actual_qty")
+        actual_qty = plan_qty if actual_raw is None else float(actual_raw)
+        shortfall = max(0.0, plan_qty - actual_qty) if raw_status != "planned" else 0.0
+        amount = float(r.get("amount_rub") or 0)
+        
+        delivered_at_str = ""
+        if r.get("delivered_at"):
+            try:
+                delivered_at_str = r["delivered_at"].strftime("%H:%M") if hasattr(r["delivered_at"], "strftime") else str(r["delivered_at"])[11:16]
+            except Exception:
+                delivered_at_str = str(r["delivered_at"])
+
+        client_name = (r.get("store_client") or r.get("store_name") or "").strip()
+        if r.get("store_client") and r.get("store_name") and r.get("store_client") != r.get("store_name"):
+            client_name = f"{r.get('store_name')} ({r.get('store_client')})"
+
+        row_values = [
+            r.get("vehicle_name") or "",
+            r.get("driver_name") or "",
+            r.get("driver_phone") or "",
+            session.get("date") or "",
+            r.get("visit_order") or "",
+            client_name,
+            r.get("address") or "",
+            r.get("store_phone") or "",
+            status_ru,
+            plan_qty,
+            actual_qty if raw_status != "planned" else "",
+            shortfall if shortfall > 0 else "",
+            (r.get("products") or "").strip(),
+            amount if amount > 0 else "",
+            pm_ru,
+            ps_ru,
+            r.get("driver_comment") or "",
+            str(r["rescheduled_date"]) if r.get("rescheduled_date") else "",
+            delivered_at_str,
+        ]
+        ws_details.append(row_values)
+        
+        # Style row cells
+        for col_idx in range(1, len(detail_headers) + 1):
+            c = ws_details.cell(row=row_idx, column=col_idx)
+            c.font = regular_font
+            c.border = cell_border
+            c.alignment = openpyxl.styles.Alignment(vertical="top", wrap_text=True)
+
+        # Status cell highlight
+        status_cell = ws_details.cell(row=row_idx, column=9)
+        if raw_status in status_fills:
+            status_cell.fill = status_fills[raw_status]
+            status_cell.font = status_fonts[raw_status]
+        status_cell.alignment = openpyxl.styles.Alignment(horizontal="center", vertical="top")
+
+        # Alignment & formats
+        ws_details.cell(row=row_idx, column=5).alignment = openpyxl.styles.Alignment(horizontal="center", vertical="top")
+        ws_details.cell(row=row_idx, column=10).alignment = openpyxl.styles.Alignment(horizontal="right", vertical="top")
+        ws_details.cell(row=row_idx, column=11).alignment = openpyxl.styles.Alignment(horizontal="right", vertical="top")
+        ws_details.cell(row=row_idx, column=12).alignment = openpyxl.styles.Alignment(horizontal="right", vertical="top")
+        
+        amt_cell = ws_details.cell(row=row_idx, column=14)
+        if amount > 0:
+            amt_cell.number_format = "#,##0.00 ₽"
+        amt_cell.alignment = openpyxl.styles.Alignment(horizontal="right", vertical="top")
+
+    ws_details.freeze_panes = "A2"
+    ws_details.auto_filter.ref = ws_details.dimensions
+    
+    detail_widths = [16, 20, 16, 12, 8, 28, 32, 16, 18, 12, 12, 12, 32, 16, 14, 16, 26, 14, 14]
+    for index, width in enumerate(detail_widths, 1):
+        ws_details.column_dimensions[openpyxl.utils.get_column_letter(index)].width = width
+
     output = io.BytesIO()
     workbook.save(output)
     output.seek(0)
-    filename = f"smartroute_route_{session_id}_{date.today().isoformat()}.xlsx"
+    filename = f"smartroute_report_{session_id}_{date.today().isoformat()}.xlsx"
     return StreamingResponse(
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -9294,6 +9594,42 @@ def complete_route_session(session_id: int, request: Request):
             (session_id,),
         )
         conn.commit()
+
+        # Notify drivers in Telegram that the shift is officially finished by dispatcher
+        try:
+            cur.execute(
+                """SELECT a.id, a.vehicle_name, a.driver_name, d.telegram_chat_id
+                     FROM route_assignments a
+                     JOIN drivers d ON d.id = a.driver_id
+                    WHERE a.session_id = %s AND a.owner_id = %s AND d.telegram_chat_id IS NOT NULL""",
+                (session_id, uid),
+            )
+            connected_drivers = cur.fetchall()
+            for cd in connected_drivers:
+                try:
+                    _, driver_url = _issue_assignment_link(cur, int(cd["id"]), request)
+                    safe_url = _telegram_http_url(driver_url)
+                    text = (
+                        f"🏁 Рейс официально завершён диспетчером!\n\n"
+                        f"🚚 Автомобиль: {cd.get('vehicle_name') or 'Машина'}\n"
+                        f"👤 Водитель: {cd.get('driver_name') or 'Водитель'}\n\n"
+                        f"Все точки обработаны, смена закрыта. Спасибо за работу! 🚚💨\n"
+                        f"Вы можете проверить кассовый баланс и скачать итоговый PDF-отчёт смены:"
+                    )
+                    keyboard = []
+                    if safe_url:
+                        keyboard.append([{"text": "📋 Ведомость смены и PDF-отчёт", "url": safe_url}])
+                    _telegram_api("sendMessage", {
+                        "chat_id": int(cd["telegram_chat_id"]),
+                        "text": text,
+                        "reply_markup": {"inline_keyboard": keyboard} if keyboard else None,
+                    })
+                except Exception as exc:
+                    logger.warning("Telegram driver completion notification failed for assignment %s: %s", cd.get("id"), exc)
+            conn.commit()
+        except Exception as exc:
+            logger.warning("Failed to broadcast completion to telegram drivers: %s", exc)
+
         return {"ok": True, "session_id": session_id}
     except HTTPException:
         conn.rollback()
