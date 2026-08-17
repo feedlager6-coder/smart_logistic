@@ -228,6 +228,20 @@ export function DriverPage() {
     }
   });
 
+  const { data, isLoading, isError, refetch } = useQuery<DriverData>({
+    queryKey: ["driver-assignment", token],
+    queryFn: async () => {
+      const response = await fetch(`/api/driver/${encodeURIComponent(token)}`);
+      if (!response.ok) throw new Error("Ссылка недействительна");
+      return response.json();
+    },
+    enabled: Boolean(token),
+    refetchInterval: 15_000,
+  });
+
+  const assignment = data?.assignment;
+  const executions = data?.executions || [];
+
   useEffect(() => {
     if (assignment?.status === "completed" && !shiftClosed) {
       setShiftClosed(true);
@@ -254,17 +268,6 @@ export function DriverPage() {
     payment_status: PaymentStatus;
     driver_comment: string;
   }>>({});
-
-  const { data, isLoading, isError, refetch } = useQuery<DriverData>({
-    queryKey: ["driver-assignment", token],
-    queryFn: async () => {
-      const response = await fetch(`/api/driver/${encodeURIComponent(token)}`);
-      if (!response.ok) throw new Error("Ссылка недействительна");
-      return response.json();
-    },
-    enabled: Boolean(token),
-    refetchInterval: 15_000,
-  });
 
   useEffect(() => {
     if (!token || !navigator.geolocation) {
@@ -564,7 +567,9 @@ export function DriverPage() {
     );
   }
 
-  const { assignment, executions } = data;
+  if (!assignment) {
+    return null;
+  }
   const progress = assignment.total_points ? Math.round(assignment.completed_points / assignment.total_points * 100) : 0;
 
   // Key stats for report and reconciliation
