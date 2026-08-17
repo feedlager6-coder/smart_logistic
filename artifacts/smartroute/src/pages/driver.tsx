@@ -219,7 +219,7 @@ export function DriverPage() {
   const [expandedCompletedCards, setExpandedCompletedCards] = useState<Record<number, boolean>>({});
   const [showAllCompleted, setShowAllCompleted] = useState(false);
 
-  // Shift closing state (persisted per token in localStorage)
+  // Shift closing state (persisted per token in localStorage and synced with server assignment status)
   const [shiftClosed, setShiftClosed] = useState<boolean>(() => {
     try {
       return localStorage.getItem(`smartroute_shift_closed_${token}`) === "true";
@@ -227,6 +227,17 @@ export function DriverPage() {
       return false;
     }
   });
+
+  useEffect(() => {
+    if (assignment?.status === "completed" && !shiftClosed) {
+      setShiftClosed(true);
+      try {
+        localStorage.setItem(`smartroute_shift_closed_${token}`, "true");
+      } catch {
+        // Ignored
+      }
+    }
+  }, [assignment?.status, shiftClosed, token]);
 
   // Modal / Confirm state for Red Zone remote delivery
   const [pendingConfirmation, setPendingConfirmation] = useState<{

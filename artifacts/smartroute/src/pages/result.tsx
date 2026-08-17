@@ -1,5 +1,5 @@
 import { useEffect, useState, Fragment } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useParams } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -884,16 +884,42 @@ export function ResultPage() {
   const sessionId = params?.id ? parseInt(params.id) : null;
   const isMobile = useIsMobile();
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [copiedNav, setCopiedNav] = useState<number | null>(null);
   const [copiedSeg, setCopiedSeg] = useState<CopiedSegKey | null>(null);
   const [localResult, setLocalResult] = useState<RouteResult | null>(null);
   const [activeVehicleIndex, setActiveVehicleIndex] = useState(0);
   const [activeResultTab, setActiveResultTab] = useState<"execution" | "detail">("execution");
   const [completingRoute, setCompletingRoute] = useState(false);
+  const [isLocallyCompleted, setIsLocallyCompleted] = useState(false);
 
   const { data: serverResult, isLoading: sessionLoading, isError: sessionError } = useGetRouteSession(
     sessionId ?? 0,
     { query: { enabled: !!sessionId } as any }
+  );
+
+  const { data: assignmentsData, refetch: refetchAssignments } = useQuery<{
+    assignments: Assignment[];
+    is_completed?: boolean;
+    completed_at?: string;
+  }>({
+    queryKey: ["route-assignments", sessionId],
+    queryFn: async () => {
+      const response = await fetch(`/api/route/sessions/${sessionId}/assignments`, { credentials: "include" });
+      if (!response.ok) throw new Error("Не удалось загрузить исполнение маршрута");
+      return response.json();
+    },
+    enabled: !!sessionId,
+    refetchInterval: 5_000,
+  });
+
+  const isCompleted = Boolean(
+    isLocallyCompleted ||
+    (serverResult as any)?.is_completed ||
+    assignmentsData?.is_completed ||
+    (assignmentsData?.assignments &&
+      assignmentsData.assignments.length > 0 &&
+      assignmentsData.assignments.every((a) => a.status === "completed"))
   );
 
   // Fallback: load from localStorage (legacy, no session_id in URL)
@@ -917,7 +943,7 @@ export function ResultPage() {
 
   const handleCompleteRoute = async () => {
     if (!sessionId || completingRoute) return;
-    if (!window.confirm("Завершить маршрут? После завершения он станет архивным, а GPS и исполнение будут закрыты.")) return;
+    if (!window.confirm("Закрыть смену и завершить маршрут? После закрытия он станет архивным, а отчёты и ведомости будут зафиксированы.")) return;
     setCompletingRoute(true);
     try {
       const response = await fetch(`/api/route/sessions/${sessionId}/complete`, {
@@ -925,11 +951,15 @@ export function ResultPage() {
         credentials: "include",
       });
       const payload = await response.json().catch(() => ({})) as { detail?: string };
-      if (!response.ok) throw new Error(payload.detail || "Не удалось завершить маршрут");
+      if (!response.ok) throw new Error(payload.detail || "Не удалось закрыть смену");
+      setIsLocallyCompleted(true);
+      refetchAssignments();
+      queryClient.invalidateQueries({ queryKey: ["route-assignments", sessionId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/route/sessions", sessionId] });
       window.dispatchEvent(new Event("route:changed"));
-      toast({ title: "Маршрут завершён", description: "Он больше не отображается как активный." });
+      toast({ title: "Смена закрыта", description: "Маршрут завершён, все ведомости и отчёты сохранены." });
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : "Не удалось завершить маршрут");
+      window.alert(error instanceof Error ? error.message : "Не удалось закрыть смену");
     } finally {
       setCompletingRoute(false);
     }
@@ -1137,16 +1167,23 @@ export function ResultPage() {
         {/* Manager Action Bar on Mobile */}
         <div className="flex items-center gap-1.5 px-3 py-2 bg-background border-b overflow-x-auto">
           {sessionId && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="border-emerald-300 text-emerald-700 hover:bg-emerald-50 text-xs font-semibold h-8 shrink-0 gap-1.5"
-              onClick={handleCompleteRoute}
-              disabled={completingRoute}
-            >
-              {completingRoute ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5 text-emerald-600" />}
-              {completingRoute ? "Завершаем…" : "Завершить рейс"}
-            </Button>
+            isCompleted ? (
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-50 text-emerald-800 border border-emerald-300 text-xs font-semibold shrink-0">
+                <Check className="w-3.5 h-3.5 text-emerald-600" />
+                Смена закрыта
+              </span>
+            ) : (
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-emerald-300 text-emerald-700 hover:bg-emerald-50 text-xs font-semibold h-8 shrink-0 gap-1.5"
+                onClick={handleCompleteRoute}
+                disabled={completingRoute}
+              >
+                {completingRoute ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5 text-emerald-600" />}
+                {completingRoute ? "Завершаем…" : "Закрыть смену"}
+              </Button>
+            )
           )}
           <Button
             size="sm"
@@ -1166,25 +1203,14 @@ export function ResultPage() {
             <Package className="w-3.5 h-3.5 text-primary" />
             Загрузочный лист
           </Button>
-          {sessionId && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="text-xs h-8 shrink-0 gap-1.5"
-              onClick={() => window.open(`/api/route/sessions/${sessionId}/report.xlsx`, "_blank")}
-            >
-              <Download className="w-3.5 h-3.5" />
-              Excel
-            </Button>
-          )}
           <Button
             size="sm"
             variant="ghost"
-            className="text-xs h-8 shrink-0 text-muted-foreground ml-auto"
+            className="text-xs h-8 shrink-0 text-primary font-medium ml-auto"
             asChild
           >
-            <Link href="/route">
-              + Новый
+            <Link href="/orders">
+              + Заявка
             </Link>
           </Button>
         </div>
@@ -1350,15 +1376,22 @@ export function ResultPage() {
         </div>
         <div className="flex gap-2 flex-wrap items-center">
           {sessionId && (
-            <Button
-              variant="outline"
-              className="gap-2 border-emerald-300 text-emerald-700 hover:bg-emerald-50 font-medium shadow-2xs"
-              onClick={handleCompleteRoute}
-              disabled={completingRoute}
-            >
-              {completingRoute ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4 text-emerald-600" />}
-              {completingRoute ? "Завершаем…" : "Завершить рейс"}
-            </Button>
+            isCompleted ? (
+              <Badge variant="outline" className="h-9 px-3.5 gap-1.5 bg-emerald-50 text-emerald-800 border-emerald-300 font-semibold shadow-2xs">
+                <Check className="w-4 h-4 text-emerald-600" />
+                <span>Смена закрыта</span>
+              </Badge>
+            ) : (
+              <Button
+                variant="outline"
+                className="gap-2 border-emerald-300 text-emerald-700 hover:bg-emerald-50 font-medium shadow-2xs"
+                onClick={handleCompleteRoute}
+                disabled={completingRoute}
+              >
+                {completingRoute ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4 text-emerald-600" />}
+                {completingRoute ? "Завершаем…" : "Закрыть смену"}
+              </Button>
+            )
           )}
           <Button variant="outline" onClick={() => window.print()} className="gap-2 shadow-2xs">
             <Printer className="w-4 h-4" />
@@ -1367,12 +1400,6 @@ export function ResultPage() {
           <Button variant="outline" onClick={handlePrintLoading} className="gap-2 shadow-2xs">
             <Package className="w-4 h-4" />
             <span className="hidden sm:inline">Загрузочный лист</span>
-          </Button>
-          <Button variant="outline" className="gap-2 shadow-2xs" asChild>
-            <Link href="/route">
-              <RefreshCw className="w-4 h-4" />
-              Построить заново
-            </Link>
           </Button>
           <Button className="gap-2 shadow-xs font-semibold" asChild>
             <Link href="/orders">
