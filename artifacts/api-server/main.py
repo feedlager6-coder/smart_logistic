@@ -8154,13 +8154,18 @@ def get_route_session(id: int, request: Request):
     uid = get_user_id(request)
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT result_json FROM route_sessions WHERE id = %s AND owner_id = %s", (id, uid))
+    cur.execute("SELECT result_json, is_completed, completed_at FROM route_sessions WHERE id = %s AND owner_id = %s", (id, uid))
     row = cur.fetchone()
     cur.close()
     conn.close()
     if not row or not row["result_json"]:
         raise HTTPException(status_code=404, detail="Route session not found")
-    return json.loads(row["result_json"])
+    data = json.loads(row["result_json"])
+    if isinstance(data, dict):
+        data["id"] = id
+        data["is_completed"] = bool(row.get("is_completed"))
+        data["completed_at"] = _utc_iso(row.get("completed_at")) if row.get("completed_at") else None
+    return data
 
 
 @app.get("/api/route/sessions/{session_id}/report.xlsx")
@@ -8889,8 +8894,18 @@ def list_route_assignments(session_id: int, request: Request):
                 item["next_stop_eta_minutes"] = max(5, int(round((distance_km / 30 * 60 * 1.6) / 5) * 5))
             else:
                 item["next_stop_eta_minutes"] = None
+
+    cur.execute("SELECT is_completed, completed_at FROM route_sessions WHERE id = %s AND owner_id = %s", (session_id, uid))
+    s_row = cur.fetchone()
+    session_is_completed = bool(s_row.get("is_completed")) if s_row else False
+    session_completed_at = _utc_iso(s_row.get("completed_at")) if s_row and s_row.get("completed_at") else None
+
     cur.close(); conn.close()
-    return {"assignments": items}
+    return {
+        "assignments": items,
+        "is_completed": session_is_completed,
+        "completed_at": session_completed_at,
+    }
 
 
 @app.post("/api/route/sessions/{session_id}/assignments", status_code=201)
@@ -9640,27 +9655,36 @@ def complete_route_session(session_id: int, request: Request):
         # Notify drivers in Telegram that the shift is officially finished by dispatcher
         try:
             cur.execute(
-                """SELECT a.id, a.vehicle_name, a.driver_name, d.telegram_chat_id
+                """SELECT a.id, a.vehicle_name, a.driver_name, d.telegram_chat_id,
+                          d.phone AS driver_phone,
+                          d.telegram_username AS driver_username
                      FROM route_assignments a
                      JOIN drivers d ON d.id = a.driver_id
                     WHERE a.session_id = %s AND a.owner_id = %s AND d.telegram_chat_id IS NOT NULL""",
                 (session_id, uid),
             )
             connected_drivers = cur.fetchall()
+            dispatcher = get_dispatcher_profile(uid)
+            disp_username = (dispatcher.get("dispatcher_telegram_username") or "").strip().lstrip("@")
+            disp_phone = _normalize_driver_phone(dispatcher.get("dispatcher_phone") or "")
+
             for cd in connected_drivers:
                 try:
-                    _, driver_url = _issue_assignment_link(cur, int(cd["id"]), request)
-                    safe_url = _telegram_http_url(driver_url)
+                    driver_name = (cd.get("driver_name") or "").strip()
+                    greeting = f", {driver_name}" if driver_name else ""
+                    vehicle_label = cd.get("vehicle_name") or "Машина"
                     text = (
-                        f"🏁 Рейс официально завершён диспетчером!\n\n"
-                        f"🚚 Автомобиль: {cd.get('vehicle_name') or 'Машина'}\n"
-                        f"👤 Водитель: {cd.get('driver_name') or 'Водитель'}\n\n"
-                        f"Все точки обработаны, смена закрыта. Спасибо за работу! 🚚💨\n"
-                        f"Вы можете проверить кассовый баланс и скачать итоговый PDF-отчёт смены:"
+                        f"🏁 Рейс завершён!\n"
+                        f"{vehicle_label} · Все точки успешно обработаны\n\n"
+                        f"Спасибо за отличную работу и безопасный рейс{greeting}! 🚚✨\n"
+                        f"Все данные и отчёты приняты диспетчером. Хорошего отдыха!"
                     )
                     keyboard = []
-                    if safe_url:
-                        keyboard.append([{"text": "📋 Ведомость смены и PDF-отчёт", "url": safe_url}])
+                    if disp_username:
+                        keyboard.append([{"text": "☎️ Диспетчер", "url": f"https://t.me/{disp_username}"}])
+                    elif disp_phone:
+                        keyboard.append([{"text": f"📞 Диспетчер ({disp_phone})", "url": f"tel:{disp_phone}"}])
+
                     _telegram_api("sendMessage", {
                         "chat_id": int(cd["telegram_chat_id"]),
                         "text": text,
