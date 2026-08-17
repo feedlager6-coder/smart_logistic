@@ -3351,8 +3351,29 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: str, dispatcher: 
         safe_navigation_url = _telegram_http_url(raw_navigation_url)
         if safe_navigation_url:
             navigation_urls.append(safe_navigation_url)
+    safe_driver_url = _telegram_http_url(driver_url)
+    username = (dispatcher.get("dispatcher_telegram_username") or "").strip().lstrip("@")
+    phone = _normalize_driver_phone(dispatcher.get("dispatcher_phone") or "")
+
     if not next_execution:
-        return "🏁 Рейс завершён\n\nВсе точки обработаны. Спасибо за работу!", {"inline_keyboard": []}
+        lines = [
+            "🏁 Все точки рейса выполнены!",
+            f"{assignment.get('vehicle_name') or 'Машина'} · Обработано {route_points} точек",
+            "",
+            "📄 Откройте ведомость смены, чтобы проверить кассовый баланс и скачать PDF-отчёт:",
+        ]
+        completed_keyboard = []
+        if safe_driver_url:
+            completed_keyboard.append([{"text": "📋 Ведомость смены и PDF", "url": safe_driver_url}])
+        else:
+            completed_keyboard.append([{"text": "📋 Ведомость смены и PDF", "callback_data": f"tg:execution:{assignment_id}"}])
+        if username:
+            completed_keyboard.append([{"text": "☎️ Диспетчер", "url": f"https://t.me/{username}"}])
+        elif phone:
+            completed_keyboard.append([{"text": "☎️ Диспетчер", "callback_data": f"tg:dispatcher:{assignment_id}"}])
+        else:
+            completed_keyboard.append([{"text": "☎️ Диспетчер", "callback_data": f"tg:dispatcher:{assignment_id}"}])
+        return "\n".join(lines), {"inline_keyboard": completed_keyboard}
 
     lines = [
         "🚚 Рейс на сегодня",
@@ -3361,7 +3382,6 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: str, dispatcher: 
         "💡 Для удобной работы откройте «📦 Исполнение» — там подсвечена следующая точка и навигация строится по очереди.",
     ]
     keyboard = []
-    safe_driver_url = _telegram_http_url(driver_url)
     if safe_driver_url:
         keyboard.append([{"text": "📦 Исполнение рейса", "url": safe_driver_url}])
     else:
@@ -3372,8 +3392,6 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: str, dispatcher: 
         else:
             for index, url in enumerate(navigation_urls, start=1):
                 keyboard.append([{"text": f"🗺 Обзор всех точек (часть {index})", "url": url}])
-    username = (dispatcher.get("dispatcher_telegram_username") or "").strip().lstrip("@")
-    phone = _normalize_driver_phone(dispatcher.get("dispatcher_phone") or "")
     if username:
         keyboard.append([{"text": "☎️ Диспетчер", "url": f"https://t.me/{username}"}])
     elif phone:
