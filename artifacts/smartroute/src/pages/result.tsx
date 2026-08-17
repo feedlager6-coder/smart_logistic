@@ -7,7 +7,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check, AlertTriangle, Printer, Info, Settings, Package, Users, Link2, Loader2, Send, FileText, FileSpreadsheet } from "lucide-react";
+import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check, AlertTriangle, Printer, Info, Settings, Package, Users, Link2, Loader2, Send, FileText, FileSpreadsheet, PlusCircle } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap } from "react-leaflet";
 import 'leaflet/dist/leaflet.css';
@@ -653,22 +653,11 @@ function ExecutionControlPanel({ sessionId, routes, date }: { sessionId: number;
                 <div className="h-2 rounded-full bg-muted overflow-hidden"><div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${percent}%` }} /></div>
               </div>
               {assignment && isDone && (
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2.5 rounded-lg bg-emerald-50/90 border border-emerald-200 text-xs text-emerald-950">
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
-                    <span className="font-medium">
-                      {assignment.status === "completed" ? "Рейс завершён диспетчером." : "Все точки выполнены водителем."} Отчёт и ведомость готовы.
-                    </span>
-                  </div>
-                  <Button
-                    size="sm"
-                    className="h-7 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-medium text-xs gap-1.5 shrink-0 shadow-xs self-start sm:self-center"
-                    disabled={downloadingPdf === assignment.id}
-                    onClick={() => handleDownloadDriverPdf(assignment, route.vehicle_name)}
-                  >
-                    {downloadingPdf === assignment.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
-                    Скачать PDF отчёт
-                  </Button>
+                <div className="flex items-center gap-2 p-2.5 rounded-lg bg-emerald-50/90 border border-emerald-200 text-xs text-emerald-950">
+                  <div className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                  <span className="font-medium">
+                    {assignment.status === "completed" ? "Рейс завершён диспетчером." : "Все точки выполнены водителем."} Отчёт и ведомость зафиксированы.
+                  </span>
                 </div>
               )}
               {assignment?.next_stop && (
@@ -1361,38 +1350,34 @@ export function ResultPage() {
         </div>
         <div className="flex gap-2 flex-wrap items-center">
           {sessionId && (
-            <>
-              <Button
-                variant="outline"
-                className="gap-2 border-emerald-300 text-emerald-800 bg-emerald-50/50 hover:bg-emerald-100/70 font-semibold shadow-xs"
-                onClick={() => window.open(`/api/route/sessions/${sessionId}/report.xlsx`, "_blank")}
-              >
-                <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-                <span className="hidden sm:inline">Отчёт Excel</span>
-              </Button>
-              <Button
-                variant="outline"
-                className="gap-2 border-emerald-300 text-emerald-700 hover:bg-emerald-50 font-medium"
-                onClick={handleCompleteRoute}
-                disabled={completingRoute}
-              >
-                {completingRoute ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4 text-emerald-600" />}
-                {completingRoute ? "Завершаем…" : "Завершить рейс"}
-              </Button>
-            </>
+            <Button
+              variant="outline"
+              className="gap-2 border-emerald-300 text-emerald-700 hover:bg-emerald-50 font-medium shadow-2xs"
+              onClick={handleCompleteRoute}
+              disabled={completingRoute}
+            >
+              {completingRoute ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4 text-emerald-600" />}
+              {completingRoute ? "Завершаем…" : "Завершить рейс"}
+            </Button>
           )}
-          <Button variant="outline" onClick={() => window.print()} className="gap-2">
+          <Button variant="outline" onClick={() => window.print()} className="gap-2 shadow-2xs">
             <Printer className="w-4 h-4" />
             <span className="hidden sm:inline">Маршрутный лист</span>
           </Button>
-          <Button variant="outline" onClick={handlePrintLoading} className="gap-2">
+          <Button variant="outline" onClick={handlePrintLoading} className="gap-2 shadow-2xs">
             <Package className="w-4 h-4" />
             <span className="hidden sm:inline">Загрузочный лист</span>
           </Button>
-          <Button className="gap-2" asChild>
+          <Button variant="outline" className="gap-2 shadow-2xs" asChild>
             <Link href="/route">
               <RefreshCw className="w-4 h-4" />
               Построить заново
+            </Link>
+          </Button>
+          <Button className="gap-2 shadow-xs font-semibold" asChild>
+            <Link href="/orders">
+              <PlusCircle className="w-4 h-4" />
+              Создать новую заявку
             </Link>
           </Button>
         </div>
@@ -1845,16 +1830,6 @@ export function ResultPage() {
             </div>
           </TabsContent>
         </Tabs>
-      </div>
-
-      {/* Bottom CTA — rebuild route */}
-      <div className="flex justify-center pt-4 pb-2 print:hidden">
-        <Button size="lg" className="gap-2 h-12 px-8 shadow-md shadow-primary/20" asChild>
-          <Link href="/route">
-            <RefreshCw className="w-5 h-5" />
-            Построить заново
-          </Link>
-        </Button>
       </div>
     </div>
   );
