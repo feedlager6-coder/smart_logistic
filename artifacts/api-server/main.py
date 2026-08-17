@@ -3356,27 +3356,22 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: str, dispatcher: 
     phone = _normalize_driver_phone(dispatcher.get("dispatcher_phone") or "")
 
     if not next_execution:
-        is_completed = assignment.get("status") == "completed"
-        title = "🏁 Рейс завершён диспетчером!" if is_completed else "✅ Все точки рейса выполнены!"
-        subtext = "📄 Итоговая ведомость смены и PDF-отчёт:" if is_completed else "⏳ Ожидайте закрытия смены диспетчером.\n📄 Вы можете просмотреть ведомость смены:"
+        driver_name = (assignment.get("driver_name") or "").strip()
+        greeting = f", {driver_name}" if driver_name else ""
+        vehicle_label = assignment.get("vehicle_name") or "Машина"
         lines = [
-            title,
-            f"{assignment.get('vehicle_name') or 'Машина'} · Обработано {route_points} точек",
+            "🏁 Рейс завершён!",
+            f"{vehicle_label} · Все {route_points} точек успешно обработаны",
             "",
-            subtext,
+            f"Спасибо за отличную работу и безопасный рейс{greeting}! 🚚✨",
+            "Все данные и отчёты приняты диспетчером. Хорошего отдыха!",
         ]
         completed_keyboard = []
-        if safe_driver_url:
-            completed_keyboard.append([{"text": "📋 Ведомость смены и PDF", "url": safe_driver_url}])
-        else:
-            completed_keyboard.append([{"text": "📋 Ведомость смены и PDF", "callback_data": f"tg:execution:{assignment_id}"}])
         if username:
             completed_keyboard.append([{"text": "☎️ Диспетчер", "url": f"https://t.me/{username}"}])
         elif phone:
             completed_keyboard.append([{"text": "☎️ Диспетчер", "callback_data": f"tg:dispatcher:{assignment_id}"}])
-        else:
-            completed_keyboard.append([{"text": "☎️ Диспетчер", "callback_data": f"tg:dispatcher:{assignment_id}"}])
-        return "\n".join(lines), {"inline_keyboard": completed_keyboard}
+        return "\n".join(lines), {"inline_keyboard": completed_keyboard} if completed_keyboard else None
 
     lines = [
         "🚚 Рейс на сегодня",
@@ -8343,6 +8338,9 @@ def download_route_report(session_id: int, request: Request):
                 total_unpaid += amt
                 drivers_dict[drv_key]["unpaid"] += amt
 
+    # Count orders with and without fixed amount
+    points_without_fixed_sum = sum(1 for r in rows if r.get("visit_order") is not None and not (float(r.get("amount_rub") or 0) > 0))
+
     # Summary KPI Table
     ws_summary["A4"] = "Ключевые показатели смены"
     ws_summary["A4"].font = section_font
@@ -8358,6 +8356,7 @@ def download_route_report(session_id: int, request: Request):
         ("Оплачено картой", total_card),
         ("Оплачено переводом", total_transfer),
         ("Не оплачено (долг/дебиторка)", total_unpaid),
+        ("Точек с расчётом по накладной (без фикс. суммы)", f"{points_without_fixed_sum} точек"),
         ("Общий пробег всех машин, км", float(session.get("total_km") or 0)),
     ]
 
@@ -8369,13 +8368,24 @@ def download_route_report(session_id: int, request: Request):
             c.number_format = "#,##0.00 ₽"
         elif "пробег" in label:
             c.number_format = "0.0 км"
-        else:
+        elif isinstance(val, (int, float)):
             c.number_format = "#,##0"
+        else:
+            c.alignment = openpyxl.styles.Alignment(horizontal="right")
         ws_summary.cell(row=row_idx, column=1).border = cell_border
         c.border = cell_border
 
+    # Note about orders without fixed amount
+    note_row = len(kpis) + 5
+    note_cell = ws_summary.cell(
+        row=note_row,
+        column=1,
+        value="ℹ️ Примечание: Для заказов без фиксированной суммы водитель принимает оплату и производит сверку строго по бумажной накладной.",
+    )
+    note_cell.font = muted_font
+
     # Driver Breakdown Table
-    table_start_row = len(kpis) + 7
+    table_start_row = len(kpis) + 8
     ws_summary.cell(row=table_start_row - 1, column=1, value="Сводка по водителям").font = section_font
 
     driver_headers = [
@@ -8451,8 +8461,8 @@ def download_route_report(session_id: int, request: Request):
         cell.fill = total_fill
         cell.border = thick_bottom_border
 
-    # Adjust widths for summary sheet
-    summary_widths = [6, 22, 22, 18, 10, 14, 16, 16, 18, 16, 14, 14]
+    # Adjust widths for summary sheet — spacious Column A for full KPI labels
+    summary_widths = [48, 28, 24, 18, 12, 14, 16, 18, 20, 18, 14, 16]
     for idx, width in enumerate(summary_widths, 1):
         ws_summary.column_dimensions[openpyxl.utils.get_column_letter(idx)].width = width
 
@@ -8515,7 +8525,7 @@ def download_route_report(session_id: int, request: Request):
             actual_qty if raw_status != "planned" else "",
             shortfall if shortfall > 0 else "",
             (r.get("products") or "").strip(),
-            amount if amount > 0 else "",
+            amount if amount > 0 else "По накладной",
             pm_ru,
             ps_ru,
             r.get("driver_comment") or "",
@@ -8547,14 +8557,46 @@ def download_route_report(session_id: int, request: Request):
         amt_cell = ws_details.cell(row=row_idx, column=14)
         if amount > 0:
             amt_cell.number_format = "#,##0.00 ₽"
-        amt_cell.alignment = openpyxl.styles.Alignment(horizontal="right", vertical="top")
+            amt_cell.alignment = openpyxl.styles.Alignment(horizontal="right", vertical="top")
+        else:
+            amt_cell.font = muted_font
+            amt_cell.alignment = openpyxl.styles.Alignment(horizontal="center", vertical="top")
 
     ws_details.freeze_panes = "A2"
     ws_details.auto_filter.ref = ws_details.dimensions
     
-    detail_widths = [16, 20, 16, 12, 8, 28, 32, 16, 18, 12, 12, 12, 32, 16, 14, 16, 26, 14, 14]
-    for index, width in enumerate(detail_widths, 1):
-        ws_details.column_dimensions[openpyxl.utils.get_column_letter(index)].width = width
+    # Auto-size columns with minimum widths for guaranteed readability
+    min_detail_widths = {
+        1: 18,  # Машина
+        2: 22,  # Водитель
+        3: 16,  # Телефон
+        4: 12,  # Дата
+        5: 10,  # № точки
+        6: 30,  # Клиент
+        7: 36,  # Адрес
+        8: 18,  # Телефон клиента
+        9: 20,  # Статус
+        10: 14, # План
+        11: 14, # Факт
+        12: 12, # Недовоз
+        13: 32, # Товары
+        14: 18, # Сумма заявки
+        15: 16, # Способ оплаты
+        16: 18, # Статус оплаты
+        17: 28, # Комментарий
+        18: 16, # Дата переноса
+        19: 16, # Время отметки
+    }
+    for col_idx in range(1, len(detail_headers) + 1):
+        col_letter = openpyxl.utils.get_column_letter(col_idx)
+        max_len = 0
+        for cell in ws_details[col_letter]:
+            val_str = str(cell.value or "")
+            for line in val_str.split("\n"):
+                if len(line) > max_len:
+                    max_len = len(line)
+        min_w = min_detail_widths.get(col_idx, 15)
+        ws_details.column_dimensions[col_letter].width = max(min(max_len + 4, 45), min_w)
 
     output = io.BytesIO()
     workbook.save(output)
