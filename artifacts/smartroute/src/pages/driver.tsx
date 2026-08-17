@@ -109,8 +109,17 @@ const paymentStatusLabels: Record<PaymentStatus, string> = {
 };
 
 const terminalStatuses = new Set(["delivered", "partial", "failed", "rescheduled"]);
-const paymentMethods: Payment[] = ["cash", "card", "transfer"];
+const paymentMethods: Payment[] = ["cash", "card", "transfer", "none"];
 const paymentStatuses: PaymentStatus[] = ["paid", "not_paid"];
+
+function formatOrderCountRu(count: number): string {
+  const rem10 = count % 10;
+  const rem100 = count % 100;
+  if (rem100 >= 11 && rem100 <= 19) return `${count} заказов`;
+  if (rem10 === 1) return `${count} заказ`;
+  if (rem10 >= 2 && rem10 <= 4) return `${count} заказа`;
+  return `${count} заказов`;
+}
 
 function formatProductsLine(productsStr?: string): string {
   if (!productsStr) return "";
@@ -230,6 +239,7 @@ export function DriverPage() {
   const [drafts, setDrafts] = useState<Record<number, {
     status: Status;
     actual_qty: number | "";
+    actual_amount_rub?: number | "";
     payment_method: Payment;
     payment_status: PaymentStatus;
     driver_comment: string;
@@ -369,7 +379,10 @@ export function DriverPage() {
     actual_qty: execution.status === "delivered" || execution.status === "planned"
       ? (execution.status === "delivered" && execution.actual_qty !== undefined && execution.actual_qty !== null ? execution.actual_qty : execution.quantity)
       : (execution.actual_qty ?? 0),
-    payment_method: execution.payment_method,
+    actual_amount_rub: execution.actual_amount_rub !== undefined && execution.actual_amount_rub !== null
+      ? execution.actual_amount_rub
+      : (execution.amount_rub !== undefined && execution.amount_rub > 0 ? execution.amount_rub : ""),
+    payment_method: execution.payment_method || (execution.amount_rub ? "cash" : "none"),
     payment_status: execution.payment_status === "pending" ? "not_paid" : execution.payment_status,
     driver_comment: execution.driver_comment,
   };
@@ -396,7 +409,13 @@ export function DriverPage() {
           ? { actual_qty: 0, driver_comment: "" }
           : {}),
       payment_method: targetStatus === "planned" ? "none" : draft.payment_method,
-      payment_status: targetStatus === "planned" ? "pending" : draft.payment_status,
+      payment_status: targetStatus === "planned" ? "pending" : (draft.payment_method === "none" ? "not_paid" : draft.payment_status),
+      actual_amount_rub:
+        targetStatus === "planned" || draft.payment_method === "none"
+          ? 0
+          : draft.actual_amount_rub !== "" && draft.actual_amount_rub !== undefined
+            ? Number(draft.actual_amount_rub)
+            : (execution.amount_rub || 0),
       driver_comment: targetStatus === "planned" ? "" : draft.driver_comment,
       driver_lat: currentCoords?.lat,
       driver_lon: currentCoords?.lon,
@@ -476,19 +495,168 @@ export function DriverPage() {
   };
 
   const handleDownloadPdf = async () => {
-    const element = document.getElementById("driver-shift-report-print");
-    if (!element) {
-      window.print();
-      return;
-    }
+    if (!data) return;
     setIsGeneratingPdf(true);
+    let container: HTMLDivElement | null = null;
     try {
-      const canvas = await html2canvas(element, {
+      container = document.createElement("div");
+      container.style.position = "fixed";
+      container.style.left = "-9999px";
+      container.style.top = "0";
+      container.style.width = "794px"; // Standard A4 at 96 DPI
+      container.style.backgroundColor = "#ffffff";
+      container.style.color = "#0f172a";
+      container.style.fontFamily = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
+      container.style.padding = "32px 36px";
+      container.style.boxSizing = "border-box";
+      container.style.zIndex = "-999";
+
+      const rowsHtml = executions.map((e) => {
+        const isComplete = e.status === "delivered";
+        const isPartial = e.status === "partial";
+        const isFailed = e.status === "failed";
+        const isRescheduled = e.status === "rescheduled";
+        const rowAmount = e.actual_amount_rub || e.amount_rub;
+        const statusText = statusLabels[e.status] || e.status;
+        const statusBg = isComplete ? "#dcfce7" : isPartial ? "#fef3c7" : isFailed ? "#fee2e2" : isRescheduled ? "#f3e8ff" : "#f1f5f9";
+        const statusColor = isComplete ? "#166534" : isPartial ? "#92400e" : isFailed ? "#991b1b" : isRescheduled ? "#6b21a8" : "#475569";
+        const paymentMethodText = paymentLabels[e.payment_method] || "—";
+        const paymentStatusText = e.payment_method === "none" ? "Без оплаты" : (paymentStatusLabels[e.payment_status] || "—");
+        const amountDisplay = rowAmount && rowAmount > 0
+          ? `${rowAmount.toLocaleString("ru-RU")} ₽`
+          : (e.payment_method === "none" ? "<span style='color:#94a3b8'>Без опл.</span>" : "<span style='color:#94a3b8'>По накл.</span>");
+
+        const prods = formatProductsLine(e.products) || "По накладной";
+
+        return `
+          <tr style="border-bottom: 1px solid #e2e8f0; font-size: 11px;">
+            <td style="padding: 7px 4px; text-align: center; font-weight: bold; color: #64748b; vertical-align: top;">${e.visit_order}</td>
+            <td style="padding: 7px 6px; font-weight: 600; color: #0f172a; vertical-align: top;">
+              ${e.store_name}
+              ${e.store_client ? `<div style="font-size: 10px; color: #64748b; font-weight: normal;">${e.store_client}</div>` : ""}
+            </td>
+            <td style="padding: 7px 6px; color: #334155; vertical-align: top; max-width: 170px; word-break: break-word;">${e.address || "—"}</td>
+            <td style="padding: 7px 6px; color: #0f172a; vertical-align: top; max-width: 140px; word-break: break-word;">${prods}</td>
+            <td style="padding: 7px 6px; text-align: right; font-weight: bold; color: #0f172a; vertical-align: top; white-space: nowrap;">${amountDisplay}</td>
+            <td style="padding: 7px 6px; vertical-align: top; text-align: center;">
+              <span style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; background-color: ${statusBg}; color: ${statusColor}; white-space: nowrap;">
+                ${statusText}
+              </span>
+              ${e.is_remote_completion ? `<div style="font-size: 9px; color: #d97706; font-weight: bold; margin-top: 2px;">⚠️ Дистанц.</div>` : ""}
+            </td>
+            <td style="padding: 7px 6px; vertical-align: top; font-size: 10px;">
+              <div style="font-weight: 600; color: #0f172a;">${paymentMethodText}</div>
+              <div style="color: ${e.payment_status === 'paid' ? '#16a34a' : '#64748b'}; font-weight: ${e.payment_status === 'paid' ? 'bold' : 'normal'};">${paymentStatusText}</div>
+            </td>
+            <td style="padding: 7px 6px; color: #475569; font-size: 10px; vertical-align: top; font-style: italic;">
+              ${e.driver_comment ? `«${e.driver_comment}»` : "—"}
+            </td>
+          </tr>
+        `;
+      }).join("");
+
+      container.innerHTML = `
+        <div style="border-bottom: 2px solid #0284c7; padding-bottom: 14px; margin-bottom: 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+            <div>
+              <h1 style="font-size: 20px; font-weight: 800; color: #0f172a; margin: 0 0 4px 0; letter-spacing: -0.02em;">
+                ВЕДОМОСТЬ СМЕНЫ И КАССОВЫЙ ОТЧЁТ
+              </h1>
+              <p style="font-size: 12px; color: #64748b; margin: 0;">
+                SmartRoute Logistics · Документ оперативного закрытия рейса
+              </p>
+            </div>
+            <div style="text-align: right;">
+              <div style="font-size: 14px; font-weight: 800; color: #0284c7;">
+                ${assignment.vehicle_name || "Рейс доставки"}
+              </div>
+              <div style="font-size: 11px; color: #64748b; margin-top: 2px;">
+                Дата: <strong>${new Date().toLocaleDateString("ru-RU")}</strong>
+              </div>
+            </div>
+          </div>
+
+          <div style="display: flex; gap: 24px; margin-top: 12px; font-size: 12px; color: #334155; background-color: #f8fafc; padding: 8px 12px; border-radius: 6px; border: 1px solid #e2e8f0;">
+            <div>Водитель: <strong style="color: #0f172a;">${assignment.driver_name || "—"}</strong></div>
+            <div>Телефон: <strong style="color: #0f172a;">${assignment.driver_phone || "—"}</strong></div>
+            <div>Статус смены: <strong style="color: ${shiftClosed ? '#16a34a' : '#d97706'};">${shiftClosed ? 'СМЕНА ЗАКРЫТА' : 'В ПРОЦЕССЕ'}</strong></div>
+            <div>Всего точек: <strong style="color: #0f172a;">${executions.length}</strong></div>
+          </div>
+        </div>
+
+        <!-- Summary KPI Boxes -->
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 18px;">
+          <!-- Cash Summary Box -->
+          <div style="border: 1px solid #bbf7d0; background-color: #f0fdf4; border-radius: 8px; padding: 12px;">
+            <div style="font-size: 12px; font-weight: 800; color: #166534; margin-bottom: 8px; border-bottom: 1px solid #bbf7d0; padding-bottom: 4px; display: flex; justify-content: space-between;">
+              <span>💵 КАССОВЫЙ БАЛАНС</span>
+              <span>ИТОГО: ${totalCollectedSum.toLocaleString("ru-RU")} ₽</span>
+            </div>
+            <div style="font-size: 11px; color: #166534; line-height: 1.6;">
+              <div>• <strong>Наличные к сдаче в кассу:</strong> <span style="font-size: 13px; font-weight: 800;">${totalCashSum.toLocaleString("ru-RU")} ₽</span> (${cashPaidCount} зак.)</div>
+              <div>• <strong>Оплата картой/терминалом:</strong> ${totalCardSum.toLocaleString("ru-RU")} ₽ (${cardPaidCount} зак.)</div>
+              <div>• <strong>Банковский перевод:</strong> ${totalTransferSum.toLocaleString("ru-RU")} ₽ (${transferPaidCount} зак.)</div>
+              ${notPaidCount > 0 ? `<div style="color: #b45309;">• <strong>Не оплачено (долг):</strong> ${totalNotPaidSum.toLocaleString("ru-RU")} ₽ (${notPaidCount} зак.)</div>` : ""}
+            </div>
+          </div>
+
+          <!-- Goods Inventory Summary Box -->
+          <div style="border: 1px solid #e2e8f0; background-color: #f8fafc; border-radius: 8px; padding: 12px;">
+            <div style="font-size: 12px; font-weight: 800; color: #0f172a; margin-bottom: 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; display: flex; justify-content: space-between;">
+              <span>📦 ТОВАРНЫЙ БАЛАНС</span>
+              <span>Успешность: ${totalPlanQty > 0 ? Math.round((totalDeliveredQty / totalPlanQty) * 100) : 100}%</span>
+            </div>
+            <div style="font-size: 11px; color: #334155; line-height: 1.6;">
+              <div>• <strong>Загружено со склада:</strong> ${totalPlanQty} ед.</div>
+              <div>• <strong>Фактически сдано:</strong> <strong style="color: #166534;">${totalDeliveredQty} ед.</strong></div>
+              <div>• <strong>Возврат / недовоз:</strong> <strong style="color: ${totalShortfallQty > 0 ? '#b45309' : '#64748b'};">${totalShortfallQty} ед.</strong></div>
+              <div>• <strong>Точек выполнено:</strong> ${deliveredCount + partialCount + failedCount + rescheduledCount} из ${executions.length}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Table of points -->
+        <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-family: inherit;">
+          <thead>
+            <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; font-size: 10px; text-transform: uppercase; color: #475569;">
+              <th style="padding: 6px 4px; text-align: center; width: 28px;">№</th>
+              <th style="padding: 6px 6px; text-align: left; width: 130px;">Магазин</th>
+              <th style="padding: 6px 6px; text-align: left; width: 150px;">Адрес</th>
+              <th style="padding: 6px 6px; text-align: left;">Товары</th>
+              <th style="padding: 6px 6px; text-align: right; width: 70px;">Сумма</th>
+              <th style="padding: 6px 6px; text-align: center; width: 85px;">Статус</th>
+              <th style="padding: 6px 6px; text-align: left; width: 85px;">Оплата</th>
+              <th style="padding: 6px 6px; text-align: left; width: 100px;">Примечание</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rowsHtml}
+          </tbody>
+        </table>
+
+        <!-- Signatures Section -->
+        <div style="margin-top: 24px; padding-top: 14px; border-top: 1px dashed #cbd5e1; display: flex; justify-content: space-between; font-size: 11px; color: #334155;">
+          <div style="width: 45%;">
+            <div>Сдал (водитель): ____________________ / ${assignment.driver_name || "________________"}</div>
+            <div style="font-size: 9px; color: #94a3b8; margin-top: 4px;">Подпись подтверждает фактическую сдачу товара и денег</div>
+          </div>
+          <div style="width: 45%; text-align: right;">
+            <div>Принял (кассир/диспетчер): ____________________ / ________________</div>
+            <div style="font-size: 9px; color: #94a3b8; margin-top: 4px;">Деньги в сумме <strong>${totalCashSum.toLocaleString("ru-RU")} ₽</strong> приняты в кассу</div>
+          </div>
+        </div>
+      `;
+
+      document.body.appendChild(container);
+
+      const canvas = await html2canvas(container, {
         scale: 2,
         useCORS: true,
         logging: false,
         backgroundColor: "#ffffff",
+        windowWidth: 794,
       });
+
       const imgData = canvas.toDataURL("image/png");
       const pdf = new jsPDF("p", "mm", "a4");
       const imgWidth = 210;
@@ -508,11 +676,28 @@ export function DriverPage() {
       }
 
       const safeName = (assignment.vehicle_name || "Reys").replace(/[^a-zA-Z0-9а-яА-Я_-]/g, "_");
-      pdf.save(`Vedomost_Smeny_${safeName}_${new Date().toISOString().slice(0, 10)}.pdf`);
+      const filename = `Vedomost_Smeny_${safeName}_${new Date().toISOString().slice(0, 10)}.pdf`;
+
+      // Download via Blob URL to guarantee reliable download in all browsers and iframes
+      const blob = pdf.output("blob");
+      const blobUrl = URL.createObjectURL(blob);
+      const downloadLink = document.createElement("a");
+      downloadLink.href = blobUrl;
+      downloadLink.download = filename;
+      document.body.appendChild(downloadLink);
+      downloadLink.click();
+      setTimeout(() => {
+        if (downloadLink.parentNode) downloadLink.parentNode.removeChild(downloadLink);
+        URL.revokeObjectURL(blobUrl);
+      }, 1500);
+
     } catch (error) {
       console.error("PDF generation error:", error);
       window.print();
     } finally {
+      if (container && container.parentNode) {
+        container.parentNode.removeChild(container);
+      }
       setIsGeneratingPdf(false);
     }
   };
@@ -563,6 +748,15 @@ export function DriverPage() {
   const notPaidOrders = executions.filter((e) => e.payment_status === "not_paid" && terminalStatuses.has(e.status));
   const noPaymentOrders = executions.filter((e) => e.payment_method === "none" && terminalStatuses.has(e.status));
 
+  const cashWithAmount = cashPaidOrders.filter((e) => (e.actual_amount_rub && e.actual_amount_rub > 0) || (e.amount_rub && e.amount_rub > 0));
+  const cashWithoutAmount = cashPaidOrders.filter((e) => !((e.actual_amount_rub && e.actual_amount_rub > 0) || (e.amount_rub && e.amount_rub > 0)));
+
+  const cardWithAmount = cardPaidOrders.filter((e) => (e.actual_amount_rub && e.actual_amount_rub > 0) || (e.amount_rub && e.amount_rub > 0));
+  const cardWithoutAmount = cardPaidOrders.filter((e) => !((e.actual_amount_rub && e.actual_amount_rub > 0) || (e.amount_rub && e.amount_rub > 0)));
+
+  const transferWithAmount = transferPaidOrders.filter((e) => (e.actual_amount_rub && e.actual_amount_rub > 0) || (e.amount_rub && e.amount_rub > 0));
+  const transferWithoutAmount = transferPaidOrders.filter((e) => !((e.actual_amount_rub && e.actual_amount_rub > 0) || (e.amount_rub && e.amount_rub > 0)));
+
   const cashPaidCount = cashPaidOrders.length;
   const cardPaidCount = cardPaidOrders.length;
   const transferPaidCount = transferPaidOrders.length;
@@ -591,12 +785,13 @@ export function DriverPage() {
       `  • Возврат / недовоз: ${totalShortfallQty} ед.`,
       `==================================`,
       `💰 КАССОВЫЙ ОТЧЁТ (ОПЛАТЫ):`,
-      `  💵 Наличные (к сдаче в кассу): ${cashPaidCount} заказов${totalCashSum > 0 ? ` на сумму ${totalCashSum.toLocaleString("ru-RU")} ₽` : " (по накладным)"}`,
-      ...cashPaidOrders.map((e) => `     - Точка №${e.visit_order}: ${e.store_name} (${(e.actual_amount_rub || e.amount_rub) ? `${(e.actual_amount_rub || e.amount_rub)?.toLocaleString("ru-RU")} ₽` : (formatProductsLine(e.products) || "по накладной")})`),
-      `  💳 Оплата картой: ${cardPaidCount} заказов${totalCardSum > 0 ? ` на сумму ${totalCardSum.toLocaleString("ru-RU")} ₽` : ""}`,
+      `  💵 Наличные (к сдаче в кассу): ${totalCashSum > 0 ? `${totalCashSum.toLocaleString("ru-RU")} ₽` : "0 ₽"} (${cashWithAmount.length > 0 ? `${cashWithAmount.length} с оплатой` : ""}${cashWithoutAmount.length > 0 ? `${cashWithAmount.length > 0 ? " + " : ""}${cashWithoutAmount.length} по накладной` : ""}${cashPaidOrders.length === 0 ? "0 заказов" : ""})`,
+      ...cashPaidOrders.map((e) => `     - Точка №${e.visit_order}: ${e.store_name} (${(e.actual_amount_rub || e.amount_rub) ? `${(e.actual_amount_rub || e.amount_rub)?.toLocaleString("ru-RU")} ₽` : "по накладной, сумма не указана"})`),
+      `  💳 Оплата картой: ${totalCardSum > 0 ? `${totalCardSum.toLocaleString("ru-RU")} ₽` : "0 ₽"} (${cardPaidOrders.length} зак.)`,
       ...cardPaidOrders.map((e) => `     - Точка №${e.visit_order}: ${e.store_name}${(e.actual_amount_rub || e.amount_rub) ? ` — ${(e.actual_amount_rub || e.amount_rub)?.toLocaleString("ru-RU")} ₽` : ""}`),
-      `  🔄 Безналичный перевод: ${transferPaidCount} заказов${totalTransferSum > 0 ? ` на сумму ${totalTransferSum.toLocaleString("ru-RU")} ₽` : ""}`,
+      `  🔄 Безналичный перевод: ${totalTransferSum > 0 ? `${totalTransferSum.toLocaleString("ru-RU")} ₽` : "0 ₽"} (${transferPaidOrders.length} зак.)`,
       ...transferPaidOrders.map((e) => `     - Точка №${e.visit_order}: ${e.store_name}${(e.actual_amount_rub || e.amount_rub) ? ` — ${(e.actual_amount_rub || e.amount_rub)?.toLocaleString("ru-RU")} ₽` : ""}`),
+      noPaymentOrders.length > 0 ? `  📦 Без оплаты / по накладной: ${noPaymentOrders.length} заказов` : "",
       totalCollectedSum > 0 ? `  ИТОГО СОБРАНО: ${totalCollectedSum.toLocaleString("ru-RU")} ₽` : "",
       notPaidCount > 0 ? `  ⚠️ Не оплачено / долг: ${notPaidCount} заказов${totalNotPaidSum > 0 ? ` на сумму ${totalNotPaidSum.toLocaleString("ru-RU")} ₽` : ""}` : "",
       ...notPaidOrders.map((e) => `     - Точка №${e.visit_order}: ${e.store_name} (Не оплачено: ${paymentLabels[e.payment_method]}${e.amount_rub ? `, долг ${e.amount_rub.toLocaleString("ru-RU")} ₽` : ""})`),
@@ -834,8 +1029,13 @@ export function DriverPage() {
                         💵 Наличные к сдаче в кассу:
                       </span>
                       <span className="text-[11px] text-emerald-700">
-                        {cashPaidCount} {cashPaidCount === 1 ? "заказ" : cashPaidCount < 5 ? "заказа" : "заказов"}
-                        {!hasMonetaryAmounts && " · Сумма по накладным"}
+                        {cashWithAmount.length > 0 && (
+                          <span>{formatOrderCountRu(cashWithAmount.length)} с оплатой</span>
+                        )}
+                        {cashWithoutAmount.length > 0 && (
+                          <span>{cashWithAmount.length > 0 ? " + " : ""}{formatOrderCountRu(cashWithoutAmount.length)} по накладной</span>
+                        )}
+                        {cashPaidOrders.length === 0 && <span>0 заказов</span>}
                       </span>
                     </div>
                     <span className="font-extrabold text-emerald-800 text-sm sm:text-base">
@@ -849,7 +1049,13 @@ export function DriverPage() {
                         💳 Оплата картой / терминалом:
                       </span>
                       <span className="text-[11px] text-sky-700">
-                        {cardPaidCount} {cardPaidCount === 1 ? "заказ" : cardPaidCount < 5 ? "заказа" : "заказов"}
+                        {cardWithAmount.length > 0 && (
+                          <span>{formatOrderCountRu(cardWithAmount.length)}</span>
+                        )}
+                        {cardWithoutAmount.length > 0 && (
+                          <span>{cardWithAmount.length > 0 ? " + " : ""}{formatOrderCountRu(cardWithoutAmount.length)} по накладной</span>
+                        )}
+                        {cardPaidOrders.length === 0 && <span>0 заказов</span>}
                       </span>
                     </div>
                     <span className="font-bold text-sky-800">
@@ -863,13 +1069,35 @@ export function DriverPage() {
                         🔄 Банковский перевод:
                       </span>
                       <span className="text-[11px] text-violet-700">
-                        {transferPaidCount} {transferPaidCount === 1 ? "заказ" : transferPaidCount < 5 ? "заказа" : "заказов"}
+                        {transferWithAmount.length > 0 && (
+                          <span>{formatOrderCountRu(transferWithAmount.length)}</span>
+                        )}
+                        {transferWithoutAmount.length > 0 && (
+                          <span>{transferWithAmount.length > 0 ? " + " : ""}{formatOrderCountRu(transferWithoutAmount.length)} по накладной</span>
+                        )}
+                        {transferPaidOrders.length === 0 && <span>0 заказов</span>}
                       </span>
                     </div>
                     <span className="font-semibold text-violet-800">
                       {totalTransferSum > 0 ? `${totalTransferSum.toLocaleString("ru-RU")} ₽` : `${transferPaidCount} зак.`}
                     </span>
                   </div>
+
+                  {noPaymentOrders.length > 0 && (
+                    <div className="flex items-center justify-between p-2 rounded-lg bg-slate-50 border border-slate-200">
+                      <div>
+                        <span className="font-medium text-slate-800 block">
+                          📦 Без оплаты (по накладной / договору):
+                        </span>
+                        <span className="text-[11px] text-slate-600">
+                          {formatOrderCountRu(noPaymentOrders.length)} (оплата не взималась)
+                        </span>
+                      </div>
+                      <span className="font-semibold text-slate-700">
+                        {noPaymentOrders.length} зак.
+                      </span>
+                    </div>
+                  )}
 
                   {notPaidCount > 0 && (
                     <div className="flex items-center justify-between p-2 rounded-lg bg-amber-50/70 border border-amber-200">
@@ -878,7 +1106,7 @@ export function DriverPage() {
                           ⚠️ Не оплачено / отсрочка:
                         </span>
                         <span className="text-[11px] text-amber-700">
-                          {notPaidCount} {notPaidCount === 1 ? "заказ" : notPaidCount < 5 ? "заказа" : "заказов"}
+                          {formatOrderCountRu(notPaidCount)}
                         </span>
                       </div>
                       <span className="font-semibold text-amber-800">
@@ -1602,18 +1830,26 @@ export function DriverPage() {
                         )}
 
                         <div className="space-y-2">
-                          <span className="text-xs text-muted-foreground">Способ оплаты</span>
-                          <div className="grid grid-cols-3 gap-2">
+                          <span className="text-xs font-semibold text-muted-foreground">Способ оплаты</span>
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                             {paymentMethods.map((method) => (
                               <Button
                                 key={method}
                                 type="button"
                                 variant={draft.payment_method === method ? "default" : "outline"}
-                                className="h-10 text-sm"
+                                className={`h-10 text-xs font-semibold ${
+                                  draft.payment_method === method && method === "none"
+                                    ? "bg-slate-700 hover:bg-slate-800 text-white"
+                                    : ""
+                                }`}
                                 onClick={() =>
                                   setDrafts((current) => ({
                                     ...current,
-                                    [execution.id]: { ...draft, payment_method: method },
+                                    [execution.id]: {
+                                      ...draft,
+                                      payment_method: method,
+                                      payment_status: method === "none" ? "not_paid" : draft.payment_status,
+                                    },
                                   }))
                                 }
                               >
@@ -1623,27 +1859,77 @@ export function DriverPage() {
                           </div>
                         </div>
 
-                        <div className="space-y-2">
-                          <span className="text-xs text-muted-foreground">Статус оплаты</span>
-                          <div className="grid grid-cols-2 gap-2">
-                            {paymentStatuses.map((paymentStatus) => (
-                              <Button
-                                key={paymentStatus}
-                                type="button"
-                                variant={draft.payment_status === paymentStatus ? "default" : "outline"}
-                                className="h-10 text-sm"
-                                onClick={() =>
-                                  setDrafts((current) => ({
-                                    ...current,
-                                    [execution.id]: { ...draft, payment_status: paymentStatus },
-                                  }))
-                                }
-                              >
-                                {paymentStatusLabels[paymentStatus]}
-                              </Button>
-                            ))}
+                        {draft.payment_method === "none" ? (
+                          <div className="rounded-lg border bg-muted/40 p-2.5 text-xs text-muted-foreground">
+                            📦 Точка обслуживается без взимания оплаты водителем (безналичный расчёт / по договору).
                           </div>
-                        </div>
+                        ) : (
+                          <>
+                            <div className="space-y-2">
+                              <span className="text-xs font-semibold text-muted-foreground">Статус оплаты</span>
+                              <div className="grid grid-cols-2 gap-2">
+                                {paymentStatuses.map((paymentStatus) => (
+                                  <Button
+                                    key={paymentStatus}
+                                    type="button"
+                                    variant={draft.payment_status === paymentStatus ? "default" : "outline"}
+                                    className={`h-10 text-sm font-semibold ${
+                                      draft.payment_status === paymentStatus && paymentStatus === "paid"
+                                        ? "bg-emerald-600 hover:bg-emerald-700 text-white"
+                                        : ""
+                                    }`}
+                                    onClick={() =>
+                                      setDrafts((current) => ({
+                                        ...current,
+                                        [execution.id]: { ...draft, payment_status: paymentStatus },
+                                      }))
+                                    }
+                                  >
+                                    {paymentStatusLabels[paymentStatus]}
+                                  </Button>
+                                ))}
+                              </div>
+                            </div>
+
+                            <label className="block text-xs font-semibold text-muted-foreground">
+                              Сумма оплаты к получению (₽)
+                              <div className="relative mt-1">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  step="any"
+                                  inputMode="decimal"
+                                  placeholder={execution.amount_rub ? String(execution.amount_rub) : "Сумма по накладной (₽)"}
+                                  className="w-full h-11 rounded-md border bg-background px-3 text-base font-bold text-foreground"
+                                  value={
+                                    draft.actual_amount_rub !== undefined && draft.actual_amount_rub !== ""
+                                      ? draft.actual_amount_rub
+                                      : (execution.amount_rub && execution.amount_rub > 0 ? execution.amount_rub : "")
+                                  }
+                                  onChange={(event) => {
+                                    const val = event.target.value;
+                                    setDrafts((current) => ({
+                                      ...current,
+                                      [execution.id]: {
+                                        ...draft,
+                                        actual_amount_rub: val === "" ? "" : Number(val),
+                                      },
+                                    }));
+                                  }}
+                                />
+                                {execution.amount_rub && execution.amount_rub > 0 ? (
+                                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground pointer-events-none">
+                                    По заявке: {execution.amount_rub.toLocaleString("ru-RU")} ₽
+                                  </span>
+                                ) : (
+                                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground pointer-events-none">
+                                    Сумма не была указана
+                                  </span>
+                                )}
+                              </div>
+                            </label>
+                          </>
+                        )}
                       </div>
 
                       <Textarea
