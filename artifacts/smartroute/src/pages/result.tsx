@@ -81,6 +81,12 @@ type Assignment = {
     quantity: number;
     actual_qty: number;
     shortfall_qty: number;
+    amount_rub?: number;
+    actual_amount_rub?: number;
+    is_remote_completion?: boolean;
+    completion_distance_meters?: number | null;
+    completed_lat?: number | null;
+    completed_lon?: number | null;
     payment_method: string;
     payment_status: string;
     driver_comment: string;
@@ -656,6 +662,19 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                         </span>
                       )}
                       <span className={`rounded-full px-2 py-0.5 whitespace-nowrap ${executionStatusClass[execution.status]}`}>{executionStatusLabels[execution.status]}</span>
+                      {execution.is_remote_completion && (
+                        <span
+                          className="inline-flex items-center gap-1 rounded-full bg-amber-100 text-amber-900 border border-amber-300 px-2 py-0.5 text-[11px] font-bold shadow-2xs"
+                          title={`Точка отмечена удаленно. Расстояние: ${execution.completion_distance_meters ? (execution.completion_distance_meters >= 1000 ? `${(execution.completion_distance_meters / 1000).toFixed(1)} км` : `${execution.completion_distance_meters} м`) : "вне геозоны"}`}
+                        >
+                          ⚠️ Дистанционно {execution.completion_distance_meters ? (execution.completion_distance_meters >= 1000 ? `(${(execution.completion_distance_meters / 1000).toFixed(1)} км)` : `(${execution.completion_distance_meters} м)`) : ""}
+                        </span>
+                      )}
+                      {(execution.actual_amount_rub || execution.amount_rub) ? (
+                        <span className="font-bold text-foreground bg-muted/30 px-1.5 py-0.5 rounded border border-border/50 text-[11px]">
+                          💰 {(execution.actual_amount_rub || execution.amount_rub)?.toLocaleString("ru-RU")} ₽
+                        </span>
+                      ) : null}
                       <span className="whitespace-nowrap text-muted-foreground">
                         {execution.payment_method === "cash" ? "Наличные" :
                           execution.payment_method === "card" ? "Карта" :

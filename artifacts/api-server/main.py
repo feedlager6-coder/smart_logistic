@@ -2116,6 +2116,12 @@ def init_db():
         ("products", "TEXT DEFAULT ''"),
         ("quantity", "DOUBLE PRECISION DEFAULT 0"),
         ("actual_qty", "DOUBLE PRECISION"),
+        ("amount_rub", "DOUBLE PRECISION DEFAULT 0"),
+        ("actual_amount_rub", "DOUBLE PRECISION DEFAULT 0"),
+        ("completed_lat", "DOUBLE PRECISION"),
+        ("completed_lon", "DOUBLE PRECISION"),
+        ("completion_distance_meters", "INTEGER"),
+        ("is_remote_completion", "BOOLEAN DEFAULT FALSE"),
         ("arrive_by", "TEXT DEFAULT ''"),
         ("yandex_url", "TEXT DEFAULT ''"),
         ("payment_status", "TEXT DEFAULT 'pending'"),
@@ -3587,6 +3593,12 @@ class ExecutionUpdate(BaseModel):
     payment_method: Optional[str] = None
     payment_status: Optional[str] = None
     driver_comment: str = ""
+    amount_rub: Optional[float] = None
+    actual_amount_rub: Optional[float] = None
+    driver_lat: Optional[float] = None
+    driver_lon: Optional[float] = None
+    distance_meters: Optional[int] = None
+    is_remote: Optional[bool] = None
 
 
 class DriverLocationInput(BaseModel):
@@ -8318,6 +8330,8 @@ def _load_assignment_for_token(token: str) -> tuple[dict, list[dict]]:
         """SELECT e.id, e.store_id, e.visit_order, e.store_name, e.address, e.lat, e.lon,
                   e.products, e.quantity, e.actual_qty, e.actual_items_json, e.arrive_by, e.yandex_url, e.status,
                   e.payment_method, e.payment_status, e.driver_comment, e.rescheduled_date,
+                  e.amount_rub, e.actual_amount_rub, e.completed_lat, e.completed_lon,
+                  e.completion_distance_meters, e.is_remote_completion,
                   e.updated_at, e.delivered_at,
                   COALESCE(s.phone, '') AS store_phone,
                   COALESCE(s.client, '') AS store_client
@@ -8387,6 +8401,12 @@ def _serialize_execution(row: dict) -> dict:
             planned_qty - actual_qty,
             0,
         ),
+        "amount_rub": float(row.get("amount_rub") or 0),
+        "actual_amount_rub": float(row.get("actual_amount_rub") or (float(row.get("amount_rub") or 0) if (status == "delivered" or row.get("payment_status") == "paid") else 0)),
+        "is_remote_completion": bool(row.get("is_remote_completion")),
+        "completion_distance_meters": int(row["completion_distance_meters"]) if row.get("completion_distance_meters") is not None else None,
+        "completed_lat": float(row["completed_lat"]) if row.get("completed_lat") is not None else None,
+        "completed_lon": float(row["completed_lon"]) if row.get("completed_lon") is not None else None,
         "arrive_by": row.get("arrive_by") or "",
         "yandex_url": row.get("yandex_url") or "",
         "status": status,
@@ -8437,7 +8457,10 @@ def list_route_assignments(session_id: int, request: Request):
             """SELECT e.assignment_id, e.id, e.store_id, e.visit_order, e.store_name,
                       e.address, e.lat, e.lon, e.products, e.quantity, e.actual_qty, e.arrive_by,
                       e.yandex_url, e.status, e.payment_method, e.payment_status,
-                      e.driver_comment, e.rescheduled_date, e.updated_at, e.delivered_at,
+                      e.driver_comment, e.rescheduled_date,
+                      e.amount_rub, e.actual_amount_rub, e.completed_lat, e.completed_lon,
+                      e.completion_distance_meters, e.is_remote_completion,
+                      e.updated_at, e.delivered_at,
                       COALESCE(s.phone, '') AS store_phone,
                       COALESCE(s.client, '') AS store_client,
                       (SELECT MAX(o.delivery_date)::text
@@ -8534,21 +8557,21 @@ def create_route_assignment(session_id: int, body: AssignmentCreate, request: Re
         # was created. Recover quantities from the route first, then from the
         # day's orders when the route carries a date.
         quantities_by_store: dict[int, float] = {}
+        amounts_by_store: dict[int, float] = {}
         delivery_date = result.get("delivery_date") or (
             str(session["date"]) if session.get("date") else None
         )
         if delivery_date:
             cur.execute(
-                """SELECT store_id, COALESCE(SUM(quantity), 0) AS quantity
+                """SELECT store_id, COALESCE(SUM(quantity), 0) AS quantity, COALESCE(SUM(amount_rub), 0) AS amount_rub
                      FROM daily_orders
                     WHERE owner_id=%s AND delivery_date=%s AND store_id IS NOT NULL
                     GROUP BY store_id""",
                 (uid, delivery_date),
             )
-            quantities_by_store = {
-                int(row["store_id"]): float(row["quantity"] or 0)
-                for row in cur.fetchall()
-            }
+            for row in cur.fetchall():
+                quantities_by_store[int(row["store_id"])] = float(row["quantity"] or 0)
+                amounts_by_store[int(row["store_id"])] = float(row["amount_rub"] or 0)
         raw_token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
         driver_id = body.driver_id
@@ -8599,9 +8622,9 @@ def create_route_assignment(session_id: int, body: AssignmentCreate, request: Re
                 cur.execute(
                     """INSERT INTO route_executions
                        (assignment_id, store_id, visit_order, store_name, address, lat, lon,
-                        products, quantity, actual_qty, arrive_by, yandex_url,
+                        products, quantity, actual_qty, amount_rub, arrive_by, yandex_url,
                         payment_status)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (
                         assignment["id"], stop.get("store_id"), stop.get("order", 0),
                         stop.get("store_name", ""), stop.get("address", ""),
@@ -8614,6 +8637,7 @@ def create_route_assignment(session_id: int, body: AssignmentCreate, request: Re
                             else 0,
                         ),
                         0,
+                        float(stop.get("amount_rub") or (amounts_by_store.get(int(stop["store_id"]), 0) if stop.get("store_id") is not None else 0)),
                         stop.get("arrive_by", ""),
                         stop.get("yandex_url", ""), "pending",
                     ),
@@ -9059,6 +9083,20 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
         if body.actual_items is not None
         else (current.get("actual_items_json") or "")
     )
+    amount_rub = body.amount_rub if body.amount_rub is not None else float(current.get("amount_rub") or 0)
+    actual_amount_rub = (
+        body.actual_amount_rub
+        if body.actual_amount_rub is not None
+        else (amount_rub if (body.status == "delivered" or payment_status == "paid") else (0.0 if body.status in ("failed", "rescheduled", "planned") else float(current.get("actual_amount_rub") or 0)))
+    )
+    is_remote = bool(
+        body.is_remote
+        or (body.distance_meters is not None and body.distance_meters > 800)
+    ) if body.status in ("delivered", "partial", "failed", "rescheduled") else False
+    distance_m = body.distance_meters if body.status in ("delivered", "partial", "failed", "rescheduled") else None
+    driver_lat = body.driver_lat if body.status in ("delivered", "partial", "failed", "rescheduled") else None
+    driver_lon = body.driver_lon if body.status in ("delivered", "partial", "failed", "rescheduled") else None
+
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
@@ -9067,6 +9105,9 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
                                         THEN %s ELSE quantity END,
                actual_qty=%s, actual_items_json=%s, payment_method=%s, payment_status=%s,
                driver_comment=%s,
+               amount_rub=%s, actual_amount_rub=%s,
+               is_remote_completion=%s, completion_distance_meters=%s,
+               completed_lat=%s, completed_lon=%s,
                rescheduled_date=CASE WHEN %s='rescheduled' THEN rescheduled_date ELSE NULL END,
                updated_at=NOW(),
                delivered_at=CASE WHEN %s IN ('delivered','partial','failed')
@@ -9075,10 +9116,13 @@ def update_driver_execution(token: str, execution_id: int, body: ExecutionUpdate
                                  ELSE delivered_at END
            WHERE id=%s AND assignment_id=%s
            RETURNING id, store_id, visit_order, store_name, address, lat, lon,
-                     products, quantity, actual_qty, arrive_by, yandex_url, status,
+                     products, quantity, actual_qty, amount_rub, actual_amount_rub,
+                     is_remote_completion, completion_distance_meters, completed_lat, completed_lon,
+                     arrive_by, yandex_url, status,
                      payment_method, payment_status, driver_comment, rescheduled_date,
                      updated_at, delivered_at""",
         (body.status, body.status, planned_qty, actual_qty, actual_items_json, payment_method, payment_status, body.driver_comment.strip(),
+         amount_rub, actual_amount_rub, is_remote, distance_m, driver_lat, driver_lon,
          body.status,
          body.status,
          body.status, execution_id, assignment["id"]),
