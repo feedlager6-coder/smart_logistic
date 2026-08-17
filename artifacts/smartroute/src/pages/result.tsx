@@ -7,7 +7,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check, AlertTriangle, Printer, Info, Settings, Package, Users, Link2, Loader2, Send } from "lucide-react";
+import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check, AlertTriangle, Printer, Info, Settings, Package, Users, Link2, Loader2, Send, FileText, FileSpreadsheet } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap } from "react-leaflet";
 import 'leaflet/dist/leaflet.css';
@@ -15,6 +15,7 @@ import L from 'leaflet';
 import { useGetRouteSession } from "@workspace/api-client-react";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useToast } from "@/hooks/use-toast";
+import { generateShiftPdfReport } from "@/lib/pdf-report";
 
 // Fix leaflet default icon — используем локальные файлы из пакета, не CDN
 import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png';
@@ -166,11 +167,13 @@ const executionStatusClass: Record<ExecutionStatus, string> = {
   rescheduled: "bg-violet-100 text-violet-800",
 };
 
-function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; routes: RouteResult["routes"] }) {
+function ExecutionControlPanel({ sessionId, routes, date }: { sessionId: number; routes: RouteResult["routes"]; date?: string }) {
+  const { toast } = useToast();
   const [driverNames, setDriverNames] = useState<Record<number, string>>({});
   const [driverIds, setDriverIds] = useState<Record<number, string>>({});
   const [creatingRoute, setCreatingRoute] = useState<number | null>(null);
   const [sharingRoute, setSharingRoute] = useState<number | null>(null);
+  const [downloadingPdf, setDownloadingPdf] = useState<number | null>(null);
   const [sendingAllDrivers, setSendingAllDrivers] = useState(false);
   const [sendingTelegram, setSendingTelegram] = useState(false);
   const [copiedAssignment, setCopiedAssignment] = useState<number | null>(null);
@@ -202,6 +205,52 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
     // MVP uses polling instead of WebSocket; keep dispatcher updates quick.
     refetchInterval: 5_000,
   });
+
+  const handleDownloadDriverPdf = async (assignment: Assignment, routeVehicleName: string) => {
+    setDownloadingPdf(assignment.id);
+    try {
+      const executions = assignment.executions || [];
+      if (executions.length === 0) {
+        toast({ title: "Нет данных", description: "У этого водителя пока нет назначенных точек рейса." });
+        return;
+      }
+      await generateShiftPdfReport({
+        assignment: {
+          id: assignment.id,
+          vehicle_name: assignment.vehicle_name || routeVehicleName,
+          driver_name: assignment.driver_name,
+          driver_phone: assignment.driver_phone,
+          total_points: assignment.total_points,
+          completed_points: assignment.completed_points,
+          status: assignment.status,
+        },
+        executions: executions.map((e) => ({
+          visit_order: e.visit_order,
+          store_name: e.store_name,
+          store_client: e.store_client,
+          address: e.address,
+          products: e.products,
+          quantity: e.quantity,
+          actual_qty: e.actual_qty,
+          amount_rub: e.amount_rub,
+          status: e.status,
+          payment_method: e.payment_method,
+          payment_status: e.payment_status,
+          driver_comment: e.driver_comment,
+          is_remote_completion: e.is_remote_completion,
+          completion_distance_meters: e.completion_distance_meters,
+          delivered_at: e.delivered_at,
+        })),
+        date: date,
+      });
+      toast({ title: "PDF отчёт скачан", description: `Ведомость смены для «${assignment.driver_name || routeVehicleName}» успешно сформирована.` });
+    } catch (err) {
+      console.error(err);
+      toast({ title: "Ошибка создания PDF", description: "Не удалось сформировать PDF-отчёт.", variant: "destructive" });
+    } finally {
+      setDownloadingPdf(null);
+    }
+  };
 
   useEffect(() => {
     localStorage.setItem(
@@ -453,8 +502,14 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
             <p className="text-sm text-muted-foreground mt-0.5">Назначьте рейс водителю и отслеживайте фактический статус точек доставки.</p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            <Button size="sm" variant="outline" onClick={() => window.open(`/api/route/sessions/${sessionId}/report.xlsx`, "_blank")}>
-              <Download className="w-4 h-4 mr-1" />Отчёт Excel
+            <Button
+              size="sm"
+              variant="outline"
+              className="border-emerald-300 text-emerald-800 bg-emerald-50/60 hover:bg-emerald-100/80 font-medium gap-1.5 shadow-xs"
+              onClick={() => window.open(`/api/route/sessions/${sessionId}/report.xlsx`, "_blank")}
+            >
+              <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+              Отчёт Excel (все водители)
             </Button>
             <Button size="sm" variant="outline" className="text-emerald-700 border-emerald-200 hover:bg-emerald-50" onClick={sendAllDrivers} disabled={sendingAllDrivers}>
               {sendingAllDrivers ? "Готовим ссылки…" : "Открыть WhatsApp для всех"}
@@ -476,6 +531,7 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
           const completed = assignment?.completed_points ?? 0;
           const total = assignment?.total_points ?? route.stores.length;
           const percent = total ? Math.round(completed / total * 100) : 0;
+          const isDone = assignment?.status === "completed" || (total > 0 && completed === total);
           return (
             <div key={`${route.vehicle_name}-${routeIndex}`} className="p-4 space-y-3.5">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -514,6 +570,22 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                   </div>
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0 self-start sm:self-center flex-wrap">
+                  {assignment && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="border-indigo-200 text-indigo-700 bg-indigo-50/40 hover:bg-indigo-100/60 h-8 text-xs font-semibold gap-1.5 shadow-xs"
+                      disabled={downloadingPdf === assignment.id}
+                      onClick={() => handleDownloadDriverPdf(assignment, route.vehicle_name)}
+                    >
+                      {downloadingPdf === assignment.id ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <FileText className="w-3.5 h-3.5 text-indigo-600" />
+                      )}
+                      Отчёт PDF
+                    </Button>
+                  )}
                   {(driverUrl || assignment) ? (
                     <>
                       <Button
@@ -580,6 +652,25 @@ function ExecutionControlPanel({ sessionId, routes }: { sessionId: number; route
                 <div className="flex justify-between text-xs text-muted-foreground"><span>Прогресс рейса</span><span>{percent}%</span></div>
                 <div className="h-2 rounded-full bg-muted overflow-hidden"><div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${percent}%` }} /></div>
               </div>
+              {assignment && isDone && (
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2.5 rounded-lg bg-emerald-50/90 border border-emerald-200 text-xs text-emerald-950">
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                    <span className="font-medium">
+                      {assignment.status === "completed" ? "Рейс завершён диспетчером." : "Все точки выполнены водителем."} Отчёт и ведомость готовы.
+                    </span>
+                  </div>
+                  <Button
+                    size="sm"
+                    className="h-7 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-medium text-xs gap-1.5 shrink-0 shadow-xs self-start sm:self-center"
+                    disabled={downloadingPdf === assignment.id}
+                    onClick={() => handleDownloadDriverPdf(assignment, route.vehicle_name)}
+                  >
+                    {downloadingPdf === assignment.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+                    Скачать PDF отчёт
+                  </Button>
+                </div>
+              )}
               {assignment?.next_stop && (
                 <div className="rounded-md bg-sky-50 border border-sky-100 px-3 py-2 text-xs text-sky-900">
                   Следующая точка: <span className="font-medium">{assignment.next_stop.store_name}</span>
@@ -1270,15 +1361,25 @@ export function ResultPage() {
         </div>
         <div className="flex gap-2 flex-wrap items-center">
           {sessionId && (
-            <Button
-              variant="outline"
-              className="gap-2 border-emerald-300 text-emerald-700 hover:bg-emerald-50 font-medium"
-              onClick={handleCompleteRoute}
-              disabled={completingRoute}
-            >
-              {completingRoute ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4 text-emerald-600" />}
-              {completingRoute ? "Завершаем…" : "Завершить рейс"}
-            </Button>
+            <>
+              <Button
+                variant="outline"
+                className="gap-2 border-emerald-300 text-emerald-800 bg-emerald-50/50 hover:bg-emerald-100/70 font-semibold shadow-xs"
+                onClick={() => window.open(`/api/route/sessions/${sessionId}/report.xlsx`, "_blank")}
+              >
+                <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                <span className="hidden sm:inline">Отчёт Excel</span>
+              </Button>
+              <Button
+                variant="outline"
+                className="gap-2 border-emerald-300 text-emerald-700 hover:bg-emerald-50 font-medium"
+                onClick={handleCompleteRoute}
+                disabled={completingRoute}
+              >
+                {completingRoute ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4 text-emerald-600" />}
+                {completingRoute ? "Завершаем…" : "Завершить рейс"}
+              </Button>
+            </>
           )}
           <Button variant="outline" onClick={() => window.print()} className="gap-2">
             <Printer className="w-4 h-4" />
@@ -1523,7 +1624,7 @@ export function ResultPage() {
 
           <TabsContent value="execution" className="space-y-6">
             {sessionId ? (
-              <ExecutionControlPanel sessionId={sessionId} routes={result.routes} />
+              <ExecutionControlPanel sessionId={sessionId} routes={result.routes} date={(result as any)?.date} />
             ) : (
               <Card>
                 <CardContent className="py-8 text-center text-sm text-muted-foreground">

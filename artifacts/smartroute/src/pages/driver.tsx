@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState, useMemo } from "react";
 import { useParams } from "wouter";
 import { useQuery } from "@tanstack/react-query";
-import jsPDF from "jspdf";
-import html2canvas from "html2canvas";
+import { generateShiftPdfReport } from "@/lib/pdf-report";
 import {
   CheckCircle2,
   CircleAlert,
@@ -495,209 +494,43 @@ export function DriverPage() {
   };
 
   const handleDownloadPdf = async () => {
-    if (!data) return;
+    if (!data || !assignment) return;
     setIsGeneratingPdf(true);
-    let container: HTMLDivElement | null = null;
     try {
-      container = document.createElement("div");
-      container.style.position = "fixed";
-      container.style.left = "-9999px";
-      container.style.top = "0";
-      container.style.width = "794px"; // Standard A4 at 96 DPI
-      container.style.backgroundColor = "#ffffff";
-      container.style.color = "#0f172a";
-      container.style.fontFamily = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
-      container.style.padding = "32px 36px";
-      container.style.boxSizing = "border-box";
-      container.style.zIndex = "-999";
-
-      const rowsHtml = executions.map((e) => {
-        const isComplete = e.status === "delivered";
-        const isPartial = e.status === "partial";
-        const isFailed = e.status === "failed";
-        const isRescheduled = e.status === "rescheduled";
-        const rowAmount = e.actual_amount_rub || e.amount_rub;
-        const statusText = statusLabels[e.status] || e.status;
-        const statusBg = isComplete ? "#dcfce7" : isPartial ? "#fef3c7" : isFailed ? "#fee2e2" : isRescheduled ? "#f3e8ff" : "#f1f5f9";
-        const statusColor = isComplete ? "#166534" : isPartial ? "#92400e" : isFailed ? "#991b1b" : isRescheduled ? "#6b21a8" : "#475569";
-        const paymentMethodText = paymentLabels[e.payment_method] || "—";
-        const paymentStatusText = e.payment_method === "none" ? "Без оплаты" : (paymentStatusLabels[e.payment_status] || "—");
-        const amountDisplay = rowAmount && rowAmount > 0
-          ? `${rowAmount.toLocaleString("ru-RU")} ₽`
-          : (e.payment_method === "none" ? "<span style='color:#94a3b8'>Без опл.</span>" : "<span style='color:#94a3b8'>По накл.</span>");
-
-        const prods = formatProductsLine(e.products) || "По накладной";
-
-        return `
-          <tr style="border-bottom: 1px solid #e2e8f0; font-size: 11px;">
-            <td style="padding: 7px 4px; text-align: center; font-weight: bold; color: #64748b; vertical-align: top;">${e.visit_order}</td>
-            <td style="padding: 7px 6px; font-weight: 600; color: #0f172a; vertical-align: top;">
-              ${e.store_name}
-              ${e.store_client ? `<div style="font-size: 10px; color: #64748b; font-weight: normal;">${e.store_client}</div>` : ""}
-            </td>
-            <td style="padding: 7px 6px; color: #334155; vertical-align: top; max-width: 170px; word-break: break-word;">${e.address || "—"}</td>
-            <td style="padding: 7px 6px; color: #0f172a; vertical-align: top; max-width: 140px; word-break: break-word;">${prods}</td>
-            <td style="padding: 7px 6px; text-align: right; font-weight: bold; color: #0f172a; vertical-align: top; white-space: nowrap;">${amountDisplay}</td>
-            <td style="padding: 7px 6px; vertical-align: top; text-align: center;">
-              <span style="display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; background-color: ${statusBg}; color: ${statusColor}; white-space: nowrap;">
-                ${statusText}
-              </span>
-              ${e.is_remote_completion ? `<div style="font-size: 9px; color: #d97706; font-weight: bold; margin-top: 2px;">⚠️ Дистанц.</div>` : ""}
-            </td>
-            <td style="padding: 7px 6px; vertical-align: top; font-size: 10px;">
-              <div style="font-weight: 600; color: #0f172a;">${paymentMethodText}</div>
-              <div style="color: ${e.payment_status === 'paid' ? '#16a34a' : '#64748b'}; font-weight: ${e.payment_status === 'paid' ? 'bold' : 'normal'};">${paymentStatusText}</div>
-            </td>
-            <td style="padding: 7px 6px; color: #475569; font-size: 10px; vertical-align: top; font-style: italic;">
-              ${e.driver_comment ? `«${e.driver_comment}»` : "—"}
-            </td>
-          </tr>
-        `;
-      }).join("");
-
-      container.innerHTML = `
-        <div style="border-bottom: 2px solid #0284c7; padding-bottom: 14px; margin-bottom: 16px;">
-          <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-            <div>
-              <h1 style="font-size: 20px; font-weight: 800; color: #0f172a; margin: 0 0 4px 0; letter-spacing: -0.02em;">
-                ВЕДОМОСТЬ СМЕНЫ И КАССОВЫЙ ОТЧЁТ
-              </h1>
-              <p style="font-size: 12px; color: #64748b; margin: 0;">
-                SmartRoute Logistics · Документ оперативного закрытия рейса
-              </p>
-            </div>
-            <div style="text-align: right;">
-              <div style="font-size: 14px; font-weight: 800; color: #0284c7;">
-                ${assignment.vehicle_name || "Рейс доставки"}
-              </div>
-              <div style="font-size: 11px; color: #64748b; margin-top: 2px;">
-                Дата: <strong>${new Date().toLocaleDateString("ru-RU")}</strong>
-              </div>
-            </div>
-          </div>
-
-          <div style="display: flex; gap: 24px; margin-top: 12px; font-size: 12px; color: #334155; background-color: #f8fafc; padding: 8px 12px; border-radius: 6px; border: 1px solid #e2e8f0;">
-            <div>Водитель: <strong style="color: #0f172a;">${assignment.driver_name || "—"}</strong></div>
-            <div>Телефон: <strong style="color: #0f172a;">${assignment.driver_phone || "—"}</strong></div>
-            <div>Статус смены: <strong style="color: ${shiftClosed ? '#16a34a' : '#d97706'};">${shiftClosed ? 'СМЕНА ЗАКРЫТА' : 'В ПРОЦЕССЕ'}</strong></div>
-            <div>Всего точек: <strong style="color: #0f172a;">${executions.length}</strong></div>
-          </div>
-        </div>
-
-        <!-- Summary KPI Boxes -->
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 18px;">
-          <!-- Cash Summary Box -->
-          <div style="border: 1px solid #bbf7d0; background-color: #f0fdf4; border-radius: 8px; padding: 12px;">
-            <div style="font-size: 12px; font-weight: 800; color: #166534; margin-bottom: 8px; border-bottom: 1px solid #bbf7d0; padding-bottom: 4px; display: flex; justify-content: space-between;">
-              <span>💵 КАССОВЫЙ БАЛАНС</span>
-              <span>ИТОГО: ${totalCollectedSum.toLocaleString("ru-RU")} ₽</span>
-            </div>
-            <div style="font-size: 11px; color: #166534; line-height: 1.6;">
-              <div>• <strong>Наличные к сдаче в кассу:</strong> <span style="font-size: 13px; font-weight: 800;">${totalCashSum.toLocaleString("ru-RU")} ₽</span> (${cashPaidCount} зак.)</div>
-              <div>• <strong>Оплата картой/терминалом:</strong> ${totalCardSum.toLocaleString("ru-RU")} ₽ (${cardPaidCount} зак.)</div>
-              <div>• <strong>Банковский перевод:</strong> ${totalTransferSum.toLocaleString("ru-RU")} ₽ (${transferPaidCount} зак.)</div>
-              ${notPaidCount > 0 ? `<div style="color: #b45309;">• <strong>Не оплачено (долг):</strong> ${totalNotPaidSum.toLocaleString("ru-RU")} ₽ (${notPaidCount} зак.)</div>` : ""}
-            </div>
-          </div>
-
-          <!-- Goods Inventory Summary Box -->
-          <div style="border: 1px solid #e2e8f0; background-color: #f8fafc; border-radius: 8px; padding: 12px;">
-            <div style="font-size: 12px; font-weight: 800; color: #0f172a; margin-bottom: 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; display: flex; justify-content: space-between;">
-              <span>📦 ТОВАРНЫЙ БАЛАНС</span>
-              <span>Успешность: ${totalPlanQty > 0 ? Math.round((totalDeliveredQty / totalPlanQty) * 100) : 100}%</span>
-            </div>
-            <div style="font-size: 11px; color: #334155; line-height: 1.6;">
-              <div>• <strong>Загружено со склада:</strong> ${totalPlanQty} ед.</div>
-              <div>• <strong>Фактически сдано:</strong> <strong style="color: #166534;">${totalDeliveredQty} ед.</strong></div>
-              <div>• <strong>Возврат / недовоз:</strong> <strong style="color: ${totalShortfallQty > 0 ? '#b45309' : '#64748b'};">${totalShortfallQty} ед.</strong></div>
-              <div>• <strong>Точек выполнено:</strong> ${deliveredCount + partialCount + failedCount + rescheduledCount} из ${executions.length}</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Table of points -->
-        <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-family: inherit;">
-          <thead>
-            <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; font-size: 10px; text-transform: uppercase; color: #475569;">
-              <th style="padding: 6px 4px; text-align: center; width: 28px;">№</th>
-              <th style="padding: 6px 6px; text-align: left; width: 130px;">Магазин</th>
-              <th style="padding: 6px 6px; text-align: left; width: 150px;">Адрес</th>
-              <th style="padding: 6px 6px; text-align: left;">Товары</th>
-              <th style="padding: 6px 6px; text-align: right; width: 70px;">Сумма</th>
-              <th style="padding: 6px 6px; text-align: center; width: 85px;">Статус</th>
-              <th style="padding: 6px 6px; text-align: left; width: 85px;">Оплата</th>
-              <th style="padding: 6px 6px; text-align: left; width: 100px;">Примечание</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rowsHtml}
-          </tbody>
-        </table>
-
-        <!-- Signatures Section -->
-        <div style="margin-top: 24px; padding-top: 14px; border-top: 1px dashed #cbd5e1; display: flex; justify-content: space-between; font-size: 11px; color: #334155;">
-          <div style="width: 45%;">
-            <div>Сдал (водитель): ____________________ / ${assignment.driver_name || "________________"}</div>
-            <div style="font-size: 9px; color: #94a3b8; margin-top: 4px;">Подпись подтверждает фактическую сдачу товара и денег</div>
-          </div>
-          <div style="width: 45%; text-align: right;">
-            <div>Принял (кассир/диспетчер): ____________________ / ________________</div>
-            <div style="font-size: 9px; color: #94a3b8; margin-top: 4px;">Деньги в сумме <strong>${totalCashSum.toLocaleString("ru-RU")} ₽</strong> приняты в кассу</div>
-          </div>
-        </div>
-      `;
-
-      document.body.appendChild(container);
-
-      const canvas = await html2canvas(container, {
-        scale: 2,
-        useCORS: true,
-        logging: false,
-        backgroundColor: "#ffffff",
-        windowWidth: 794,
+      await generateShiftPdfReport({
+        assignment: {
+          id: assignment.id,
+          vehicle_name: assignment.vehicle_name,
+          driver_name: assignment.driver_name,
+          driver_phone: assignment.driver_phone,
+          total_points: executions.length,
+          completed_points: deliveredCount + partialCount + failedCount + rescheduledCount,
+          status: shiftClosed ? "completed" : assignment.status,
+        },
+        executions: executions.map((e) => ({
+          visit_order: e.visit_order,
+          store_name: e.store_name,
+          store_client: e.store_client,
+          address: e.address,
+          products: e.products,
+          quantity: e.quantity,
+          actual_qty: e.actual_qty,
+          amount_rub: e.amount_rub,
+          status: e.status,
+          payment_method: e.payment_method,
+          payment_status: e.payment_status,
+          driver_comment: e.driver_comment,
+          is_remote_completion: e.is_remote_completion,
+          completion_distance_meters: e.completion_distance_meters,
+          delivered_at: e.delivered_at,
+          updated_at: e.updated_at,
+        })),
+        date: data.date,
       });
-
-      const imgData = canvas.toDataURL("image/png");
-      const pdf = new jsPDF("p", "mm", "a4");
-      const imgWidth = 210;
-      const pageHeight = 297;
-      const imgHeight = (canvas.height * imgWidth) / canvas.width;
-      let heightLeft = imgHeight;
-      let position = 0;
-
-      pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
-      heightLeft -= pageHeight;
-
-      while (heightLeft > 0) {
-        position = heightLeft - imgHeight;
-        pdf.addPage();
-        pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
-        heightLeft -= pageHeight;
-      }
-
-      const safeName = (assignment.vehicle_name || "Reys").replace(/[^a-zA-Z0-9а-яА-Я_-]/g, "_");
-      const filename = `Vedomost_Smeny_${safeName}_${new Date().toISOString().slice(0, 10)}.pdf`;
-
-      // Download via Blob URL to guarantee reliable download in all browsers and iframes
-      const blob = pdf.output("blob");
-      const blobUrl = URL.createObjectURL(blob);
-      const downloadLink = document.createElement("a");
-      downloadLink.href = blobUrl;
-      downloadLink.download = filename;
-      document.body.appendChild(downloadLink);
-      downloadLink.click();
-      setTimeout(() => {
-        if (downloadLink.parentNode) downloadLink.parentNode.removeChild(downloadLink);
-        URL.revokeObjectURL(blobUrl);
-      }, 1500);
-
     } catch (error) {
       console.error("PDF generation error:", error);
       window.print();
     } finally {
-      if (container && container.parentNode) {
-        container.parentNode.removeChild(container);
-      }
       setIsGeneratingPdf(false);
     }
   };
@@ -1891,43 +1724,39 @@ export function DriverPage() {
                               </div>
                             </div>
 
-                            <label className="block text-xs font-semibold text-muted-foreground">
-                              Сумма оплаты к получению (₽)
-                              <div className="relative mt-1">
-                                <input
-                                  type="number"
-                                  min={0}
-                                  step="any"
-                                  inputMode="decimal"
-                                  placeholder={execution.amount_rub ? String(execution.amount_rub) : "Сумма по накладной (₽)"}
-                                  className="w-full h-11 rounded-md border bg-background px-3 text-base font-bold text-foreground"
-                                  value={
-                                    draft.actual_amount_rub !== undefined && draft.actual_amount_rub !== ""
-                                      ? draft.actual_amount_rub
-                                      : (execution.amount_rub && execution.amount_rub > 0 ? execution.amount_rub : "")
-                                  }
-                                  onChange={(event) => {
-                                    const val = event.target.value;
-                                    setDrafts((current) => ({
-                                      ...current,
-                                      [execution.id]: {
-                                        ...draft,
-                                        actual_amount_rub: val === "" ? "" : Number(val),
-                                      },
-                                    }));
-                                  }}
-                                />
-                                {execution.amount_rub && execution.amount_rub > 0 ? (
-                                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground pointer-events-none">
-                                    По заявке: {execution.amount_rub.toLocaleString("ru-RU")} ₽
+                            {/* Clear Amount / Waybill Notification */}
+                            {execution.amount_rub && execution.amount_rub > 0 ? (
+                              <div className="p-3 rounded-lg bg-emerald-50/70 border border-emerald-200 flex items-center justify-between text-xs">
+                                <div>
+                                  <span className="font-semibold text-emerald-950 block">Сумма по заявке:</span>
+                                  <span className="text-[11px] text-emerald-700">
+                                    {draft.payment_status === "paid" ? "✅ Будет учтено в кассовом отчёте" : "⚠️ Отмечено без оплаты"}
                                   </span>
+                                </div>
+                                <span className="text-base font-black text-emerald-800">
+                                  {execution.amount_rub.toLocaleString("ru-RU")} ₽
+                                </span>
+                              </div>
+                            ) : (
+                              <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1">
+                                <div className="flex items-center gap-1.5 font-bold text-amber-950">
+                                  <FileSpreadsheet className="w-4 h-4 text-amber-600 shrink-0" />
+                                  <span>Сумма по накладной</span>
+                                </div>
+                                <p className="text-[11px] text-amber-800 leading-snug">
+                                  Сумма по этой заявке в системе указана не была. <strong>Ориентируйтесь по накладной</strong> (ТТН / УПД).
+                                </p>
+                                {draft.payment_status === "paid" ? (
+                                  <p className="text-[11px] font-semibold text-emerald-700 pt-0.5">
+                                    ✅ Отмечено: <strong>Оплачено (по накладной)</strong>. В кассовой ведомости будет помечено для сверки по бумажной накладной.
+                                  </p>
                                 ) : (
-                                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground pointer-events-none">
-                                    Сумма не была указана
-                                  </span>
+                                  <p className="text-[11px] font-semibold text-amber-800 pt-0.5">
+                                    ⚠️ Отмечено: Не оплачено.
+                                  </p>
                                 )}
                               </div>
-                            </label>
+                            )}
                           </>
                         )}
                       </div>
