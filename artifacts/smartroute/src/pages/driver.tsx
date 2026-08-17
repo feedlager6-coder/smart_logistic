@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useMemo } from "react";
 import { useParams } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -25,6 +25,15 @@ import {
   Check,
   Send,
   Share2,
+  DollarSign,
+  Printer,
+  ShieldCheck,
+  ShieldAlert,
+  Info,
+  Banknote,
+  CreditCard,
+  ArrowRightLeft,
+  Lock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -57,6 +66,7 @@ type Execution = {
 
 type DriverData = {
   assignment: {
+    id?: number;
     driver_name: string;
     vehicle_name: string;
     route_yandex_url: string;
@@ -104,18 +114,110 @@ function formatProductsLine(productsStr?: string): string {
   return items.join(", ");
 }
 
+// Haversine formula to compute great-circle distance in meters between two lat/lon coordinates
+function haversineDistanceMeters(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  const R = 6371000; // Radius of Earth in meters
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+export type GeofenceZone = "green" | "yellow" | "red" | "unknown";
+
+export type GeofenceInfo = {
+  distanceMeters: number | null;
+  zone: GeofenceZone;
+  label: string;
+};
+
+export function getGeofenceInfo(
+  userLat: number | null,
+  userLon: number | null,
+  targetLat?: number | null,
+  targetLon?: number | null
+): GeofenceInfo {
+  if (
+    userLat === null ||
+    userLon === null ||
+    targetLat === null ||
+    targetLat === undefined ||
+    targetLon === null ||
+    targetLon === undefined
+  ) {
+    return {
+      distanceMeters: null,
+      zone: "unknown",
+      label: "GPS координаты точки не заданы",
+    };
+  }
+
+  const dist = Math.round(haversineDistanceMeters(userLat, userLon, targetLat, targetLon));
+
+  if (dist <= 300) {
+    return {
+      distanceMeters: dist,
+      zone: "green",
+      label: `Вы на точке (${dist} м)`,
+    };
+  } else if (dist <= 800) {
+    return {
+      distanceMeters: dist,
+      zone: "yellow",
+      label: `Рядом с точкой (${dist} м)`,
+    };
+  } else {
+    const formattedDist = dist >= 1000 ? `${(dist / 1000).toFixed(1)} км` : `${dist} м`;
+    return {
+      distanceMeters: dist,
+      zone: "red",
+      label: `Далеко от адреса (${formattedDist})`,
+    };
+  }
+}
+
 export function DriverPage() {
   const { token = "" } = useParams<{ token: string }>();
   const [activeTab, setActiveTab] = useState<"route" | "report">("route");
   const [copiedReport, setCopiedReport] = useState(false);
+  const [copiedReconciliation, setCopiedReconciliation] = useState(false);
   const [savingId, setSavingId] = useState<number | null>(null);
   const [trackingEnabled, setTrackingEnabled] = useState(false);
   const [locationMessage, setLocationMessage] = useState("");
   const [locationDenied, setLocationDenied] = useState(false);
+  const [currentCoords, setCurrentCoords] = useState<{ lat: number; lon: number; accuracy?: number } | null>(null);
   const trackingActiveRef = useRef(false);
   const lastLocationSentAtRef = useRef(0);
   const [expandedCompletedCards, setExpandedCompletedCards] = useState<Record<number, boolean>>({});
   const [showAllCompleted, setShowAllCompleted] = useState(false);
+
+  // Shift closing state (persisted per token in localStorage)
+  const [shiftClosed, setShiftClosed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(`smartroute_shift_closed_${token}`) === "true";
+    } catch {
+      return false;
+    }
+  });
+
+  // Modal / Confirm state for Red Zone remote delivery
+  const [pendingConfirmation, setPendingConfirmation] = useState<{
+    execution: Execution;
+    targetStatus?: Status;
+    distanceMeters: number;
+  } | null>(null);
+
   const [drafts, setDrafts] = useState<Record<number, {
     status: Status;
     actual_qty: number | "";
@@ -167,6 +269,11 @@ export function DriverPage() {
     if (!trackingEnabled || !token || !navigator.geolocation) return;
     const sendLocation = async (position: GeolocationPosition) => {
       if (!trackingActiveRef.current) return;
+      setCurrentCoords({
+        lat: position.coords.latitude,
+        lon: position.coords.longitude,
+        accuracy: position.coords.accuracy,
+      });
       const now = Date.now();
       if (now - lastLocationSentAtRef.current < 20_000) return;
       lastLocationSentAtRef.current = now;
@@ -214,6 +321,11 @@ export function DriverPage() {
       async (pos) => {
         setLocationDenied(false);
         setTrackingEnabled(true);
+        setCurrentCoords({
+          lat: pos.coords.latitude,
+          lon: pos.coords.longitude,
+          accuracy: pos.coords.accuracy,
+        });
         setLocationMessage("Геолокация включена и активна");
         lastLocationSentAtRef.current = Date.now();
         try {
@@ -253,7 +365,7 @@ export function DriverPage() {
     driver_comment: execution.driver_comment,
   };
 
-  const saveExecution = async (execution: Execution, explicitStatus?: Status) => {
+  const executeSave = async (execution: Execution, explicitStatus?: Status) => {
     const draft = draftFor(execution);
     const targetStatus = explicitStatus || draft.status;
 
@@ -299,7 +411,45 @@ export function DriverPage() {
       window.alert(error instanceof Error ? error.message : "Не удалось сохранить изменения");
     } finally {
       setSavingId(null);
+      setPendingConfirmation(null);
     }
+  };
+
+  // Smart Geofence check before saving delivered/partial statuses
+  const saveExecution = (execution: Execution, explicitStatus?: Status) => {
+    const draft = draftFor(execution);
+    const targetStatus = explicitStatus || draft.status;
+
+    // Only apply geofence check for completion statuses
+    if ((targetStatus === "delivered" || targetStatus === "partial") && currentCoords && execution.lat && execution.lon) {
+      const geo = getGeofenceInfo(currentCoords.lat, currentCoords.lon, execution.lat, execution.lon);
+      if (geo.zone === "red" && geo.distanceMeters !== null) {
+        // Trigger soft confirmation modal for driver
+        setPendingConfirmation({
+          execution,
+          targetStatus,
+          distanceMeters: geo.distanceMeters,
+        });
+        return;
+      }
+    }
+
+    // Direct save for green, yellow, unknown or non-delivery statuses
+    executeSave(execution, explicitStatus);
+  };
+
+  const handleToggleShiftClose = () => {
+    const nextState = !shiftClosed;
+    setShiftClosed(nextState);
+    try {
+      localStorage.setItem(`smartroute_shift_closed_${token}`, nextState ? "true" : "false");
+    } catch {
+      // Ignored storage error
+    }
+  };
+
+  const handlePrintReconciliation = () => {
+    window.print();
   };
 
   if (isLoading) {
@@ -323,16 +473,16 @@ export function DriverPage() {
   const { assignment, executions } = data;
   const progress = assignment.total_points ? Math.round(assignment.completed_points / assignment.total_points * 100) : 0;
 
-  // Key stats for report
+  // Key stats for report and reconciliation
   const totalPlanQty = executions.reduce((sum, e) => sum + (e.quantity || 0), 0);
   const totalDeliveredQty = executions.reduce((sum, e) => {
-    if (e.status === "delivered") return sum + (e.actual_qty ?? e.quantity);
-    if (e.status === "partial") return sum + (e.actual_qty ?? 0);
+    if (e.status === "delivered") return sum + (e.actual_qty !== undefined && e.actual_qty !== null ? e.actual_qty : e.quantity);
+    if (e.status === "partial") return sum + (e.actual_qty || 0);
     return sum;
   }, 0);
   const totalShortfallQty = executions.reduce((sum, e) => {
     if (e.status === "failed") return sum + e.quantity;
-    if (e.status === "partial") return sum + Math.max(0, e.quantity - (e.actual_qty ?? 0));
+    if (e.status === "partial") return sum + Math.max(0, e.quantity - (e.actual_qty || 0));
     return sum;
   }, 0);
 
@@ -342,10 +492,51 @@ export function DriverPage() {
   const rescheduledCount = executions.filter((e) => e.status === "rescheduled").length;
   const plannedCount = executions.filter((e) => e.status === "planned").length;
 
-  const cashPaidCount = executions.filter((e) => e.payment_method === "cash" && e.payment_status === "paid").length;
-  const cardPaidCount = executions.filter((e) => e.payment_method === "card" && e.payment_status === "paid").length;
-  const transferPaidCount = executions.filter((e) => e.payment_method === "transfer" && e.payment_status === "paid").length;
-  const notPaidCount = executions.filter((e) => e.payment_status === "not_paid" && terminalStatuses.has(e.status)).length;
+  const cashPaidOrders = executions.filter((e) => e.payment_method === "cash" && e.payment_status === "paid");
+  const cardPaidOrders = executions.filter((e) => e.payment_method === "card" && e.payment_status === "paid");
+  const transferPaidOrders = executions.filter((e) => e.payment_method === "transfer" && e.payment_status === "paid");
+  const notPaidOrders = executions.filter((e) => e.payment_status === "not_paid" && terminalStatuses.has(e.status));
+  const noPaymentOrders = executions.filter((e) => e.payment_method === "none" && terminalStatuses.has(e.status));
+
+  const cashPaidCount = cashPaidOrders.length;
+  const cardPaidCount = cardPaidOrders.length;
+  const transferPaidCount = transferPaidOrders.length;
+  const notPaidCount = notPaidOrders.length;
+
+  // Generate detailed cash and reconciliation report text
+  const generateReconciliationText = () => {
+    const lines = [
+      `📋 КАССОВАЯ И ТОВАРНАЯ ВЕДОМОСТЬ (ЗАКРЫТИЕ СМЕНЫ)`,
+      `🚚 Рейс / Машина: ${assignment.vehicle_name || "Доставка"}`,
+      assignment.driver_name ? `👤 Водитель: ${assignment.driver_name}` : "",
+      `📅 Дата: ${new Date().toLocaleDateString("ru-RU")}`,
+      `Статус смены: ${shiftClosed ? "✅ СМЕНА ЗАКРЫТА" : "⏳ В ПРОЦЕССЕ"}`,
+      `==================================`,
+      `📦 ТОВАРНЫЙ БАЛАНС:`,
+      `  • Загружено по плану: ${totalPlanQty} ед.`,
+      `  • Фактически сдано: ${totalDeliveredQty} ед.`,
+      `  • Возврат / недовоз: ${totalShortfallQty} ед.`,
+      `==================================`,
+      `💰 КАССОВЫЙ ОТЧЁТ (ОПЛАТЫ):`,
+      `  💵 Наличные (к сдаче в кассу): ${cashPaidCount} заказов`,
+      ...cashPaidOrders.map((e) => `     - Точка №${e.visit_order}: ${e.store_name} (${formatProductsLine(e.products) || "по накладной"})`),
+      `  💳 Оплата картой: ${cardPaidCount} заказов`,
+      ...cardPaidOrders.map((e) => `     - Точка №${e.visit_order}: ${e.store_name}`),
+      `  🔄 Безналичный перевод: ${transferPaidCount} заказов`,
+      ...transferPaidOrders.map((e) => `     - Точка №${e.visit_order}: ${e.store_name}`),
+      notPaidCount > 0 ? `  ⚠️ Не оплачено / долг: ${notPaidCount} заказов` : "",
+      ...notPaidOrders.map((e) => `     - Точка №${e.visit_order}: ${e.store_name} (Не оплачено: ${paymentLabels[e.payment_method]})`),
+      `==================================`,
+      `🏁 СТАТУС ВЫПОЛНЕНИЯ ТОЧЕК:`,
+      `  • Всего точек: ${executions.length}`,
+      `  • Доставлено успешно: ${deliveredCount}`,
+      `  • Частично: ${partialCount}`,
+      `  • Не доставлено / отказов: ${failedCount}`,
+      `  • Перенесено: ${rescheduledCount}`,
+      `  • В ожидании: ${plannedCount}`,
+    ].filter(Boolean);
+    return lines.join("\n");
+  };
 
   const generateReportSummaryText = () => {
     const lines = [
@@ -382,23 +573,38 @@ export function DriverPage() {
     });
   };
 
+  const handleCopyReconciliation = () => {
+    const text = generateReconciliationText();
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiedReconciliation(true);
+      window.setTimeout(() => setCopiedReconciliation(false), 2000);
+    });
+  };
+
   const handleSendWhatsAppReport = () => {
-    const text = generateReportSummaryText();
+    const text = generateReconciliationText();
     const url = `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
     window.open(url, "_blank");
   };
 
   const handleSendTelegramReport = () => {
-    const text = generateReportSummaryText();
+    const text = generateReconciliationText();
     const url = `https://t.me/share/url?url=${encodeURIComponent(window.location.href)}&text=${encodeURIComponent(text)}`;
     window.open(url, "_blank");
   };
 
   return (
-    <div className="min-h-screen bg-muted/30 pb-8">
-      <header className="bg-primary text-primary-foreground px-4 py-4 shadow-sm">
+    <div className="min-h-screen bg-muted/30 pb-8 print:bg-white print:p-0">
+      <header className="bg-primary text-primary-foreground px-4 py-4 shadow-sm print:hidden">
         <div className="max-w-3xl mx-auto">
-          <p className="text-xs opacity-75 uppercase tracking-wide">SmartRoute · рейс водителя</p>
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs opacity-75 uppercase tracking-wide">SmartRoute · рейс водителя</p>
+            {/* Real-time GPS status indicator in header */}
+            <div className="flex items-center gap-1.5 bg-black/20 px-2.5 py-1 rounded-full text-xs font-semibold">
+              <span className={`w-2 h-2 rounded-full ${currentCoords ? "bg-emerald-400 animate-pulse" : "bg-amber-400"}`} />
+              <span>{currentCoords ? "GPS подключён" : "Определение GPS…"}</span>
+            </div>
+          </div>
           <div className="flex items-center justify-between gap-3 mt-1">
             <h1 className="text-xl sm:text-2xl font-bold truncate">{assignment.vehicle_name || "Маршрут доставки"}</h1>
             <Truck className="w-6 h-6 shrink-0" />
@@ -412,9 +618,53 @@ export function DriverPage() {
         </div>
       </header>
 
-      <main className="max-w-3xl mx-auto p-4 sm:p-6 space-y-4">
+      {/* Geofence Red Zone Confirmation Dialog */}
+      {pendingConfirmation && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <Card className="max-w-md w-full border-amber-300 shadow-2xl bg-card">
+            <CardHeader className="pb-2">
+              <div className="flex items-center gap-2.5 text-amber-600">
+                <ShieldAlert className="w-6 h-6 shrink-0" />
+                <CardTitle className="text-base font-bold">Вы находитесь далеко от адреса</CardTitle>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-3.5 text-sm pt-2">
+              <p className="text-muted-foreground leading-relaxed">
+                До точки <strong>«{pendingConfirmation.execution.store_name}»</strong> по GPS примерно{" "}
+                <span className="font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded">
+                  {pendingConfirmation.distanceMeters >= 1000
+                    ? `${(pendingConfirmation.distanceMeters / 1000).toFixed(1)} км`
+                    : `${pendingConfirmation.distanceMeters} м`}
+                </span>.
+              </p>
+              <p className="text-xs text-muted-foreground bg-muted/60 p-2.5 rounded-lg border">
+                ℹ️ Вы точно хотите отметить доставку дистанционно (например, если клиент встретил вас в другом месте или приёмка без присутствия у адреса)?
+              </p>
+              <div className="flex gap-2 pt-2">
+                <Button
+                  variant="outline"
+                  className="flex-1"
+                  onClick={() => setPendingConfirmation(null)}
+                >
+                  Отмена
+                </Button>
+                <Button
+                  className="flex-1 bg-amber-600 hover:bg-amber-700 font-bold"
+                  onClick={() => executeSave(pendingConfirmation.execution, pendingConfirmation.targetStatus)}
+                  disabled={savingId === pendingConfirmation.execution.id}
+                >
+                  {savingId === pendingConfirmation.execution.id ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : null}
+                  Подтвердить
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      <main className="max-w-3xl mx-auto p-4 sm:p-6 space-y-4 print:p-0 print:space-y-2">
         {/* Navigation Tabs */}
-        <div className="flex rounded-xl bg-muted p-1 border shadow-xs">
+        <div className="flex rounded-xl bg-muted p-1 border shadow-xs print:hidden">
           <button
             type="button"
             onClick={() => setActiveTab("route")}
@@ -437,14 +687,141 @@ export function DriverPage() {
             }`}
           >
             <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-            <span>Отчёт по рейсу</span>
+            <span>Касса и ведомость смены</span>
           </button>
         </div>
 
         {activeTab === "report" ? (
-          /* Report View exclusively in Russian */
-          <div className="space-y-4">
-            {/* KPI Cards */}
+          /* Report & Shift Reconciliation View */
+          <div className="space-y-4 print:space-y-3">
+            {/* Shift Status Banner */}
+            <Card className={`border shadow-xs ${shiftClosed ? "bg-emerald-50/80 border-emerald-300" : "bg-card border-border"}`}>
+              <CardContent className="p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${shiftClosed ? "bg-emerald-100 text-emerald-700" : "bg-primary/10 text-primary"}`}>
+                    {shiftClosed ? <CheckCircle2 className="w-5 h-5" /> : <Clock className="w-5 h-5" />}
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-sm text-foreground">
+                      {shiftClosed ? "Смена закрыта водителем" : "Смена в процессе выполнения"}
+                    </h3>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {shiftClosed
+                        ? "Ведомость сформирована. Вы можете распечатать её или отправить в бухгалтерию/диспетчеру."
+                        : `Выполнено ${deliveredCount + partialCount + failedCount + rescheduledCount} из ${executions.length} точек маршрута.`}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 self-stretch sm:self-auto shrink-0 print:hidden">
+                  <Button
+                    size="sm"
+                    variant={shiftClosed ? "outline" : "default"}
+                    className={`font-bold text-xs h-9 px-4 ${!shiftClosed ? "bg-emerald-600 hover:bg-emerald-700 text-white" : ""}`}
+                    onClick={handleToggleShiftClose}
+                  >
+                    {shiftClosed ? (
+                      <>
+                        <Undo2 className="w-4 h-4 mr-1.5" />
+                        Возобновить смену
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="w-4 h-4 mr-1.5" />
+                        Закрыть смену
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Cash & Inventory Reconciliation Block (Кассовая ведомость) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {/* Cash Summary Card */}
+              <Card className="p-4 bg-background border shadow-xs">
+                <div className="flex items-center gap-2 text-primary font-bold text-sm border-b pb-2.5 mb-3">
+                  <Banknote className="w-4 h-4 text-emerald-600" />
+                  <span>Кассовый баланс по оплатам</span>
+                </div>
+                <div className="space-y-2.5 text-xs">
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-emerald-50/70 border border-emerald-200">
+                    <span className="font-semibold text-emerald-900 flex items-center gap-1.5">
+                      💵 Наличные к сдаче в кассу:
+                    </span>
+                    <span className="font-bold text-emerald-700 text-sm">
+                      {cashPaidCount} {cashPaidCount === 1 ? "заказ" : cashPaidCount < 5 ? "заказа" : "заказов"}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-sky-50/70 border border-sky-200">
+                    <span className="font-medium text-sky-900 flex items-center gap-1.5">
+                      💳 Оплата терминалом / картой:
+                    </span>
+                    <span className="font-semibold text-sky-800">
+                      {cardPaidCount} {cardPaidCount === 1 ? "заказ" : cardPaidCount < 5 ? "заказа" : "заказов"}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-violet-50/70 border border-violet-200">
+                    <span className="font-medium text-violet-900 flex items-center gap-1.5">
+                      🔄 Банковский перевод:
+                    </span>
+                    <span className="font-semibold text-violet-800">
+                      {transferPaidCount} {transferPaidCount === 1 ? "заказ" : transferPaidCount < 5 ? "заказа" : "заказов"}
+                    </span>
+                  </div>
+
+                  {notPaidCount > 0 && (
+                    <div className="flex items-center justify-between p-2 rounded-lg bg-amber-50/70 border border-amber-200">
+                      <span className="font-medium text-amber-900 flex items-center gap-1.5">
+                        ⚠️ Не оплачено / отсрочка:
+                      </span>
+                      <span className="font-semibold text-amber-800">
+                        {notPaidCount} {notPaidCount === 1 ? "заказ" : notPaidCount < 5 ? "заказа" : "заказов"}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </Card>
+
+              {/* Goods & Inventory Summary Card */}
+              <Card className="p-4 bg-background border shadow-xs">
+                <div className="flex items-center gap-2 text-primary font-bold text-sm border-b pb-2.5 mb-3">
+                  <Package className="w-4 h-4 text-primary" />
+                  <span>Товарный баланс рейса</span>
+                </div>
+                <div className="space-y-2.5 text-xs">
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-muted/50 border">
+                    <span className="text-muted-foreground font-medium">Загружено по накладным:</span>
+                    <span className="font-bold text-foreground text-sm">{totalPlanQty} ед.</span>
+                  </div>
+
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-emerald-50/70 border border-emerald-200">
+                    <span className="font-semibold text-emerald-900">Фактически сдано клиентам:</span>
+                    <span className="font-bold text-emerald-700 text-sm">{totalDeliveredQty} ед.</span>
+                  </div>
+
+                  <div className={`flex items-center justify-between p-2 rounded-lg border ${totalShortfallQty > 0 ? "bg-amber-50/80 border-amber-200" : "bg-muted/30"}`}>
+                    <span className={`font-medium ${totalShortfallQty > 0 ? "text-amber-900 font-semibold" : "text-muted-foreground"}`}>
+                      Возврат на склад / недовоз:
+                    </span>
+                    <span className={`font-bold ${totalShortfallQty > 0 ? "text-amber-700 text-sm" : "text-muted-foreground"}`}>
+                      {totalShortfallQty} ед.
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-muted/40 border text-[11px] text-muted-foreground">
+                    <span>Успешность сдачи товара:</span>
+                    <span className="font-bold text-foreground">
+                      {totalPlanQty > 0 ? `${Math.round((totalDeliveredQty / totalPlanQty) * 100)}%` : "100%"}
+                    </span>
+                  </div>
+                </div>
+              </Card>
+            </div>
+
+            {/* KPI Overview Cards */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
               <Card className="p-3.5 bg-background shadow-xs">
                 <p className="text-xs text-muted-foreground font-medium">Всего точек</p>
@@ -465,19 +842,19 @@ export function DriverPage() {
                 </p>
               </Card>
               <Card className="p-3.5 bg-background shadow-xs">
-                <p className="text-xs text-muted-foreground font-medium">Оплаты (оплачено)</p>
+                <p className="text-xs text-muted-foreground font-medium">Оплачено заказов</p>
                 <p className="text-xl font-black text-foreground mt-0.5">{cashPaidCount + cardPaidCount + transferPaidCount} <span className="text-xs text-muted-foreground font-normal">точек</span></p>
                 <p className="text-[11px] text-muted-foreground mt-1">Нал: {cashPaidCount} · Карта: {cardPaidCount} · Перевод: {transferPaidCount}</p>
               </Card>
             </div>
 
-            {/* Supervisor Action Bar */}
-            <Card className="p-4 bg-background border shadow-xs">
+            {/* Action Bar for Print & Export */}
+            <Card className="p-4 bg-background border shadow-xs print:hidden">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
-                  <h3 className="font-bold text-sm text-foreground">Сводный отчёт для руководителя</h3>
+                  <h3 className="font-bold text-sm text-foreground">Экспорт и печать ведомости</h3>
                   <p className="text-xs text-muted-foreground mt-0.5">
-                    Отправьте готовый структурированный отчёт о выполненной доставке в мессенджер.
+                    Скопируйте текст отчёта или отправьте готовый документ в диспетчерскую / WhatsApp.
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
@@ -485,10 +862,19 @@ export function DriverPage() {
                     size="sm"
                     variant="outline"
                     className="h-9 gap-1.5 text-xs font-semibold"
-                    onClick={handleCopyReport}
+                    onClick={handleCopyReconciliation}
                   >
-                    {copiedReport ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
-                    <span>{copiedReport ? "Скопировано в буфер" : "Скопировать текст"}</span>
+                    {copiedReconciliation ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
+                    <span>{copiedReconciliation ? "Скопировано!" : "Скопировать ведомость"}</span>
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-9 gap-1.5 text-xs font-semibold"
+                    onClick={handlePrintReconciliation}
+                  >
+                    <Printer className="w-4 h-4" />
+                    <span>Печать</span>
                   </Button>
                   <Button
                     size="sm"
@@ -516,7 +902,7 @@ export function DriverPage() {
             <Card className="overflow-hidden border shadow-xs bg-background">
               <CardHeader className="py-3 px-4 bg-muted/40 border-b">
                 <CardTitle className="text-sm font-bold flex items-center justify-between">
-                  <span>Ведомость доставки по точкам маршрута</span>
+                  <span>Поточечная ведомость сдачи и оплат</span>
                   <span className="text-xs text-muted-foreground font-normal">Всего: {executions.length} точек</span>
                 </CardTitle>
               </CardHeader>
@@ -598,56 +984,29 @@ export function DriverPage() {
         ) : (
           /* Route & Stops View */
           <>
-            {/* Geolocation status / prompt banner */}
-            <Card className={locationDenied ? "border-destructive/40 bg-destructive/5" : trackingEnabled ? "border-emerald-200 bg-emerald-50/50" : ""}>
-              <CardContent className="p-3.5 space-y-2">
-                <div className="flex items-start gap-2.5">
-                  {trackingEnabled ? (
-                    <span className="relative flex h-3 w-3 mt-0.5 shrink-0">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
-                    </span>
-                  ) : locationDenied ? (
-                    <AlertTriangle className="w-4 h-4 text-destructive shrink-0 mt-0.5" />
-                  ) : (
-                    <MapPin className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" />
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <div className="text-xs font-medium text-foreground">
-                      {trackingEnabled
-                        ? "🟢 Передача геопозиции активна"
-                        : locationDenied
-                          ? "Геолокация отключена или заблокирована"
-                          : "Передача геопозиции диспетчеру"}
-                    </div>
-                    <div className="text-[11px] text-muted-foreground mt-0.5">
-                      {locationMessage || (trackingEnabled ? "Диспетчер видит положение машины на карте в реальном времени." : "Включите передачу геопозиции, чтобы диспетчер видел вас на маршруте.")}
-                    </div>
-                    {locationDenied && (
-                      <div className="text-[11px] text-destructive mt-1 font-medium">
-                        💡 Подсказка: нажмите значок настроек/замка 🔒 в строке браузера, разрешите «Геопозицию» и нажмите кнопку ниже.
-                      </div>
-                    )}
-                  </div>
+            {/* GPS Tracking Banner */}
+            <Card className="bg-background border shadow-xs">
+              <CardContent className="p-3 sm:p-4 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 text-xs text-muted-foreground min-w-0">
+                  <div className={`w-2.5 h-2.5 rounded-full shrink-0 ${trackingEnabled ? "bg-emerald-500 animate-pulse" : locationDenied ? "bg-destructive" : "bg-amber-500"}`} />
+                  <span className="truncate">{locationMessage || "Определение местоположения…"}</span>
                 </div>
                 {!trackingEnabled && (
-                  <Button
-                    size="sm"
-                    className={`w-full ${locationDenied ? "bg-destructive text-destructive-foreground hover:bg-destructive/90" : ""}`}
-                    variant={locationDenied ? "default" : "outline"}
-                    onClick={enableTracking}
-                  >
-                    <RotateCcw className="w-3.5 h-3.5 mr-1.5" />
-                    {locationDenied ? "Запросить доступ к геолокации повторно" : "Включить передачу геолокации"}
+                  <Button size="sm" variant="outline" className="shrink-0 h-8 text-xs font-semibold" onClick={enableTracking}>
+                    Включить GPS
                   </Button>
                 )}
               </CardContent>
             </Card>
 
-            {/* Quick action bar: Direct button to navigate to current active stop */}
+            {/* Current Active Stop Hero Card */}
             {(() => {
-              const activeStop = executions.find((e) => !terminalStatuses.has(draftFor(e).status));
+              const activeStop = executions.find((e) => e.status === "planned");
               if (!activeStop) return null;
+
+              const activeGeofence = currentCoords
+                ? getGeofenceInfo(currentCoords.lat, currentCoords.lon, activeStop.lat, activeStop.lon)
+                : null;
 
               const openNavigatorApp = () => {
                 const lat = activeStop.lat;
@@ -689,15 +1048,46 @@ export function DriverPage() {
               };
 
               return (
-                <Card className="border-2 border-primary/50 bg-gradient-to-r from-primary/10 via-primary/5 to-background shadow-md overflow-hidden">
+                <Card className="border-2 border-primary/40 shadow-lg bg-card overflow-hidden">
+                  <div className="bg-primary px-4 py-2 text-primary-foreground flex items-center justify-between text-xs font-bold uppercase tracking-wider">
+                    <div className="flex items-center gap-1.5">
+                      <Compass className="w-4 h-4 animate-spin" style={{ animationDuration: "6s" }} />
+                      <span>Следующая точка маршрута</span>
+                    </div>
+                    <span className="bg-white/20 px-2 py-0.5 rounded text-xs font-bold">
+                      Точка №{activeStop.visit_order} из {executions.length}
+                    </span>
+                  </div>
+
                   <CardContent className="p-4 sm:p-5">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                       <div className="min-w-0 flex-1 space-y-1.5">
-                        <div className="flex items-center gap-2">
-                          <span className="px-2.5 py-1 rounded-md bg-primary text-primary-foreground text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-2xs">
-                            <Compass className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: "6s" }} />
-                            Следующая цель: Точка №{activeStop.visit_order}
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-xs font-bold text-primary bg-primary/10 px-2.5 py-0.5 rounded-full">
+                            Точка №{activeStop.visit_order}
                           </span>
+
+                          {/* Geofence Status Badge for Hero */}
+                          {activeGeofence && activeGeofence.zone !== "unknown" && (
+                            <span
+                              className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                                activeGeofence.zone === "green"
+                                  ? "bg-emerald-100 text-emerald-800"
+                                  : activeGeofence.zone === "yellow"
+                                    ? "bg-amber-100 text-amber-800"
+                                    : "bg-red-100 text-red-800"
+                              }`}
+                            >
+                              {activeGeofence.zone === "green" ? (
+                                <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                              ) : activeGeofence.zone === "yellow" ? (
+                                <Info className="w-3.5 h-3.5 text-amber-600" />
+                              ) : (
+                                <ShieldAlert className="w-3.5 h-3.5 text-red-600" />
+                              )}
+                              <span>{activeGeofence.label}</span>
+                            </span>
+                          )}
                         </div>
 
                         <div className="font-extrabold text-lg text-foreground truncate">
@@ -749,6 +1139,11 @@ export function DriverPage() {
                 const cleanPhone = execution.store_phone ? execution.store_phone.replace(/[^\d+]/g, "") : "";
                 const isCardExpanded = !isCompactCompleted || expandedCompletedCards[execution.id];
                 const productsLine = formatProductsLine(execution.products);
+
+                // Calculate real-time geofence for this card
+                const geofence = currentCoords
+                  ? getGeofenceInfo(currentCoords.lat, currentCoords.lon, execution.lat, execution.lon)
+                  : null;
 
                 const effectiveDeliveredQty =
                   draft.status === "delivered"
@@ -893,8 +1288,30 @@ export function DriverPage() {
                             <p className="text-xs text-primary font-medium mt-1">Ориентир / время: {execution.arrive_by}</p>
                           )}
 
-                          {/* Customer & Phone info */}
+                          {/* Customer & Phone info & Geofence pill */}
                           <div className="mt-2.5 flex flex-wrap items-center gap-2.5">
+                            {/* Geofence Indicator Pill */}
+                            {geofence && geofence.zone !== "unknown" && (
+                              <div
+                                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-bold border ${
+                                  geofence.zone === "green"
+                                    ? "bg-emerald-50 text-emerald-800 border-emerald-200"
+                                    : geofence.zone === "yellow"
+                                      ? "bg-amber-50 text-amber-800 border-amber-200"
+                                      : "bg-red-50 text-red-800 border-red-200"
+                                }`}
+                              >
+                                {geofence.zone === "green" ? (
+                                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                                ) : geofence.zone === "yellow" ? (
+                                  <Info className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                                ) : (
+                                  <ShieldAlert className="w-3.5 h-3.5 text-red-600 shrink-0" />
+                                )}
+                                <span>{geofence.label}</span>
+                              </div>
+                            )}
+
                             {execution.store_client && (
                               <div className="inline-flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/40 px-2.5 py-1 rounded-md border">
                                 <User className="w-3.5 h-3.5 text-muted-foreground/70" />
@@ -1008,6 +1425,16 @@ export function DriverPage() {
                             );
                           })}
                         </div>
+
+                        {/* Yellow Zone Soft Information Banner */}
+                        {geofence && geofence.zone === "yellow" && (draft.status === "delivered" || draft.status === "partial") && (
+                          <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-2.5 text-xs text-amber-900 flex items-start gap-2 animate-in fade-in duration-150">
+                            <Info className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                            <div>
+                              <span>Вы находитесь в <strong>{geofence.distanceMeters} м</strong> от точки. Отметка будет сохранена с фиксацией фактического адреса.</span>
+                            </div>
+                          </div>
+                        )}
 
                         {/* Mixed cargo warning displayed specifically to the driver during partial delivery */}
                         {draft.status === "partial" && (
@@ -1203,7 +1630,7 @@ export function DriverPage() {
                     <Card className="border-emerald-300 bg-emerald-50 p-6 text-center shadow-xs">
                       <CheckCircle2 className="w-12 h-12 text-emerald-600 mx-auto mb-2" />
                       <h3 className="text-lg font-bold text-emerald-900">Все точки рейса выполнены!</h3>
-                      <p className="text-xs text-emerald-700 mt-1">Отличная работа. Перейдите во вкладку «Отчёт по рейсу», чтобы просмотреть сводную таблицу или отправить отчёт диспетчеру.</p>
+                      <p className="text-xs text-emerald-700 mt-1">Отличная работа. Перейдите во вкладку «Касса и ведомость смены», чтобы проверить кассовый отчёт и закрыть смену.</p>
                     </Card>
                   )}
 
@@ -1248,3 +1675,4 @@ export function DriverPage() {
     </div>
   );
 }
+
