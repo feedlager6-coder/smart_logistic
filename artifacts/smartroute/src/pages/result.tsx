@@ -65,6 +65,7 @@ type Assignment = {
   location_age_seconds?: number | null;
   vehicle_name: string;
   status: string;
+  driver_shift_closed?: boolean;
   total_points: number;
   completed_points: number;
   driver_url?: string;
@@ -543,13 +544,19 @@ function ExecutionControlPanel({ sessionId, routes, date }: { sessionId: number;
                     <div className="flex items-center gap-2 flex-wrap">
                       <p className="font-semibold truncate">{route.vehicle_name}</p>
                       {assignment ? (
-                        <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${
-                          assignment.status === "completed"
-                            ? "bg-emerald-100 text-emerald-800"
-                            : "bg-sky-100 text-sky-800"
-                        }`}>
-                          {assignment.status === "completed" ? "рейс завершён" : "рейс активен"}
-                        </span>
+                        assignment.status === "completed" ? (
+                          <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                            рейс завершён
+                          </span>
+                        ) : assignment.driver_shift_closed ? (
+                          <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300">
+                            смена закрыта водителем
+                          </span>
+                        ) : (
+                          <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-sky-100 text-sky-800">
+                            рейс активен
+                          </span>
+                        )
                       ) : (
                         <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
                           водитель не назначен
@@ -652,11 +659,29 @@ function ExecutionControlPanel({ sessionId, routes, date }: { sessionId: number;
                 <div className="flex justify-between text-xs text-muted-foreground"><span>Прогресс рейса</span><span>{percent}%</span></div>
                 <div className="h-2 rounded-full bg-muted overflow-hidden"><div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${percent}%` }} /></div>
               </div>
-              {assignment && isDone && (
+              {assignment && assignment.status === "completed" && (
                 <div className="flex items-center gap-2 p-2.5 rounded-lg bg-emerald-50/90 border border-emerald-200 text-xs text-emerald-950">
                   <div className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
                   <span className="font-medium">
-                    {assignment.status === "completed" ? "Рейс завершён диспетчером." : "Все точки выполнены водителем."} Отчёт и ведомость зафиксированы.
+                    Рейс завершён диспетчером. Отчёт и ведомость зафиксированы.
+                  </span>
+                </div>
+              )}
+              {assignment && assignment.status !== "completed" && assignment.driver_shift_closed && (
+                <div className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-amber-50/90 border border-amber-200 text-xs text-amber-950">
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-amber-500 shrink-0" />
+                    <span className="font-medium">
+                      Водитель закрыл смену. Ожидает завершения рейса диспетчером.
+                    </span>
+                  </div>
+                </div>
+              )}
+              {assignment && assignment.status !== "completed" && !assignment.driver_shift_closed && isDone && (
+                <div className="flex items-center gap-2 p-2.5 rounded-lg bg-sky-50/90 border border-sky-200 text-xs text-sky-950">
+                  <div className="w-2 h-2 rounded-full bg-sky-500 shrink-0" />
+                  <span className="font-medium">
+                    Все точки выполнены водителем.
                   </span>
                 </div>
               )}
@@ -922,6 +947,20 @@ export function ResultPage() {
       assignmentsData.assignments.every((a) => a.status === "completed"))
   );
 
+  const hasDriverClosedShift = Boolean(
+    !isCompleted &&
+    assignmentsData?.assignments &&
+    assignmentsData.assignments.length > 0 &&
+    assignmentsData.assignments.some((a) => a.driver_shift_closed)
+  );
+
+  const allDriversClosedShift = Boolean(
+    !isCompleted &&
+    assignmentsData?.assignments &&
+    assignmentsData.assignments.length > 0 &&
+    assignmentsData.assignments.every((a) => a.driver_shift_closed)
+  );
+
   // Fallback: load from localStorage (legacy, no session_id in URL)
   useEffect(() => {
     if (!sessionId) {
@@ -1172,6 +1211,17 @@ export function ResultPage() {
                 <Check className="w-3.5 h-3.5 text-emerald-600" />
                 Смена закрыта
               </span>
+            ) : hasDriverClosedShift ? (
+              <Button
+                size="sm"
+                variant="default"
+                className="bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold h-8 shrink-0 gap-1.5 shadow-xs animate-pulse"
+                onClick={handleCompleteRoute}
+                disabled={completingRoute}
+              >
+                {completingRoute ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                {completingRoute ? "Завершаем…" : "Водитель закрыл смену. Завершить рейс?"}
+              </Button>
             ) : (
               <Button
                 size="sm"
@@ -1381,6 +1431,16 @@ export function ResultPage() {
                 <Check className="w-4 h-4 text-emerald-600" />
                 <span>Смена закрыта</span>
               </Badge>
+            ) : hasDriverClosedShift ? (
+              <Button
+                variant="default"
+                className="gap-2 bg-amber-600 hover:bg-amber-700 text-white font-medium shadow-2xs animate-pulse"
+                onClick={handleCompleteRoute}
+                disabled={completingRoute}
+              >
+                {completingRoute ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+                {completingRoute ? "Завершаем…" : allDriversClosedShift ? "Водитель закрыл смену. Завершить рейс?" : "Смена закрыта водителем. Завершить рейс?"}
+              </Button>
             ) : (
               <Button
                 variant="outline"
