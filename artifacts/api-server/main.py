@@ -2107,6 +2107,7 @@ def init_db():
     cur.execute("ALTER TABLE route_assignments ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP")
     cur.execute("ALTER TABLE route_assignments ADD COLUMN IF NOT EXISTS telegram_message_id INTEGER")
     cur.execute("ALTER TABLE route_assignments ADD COLUMN IF NOT EXISTS telegram_message_chat_id BIGINT")
+    cur.execute("ALTER TABLE route_assignments ADD COLUMN IF NOT EXISTS driver_shift_closed BOOLEAN DEFAULT FALSE")
     cur.execute("ALTER TABLE route_executions ADD COLUMN IF NOT EXISTS rescheduled_date DATE")
     for _column, _definition in (
         ("store_name", "TEXT DEFAULT ''"),
@@ -8667,6 +8668,7 @@ def _assignment_summary(row: dict) -> dict:
         "telegram_tracking_enabled": False,
         "gps_status": gps_status,
         "location_age_seconds": age_seconds,
+        "driver_shift_closed": bool(row.get("driver_shift_closed")),
     }
 
 
@@ -8794,6 +8796,7 @@ def list_route_assignments(session_id: int, request: Request):
     cur.execute(
         """SELECT a.id, a.session_id, a.route_index, a.driver_id, a.driver_name,
                   a.driver_phone, a.vehicle_name, a.route_yandex_url, a.status, a.expires_at, a.updated_at,
+                  a.driver_shift_closed,
                   d.telegram_tracking_enabled, d.telegram_tracking_started_at,
                   loc.lat AS location_lat, loc.lon AS location_lon,
                   loc.accuracy AS location_accuracy, loc.captured_at AS location_captured_at,
@@ -8811,7 +8814,7 @@ def list_route_assignments(session_id: int, request: Request):
               LIMIT 1
            ) loc ON TRUE
            WHERE a.session_id=%s AND a.owner_id=%s
-           GROUP BY a.id, d.telegram_tracking_enabled, d.telegram_tracking_started_at, loc.lat, loc.lon, loc.accuracy, loc.captured_at
+           GROUP BY a.id, a.driver_shift_closed, d.telegram_tracking_enabled, d.telegram_tracking_started_at, loc.lat, loc.lon, loc.accuracy, loc.captured_at
            ORDER BY a.route_index""",
         (session_id, uid),
     )
@@ -9403,6 +9406,7 @@ def get_driver_assignment(token: str):
             "vehicle_name": assignment.get("vehicle_name") or "",
             "route_yandex_url": assignment.get("route_yandex_url") or "",
             "status": "planned" if assignment.get("status") == "on_route" else (assignment.get("status") or "planned"),
+            "driver_shift_closed": bool(assignment.get("driver_shift_closed")),
             "total_points": len(executions),
             "completed_points": completed,
             "next_stop": {
@@ -9412,6 +9416,31 @@ def get_driver_assignment(token: str):
         },
         "executions": [_serialize_execution(row) for row in executions],
     }
+
+
+class DriverShiftStatusInput(BaseModel):
+    shift_closed: bool
+
+
+@app.post("/api/driver/{token}/shift")
+def update_driver_shift_status(token: str, body: DriverShiftStatusInput):
+    """Update the driver's shift closed status via their scoped token."""
+    _api_rate_limit(f"driver_shift:{hashlib.sha256(token.encode()).hexdigest()}", 30, 60)
+    assignment, _ = _load_assignment_for_token(token)
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """UPDATE route_assignments
+               SET driver_shift_closed = %s, updated_at = NOW()
+               WHERE id = %s""",
+            (body.shift_closed, assignment["id"]),
+        )
+        conn.commit()
+        return {"ok": True, "driver_shift_closed": body.shift_closed}
+    finally:
+        cur.close()
+        conn.close()
 
 
 @app.patch("/api/driver/{token}/executions/{execution_id}")

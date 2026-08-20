@@ -79,6 +79,7 @@ type DriverData = {
     vehicle_name: string;
     route_yandex_url: string;
     status: string;
+    driver_shift_closed?: boolean;
     total_points: number;
     completed_points: number;
     next_stop?: { store_name: string; address: string } | null;
@@ -243,7 +244,16 @@ export function DriverPage() {
   const executions = data?.executions || [];
 
   useEffect(() => {
-    if (assignment?.status === "completed" && !shiftClosed) {
+    if (assignment?.driver_shift_closed !== undefined) {
+      if (assignment.driver_shift_closed !== shiftClosed) {
+        setShiftClosed(assignment.driver_shift_closed);
+        try {
+          localStorage.setItem(`smartroute_shift_closed_${token}`, assignment.driver_shift_closed ? "true" : "false");
+        } catch {
+          // Ignored
+        }
+      }
+    } else if (assignment?.status === "completed" && !shiftClosed) {
       setShiftClosed(true);
       try {
         localStorage.setItem(`smartroute_shift_closed_${token}`, "true");
@@ -251,7 +261,7 @@ export function DriverPage() {
         // Ignored
       }
     }
-  }, [assignment?.status, shiftClosed, token]);
+  }, [assignment?.driver_shift_closed, assignment?.status, shiftClosed, token]);
 
   // Modal / Confirm state for Red Zone remote delivery
   const [pendingConfirmation, setPendingConfirmation] = useState<{
@@ -500,6 +510,15 @@ export function DriverPage() {
       localStorage.setItem(`smartroute_shift_closed_${token}`, nextState ? "true" : "false");
     } catch {
       // Ignored storage error
+    }
+    if (token) {
+      fetch(`/api/driver/${encodeURIComponent(token)}/shift`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ shift_closed: nextState }),
+      }).catch((err) => {
+        console.error("Failed to sync shift status to server:", err);
+      });
     }
   };
 
