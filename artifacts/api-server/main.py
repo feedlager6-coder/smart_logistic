@@ -9684,12 +9684,14 @@ def complete_route_session(session_id: int, request: Request):
         # Notify drivers in Telegram that the shift is officially finished by dispatcher
         try:
             cur.execute(
-                """SELECT a.id, a.vehicle_name, a.driver_name, d.telegram_chat_id,
+                """SELECT a.id, a.vehicle_name, a.driver_name,
+                          COALESCE(d.telegram_chat_id, a.telegram_message_chat_id) AS telegram_chat_id,
                           d.phone AS driver_phone,
                           d.telegram_username AS driver_username
                      FROM route_assignments a
-                     JOIN drivers d ON d.id = a.driver_id
-                    WHERE a.session_id = %s AND a.owner_id = %s AND d.telegram_chat_id IS NOT NULL""",
+                     LEFT JOIN drivers d ON d.id = a.driver_id
+                    WHERE a.session_id = %s AND a.owner_id = %s
+                      AND (d.telegram_chat_id IS NOT NULL OR a.telegram_message_chat_id IS NOT NULL)""",
                 (session_id, uid),
             )
             connected_drivers = cur.fetchall()
@@ -9703,10 +9705,10 @@ def complete_route_session(session_id: int, request: Request):
                     greeting = f", {driver_name}" if driver_name else ""
                     vehicle_label = cd.get("vehicle_name") or "Машина"
                     text = (
-                        f"🏁 Рейс завершён!\n"
-                        f"{vehicle_label} · Все точки успешно обработаны\n\n"
-                        f"Спасибо за отличную работу и безопасный рейс{greeting}! 🚚✨\n"
-                        f"Все данные и отчёты приняты диспетчером. Хорошего отдыха!"
+                        f"🏁 Рейс официально завершён диспетчером!\n"
+                        f"{vehicle_label} · Смена успешно закрыта\n\n"
+                        f"Спасибо за отличную работу и доставку{greeting}! 🚚✨\n"
+                        f"Все данные и отчёты приняты. Хорошего отдыха!"
                     )
                     keyboard = []
                     if disp_username:

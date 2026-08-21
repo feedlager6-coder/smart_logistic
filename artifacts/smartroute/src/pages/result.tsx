@@ -941,10 +941,7 @@ export function ResultPage() {
   const isCompleted = Boolean(
     isLocallyCompleted ||
     (serverResult as any)?.is_completed ||
-    assignmentsData?.is_completed ||
-    (assignmentsData?.assignments &&
-      assignmentsData.assignments.length > 0 &&
-      assignmentsData.assignments.every((a) => a.status === "completed"))
+    assignmentsData?.is_completed
   );
 
   const hasDriverClosedShift = Boolean(
@@ -982,7 +979,7 @@ export function ResultPage() {
 
   const handleCompleteRoute = async () => {
     if (!sessionId || completingRoute) return;
-    if (!window.confirm("Закрыть смену и завершить маршрут? После закрытия он станет архивным, а отчёты и ведомости будут зафиксированы.")) return;
+    if (!window.confirm("Завершить рейс и закрыть смену? Рейс будет убран из активных и перенесён в архив, а водителям придёт уведомление в Telegram с благодарностью за работу.")) return;
     setCompletingRoute(true);
     try {
       const response = await fetch(`/api/route/sessions/${sessionId}/complete`, {
@@ -996,7 +993,7 @@ export function ResultPage() {
       queryClient.invalidateQueries({ queryKey: ["route-assignments", sessionId] });
       queryClient.invalidateQueries({ queryKey: ["/api/route/sessions", sessionId] });
       window.dispatchEvent(new Event("route:changed"));
-      toast({ title: "Смена закрыта", description: "Маршрут завершён, все ведомости и отчёты сохранены." });
+      toast({ title: "Рейс завершён", description: "Смена официально закрыта, рейс убран из активных, водителю отправлено уведомление в Telegram." });
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "Не удалось закрыть смену");
     } finally {
