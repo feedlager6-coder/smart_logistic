@@ -9682,50 +9682,69 @@ def complete_route_session(session_id: int, request: Request):
         conn.commit()
 
         # Notify drivers in Telegram that the shift is officially finished by dispatcher
-        try:
-            cur.execute(
-                """SELECT a.id, a.vehicle_name, a.driver_name,
-                          COALESCE(d.telegram_chat_id, a.telegram_message_chat_id) AS telegram_chat_id,
-                          d.phone AS driver_phone,
-                          d.telegram_username AS driver_username
-                     FROM route_assignments a
-                     LEFT JOIN drivers d ON d.id = a.driver_id
-                    WHERE a.session_id = %s AND a.owner_id = %s
-                      AND (d.telegram_chat_id IS NOT NULL OR a.telegram_message_chat_id IS NOT NULL)""",
-                (session_id, uid),
-            )
-            connected_drivers = cur.fetchall()
-            dispatcher = get_dispatcher_profile(uid)
-            disp_username = (dispatcher.get("dispatcher_telegram_username") or "").strip().lstrip("@")
-            disp_phone = _normalize_driver_phone(dispatcher.get("dispatcher_phone") or "")
+        if TELEGRAM_BOT_TOKEN:
+            try:
+                cur.execute(
+                    """SELECT a.id, a.vehicle_name, a.driver_name, a.telegram_message_id,
+                              COALESCE(d.telegram_chat_id, a.telegram_message_chat_id) AS telegram_chat_id,
+                              d.phone AS driver_phone,
+                              d.telegram_username AS driver_username
+                         FROM route_assignments a
+                         LEFT JOIN drivers d ON d.id = a.driver_id
+                        WHERE a.session_id = %s AND a.owner_id = %s
+                          AND (d.telegram_chat_id IS NOT NULL OR a.telegram_message_chat_id IS NOT NULL)""",
+                    (session_id, uid),
+                )
+                connected_drivers = cur.fetchall()
+                dispatcher = get_company_settings(user_id=uid)
+                disp_username = (dispatcher.get("dispatcher_telegram_username") or "").strip().lstrip("@")
+                disp_phone = _normalize_driver_phone(dispatcher.get("dispatcher_phone") or "")
 
-            for cd in connected_drivers:
-                try:
-                    driver_name = (cd.get("driver_name") or "").strip()
-                    greeting = f", {driver_name}" if driver_name else ""
-                    vehicle_label = cd.get("vehicle_name") or "Машина"
-                    text = (
-                        f"🏁 Рейс официально завершён диспетчером!\n"
-                        f"{vehicle_label} · Смена успешно закрыта\n\n"
-                        f"Спасибо за отличную работу и доставку{greeting}! 🚚✨\n"
-                        f"Все данные и отчёты приняты. Хорошего отдыха!"
-                    )
-                    keyboard = []
-                    if disp_username:
-                        keyboard.append([{"text": "☎️ Диспетчер", "url": f"https://t.me/{disp_username}"}])
-                    elif disp_phone:
-                        keyboard.append([{"text": f"📞 Диспетчер ({disp_phone})", "url": f"tel:{disp_phone}"}])
+                for cd in connected_drivers:
+                    chat_id = cd.get("telegram_chat_id")
+                    if not chat_id:
+                        continue
+                    try:
+                        driver_name = (cd.get("driver_name") or "").strip()
+                        greeting = f", {driver_name}" if driver_name else ""
+                        vehicle_label = cd.get("vehicle_name") or "Машина"
+                        text = (
+                            f"🏁 Рейс официально завершён диспетчером!\n"
+                            f"{vehicle_label} · Смена успешно закрыта\n\n"
+                            f"Спасибо за отличную работу и доставку{greeting}! 🚚✨\n"
+                            f"Все данные и отчёты приняты. Хорошего отдыха!"
+                        )
+                        keyboard = []
+                        if disp_username:
+                            keyboard.append([{"text": "☎️ Диспетчер", "url": f"https://t.me/{disp_username}"}])
+                        elif disp_phone:
+                            keyboard.append([{"text": "☎️ Диспетчер", "callback_data": f"tg:dispatcher:{cd['id']}"}])
 
-                    _telegram_api("sendMessage", {
-                        "chat_id": int(cd["telegram_chat_id"]),
-                        "text": text,
-                        "reply_markup": {"inline_keyboard": keyboard} if keyboard else None,
-                    })
-                except Exception as exc:
-                    logger.warning("Telegram driver completion notification failed for assignment %s: %s", cd.get("id"), exc)
-            conn.commit()
-        except Exception as exc:
-            logger.warning("Failed to broadcast completion to telegram drivers: %s", exc)
+                        payload = {
+                            "chat_id": int(chat_id),
+                            "text": text,
+                        }
+                        if keyboard:
+                            payload["reply_markup"] = {"inline_keyboard": keyboard}
+                        _telegram_api("sendMessage", payload)
+
+                        # Also update the card if it was previously rendered in chat
+                        if cd.get("telegram_message_id"):
+                            try:
+                                _telegram_render_assignment(
+                                    cur,
+                                    int(cd["id"]),
+                                    int(chat_id),
+                                    request,
+                                    message_id=int(cd["telegram_message_id"]),
+                                )
+                            except Exception as card_err:
+                                logger.info("Telegram card edit skipped on completion: %s", card_err)
+                    except Exception as exc:
+                        logger.warning("Telegram driver completion notification failed for assignment %s: %s", cd.get("id"), exc)
+                conn.commit()
+            except Exception as exc:
+                logger.warning("Failed to broadcast completion to telegram drivers: %s", exc)
 
         return {"ok": True, "session_id": session_id}
     except HTTPException:
