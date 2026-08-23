@@ -9738,37 +9738,78 @@ def complete_route_session(session_id: int, request: Request):
         conn.commit()
 
         # Notify drivers in Telegram that the shift is officially finished by dispatcher
+        drivers_notified = 0
+        total_assignments = 0
+        telegram_errors = []
+
         if TELEGRAM_BOT_TOKEN:
             try:
                 cur.execute(
-                    """SELECT a.id, a.vehicle_name, a.driver_name, a.telegram_message_id,
-                              COALESCE(d.telegram_chat_id, a.telegram_message_chat_id) AS telegram_chat_id,
-                              d.phone AS driver_phone,
-                              d.telegram_username AS driver_username
+                    """SELECT a.id, a.vehicle_name, a.driver_name, a.driver_phone, a.telegram_message_id,
+                              COALESCE(
+                                  d.telegram_chat_id,
+                                  d_phone.telegram_chat_id,
+                                  d_name.telegram_chat_id,
+                                  a.telegram_message_chat_id
+                              ) AS resolved_chat_id,
+                              COALESCE(d.phone, d_phone.phone, a.driver_phone) AS resolved_phone,
+                              COALESCE(d.telegram_username, d_phone.telegram_username, d_name.telegram_username) AS driver_username,
+                              COUNT(e.id) AS total_points,
+                              COUNT(e.id) FILTER (WHERE e.status IN ('delivered', 'partial')) AS delivered_points,
+                              COUNT(e.id) FILTER (WHERE e.status IN ('failed', 'rescheduled')) AS failed_points,
+                              COALESCE(SUM(e.actual_amount_rub) FILTER (WHERE e.status IN ('delivered', 'partial') OR e.payment_status = 'paid'), 0) AS total_collected_rub
                          FROM route_assignments a
                          LEFT JOIN drivers d ON d.id = a.driver_id
+                         LEFT JOIN drivers d_phone ON d_phone.owner_id = a.owner_id
+                              AND NULLIF(a.driver_phone, '') IS NOT NULL
+                              AND regexp_replace(d_phone.phone, '\\D', '', 'g') = regexp_replace(a.driver_phone, '\\D', '', 'g')
+                              AND regexp_replace(a.driver_phone, '\\D', '', 'g') <> ''
+                         LEFT JOIN drivers d_name ON d_name.owner_id = a.owner_id
+                              AND NULLIF(a.driver_name, '') IS NOT NULL
+                              AND LOWER(TRIM(d_name.name)) = LOWER(TRIM(a.driver_name))
+                         LEFT JOIN route_executions e ON e.assignment_id = a.id
                         WHERE a.session_id = %s AND a.owner_id = %s
-                          AND (d.telegram_chat_id IS NOT NULL OR a.telegram_message_chat_id IS NOT NULL)""",
+                        GROUP BY a.id, a.vehicle_name, a.driver_name, a.driver_phone, a.telegram_message_id, a.telegram_message_chat_id,
+                                 d.telegram_chat_id, d_phone.telegram_chat_id, d_name.telegram_chat_id,
+                                 d.phone, d_phone.phone,
+                                 d.telegram_username, d_phone.telegram_username, d_name.telegram_username""",
                     (session_id, uid),
                 )
-                connected_drivers = cur.fetchall()
+                connected_drivers = [dict(row) for row in cur.fetchall()]
+                total_assignments = len(connected_drivers)
                 dispatcher = get_company_settings(user_id=uid)
                 disp_username = (dispatcher.get("dispatcher_telegram_username") or "").strip().lstrip("@")
                 disp_phone = _normalize_driver_phone(dispatcher.get("dispatcher_phone") or "")
 
+                sent_chat_ids = set()
                 for cd in connected_drivers:
-                    chat_id = cd.get("telegram_chat_id")
+                    chat_id = cd.get("resolved_chat_id")
                     if not chat_id:
                         continue
                     try:
                         driver_name = (cd.get("driver_name") or "").strip()
                         greeting = f", {driver_name}" if driver_name else ""
                         vehicle_label = cd.get("vehicle_name") or "Машина"
+                        total_pts = int(cd.get("total_points") or 0)
+                        deliv_pts = int(cd.get("delivered_points") or 0)
+                        fail_pts = int(cd.get("failed_points") or 0)
+                        collected = float(cd.get("total_collected_rub") or 0)
+
+                        summary_lines = []
+                        if total_pts > 0:
+                            summary_lines.append(f"📦 Доставлено: {deliv_pts} из {total_pts} точек")
+                        if fail_pts > 0:
+                            summary_lines.append(f"⚠️ Возвраты / переносы: {fail_pts}")
+                        if collected > 0:
+                            summary_lines.append(f"💵 Собрано оплат: {collected:,.0f} ₽".replace(",", " "))
+
+                        stats_block = ("\n" + "\n".join(summary_lines) + "\n") if summary_lines else "\n"
+
                         text = (
                             f"🏁 Рейс официально завершён диспетчером!\n"
-                            f"{vehicle_label} · Смена успешно закрыта\n\n"
+                            f"🚗 {vehicle_label} · Смена успешно закрыта{stats_block}\n"
                             f"Спасибо за отличную работу и доставку{greeting}! 🚚✨\n"
-                            f"Все данные и отчёты приняты. Хорошего отдыха!"
+                            f"Все данные и кассовые отчёты приняты. Хорошего отдыха!"
                         )
                         keyboard = []
                         if disp_username:
@@ -9782,7 +9823,11 @@ def complete_route_session(session_id: int, request: Request):
                         }
                         if keyboard:
                             payload["reply_markup"] = {"inline_keyboard": keyboard}
-                        _telegram_api("sendMessage", payload)
+
+                        if int(chat_id) not in sent_chat_ids:
+                            _telegram_api("sendMessage", payload)
+                            sent_chat_ids.add(int(chat_id))
+                            drivers_notified += 1
 
                         # Also update the card if it was previously rendered in chat
                         if cd.get("telegram_message_id"):
@@ -9798,11 +9843,19 @@ def complete_route_session(session_id: int, request: Request):
                                 logger.info("Telegram card edit skipped on completion: %s", card_err)
                     except Exception as exc:
                         logger.warning("Telegram driver completion notification failed for assignment %s: %s", cd.get("id"), exc)
+                        telegram_errors.append(f"{cd.get('vehicle_name') or cd.get('id')}: {exc}")
                 conn.commit()
             except Exception as exc:
                 logger.warning("Failed to broadcast completion to telegram drivers: %s", exc)
+                telegram_errors.append(str(exc))
 
-        return {"ok": True, "session_id": session_id}
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "drivers_notified": drivers_notified,
+            "total_assignments": total_assignments,
+            "telegram_errors": telegram_errors,
+        }
     except HTTPException:
         conn.rollback()
         raise

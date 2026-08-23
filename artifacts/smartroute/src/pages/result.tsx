@@ -1104,14 +1104,25 @@ export function ResultPage() {
         method: "POST",
         credentials: "include",
       });
-      const payload = await response.json().catch(() => ({})) as { detail?: string };
+      const payload = await response.json().catch(() => ({})) as {
+        detail?: string;
+        drivers_notified?: number;
+        total_assignments?: number;
+        telegram_errors?: string[];
+      };
       if (!response.ok) throw new Error(payload.detail || "Не удалось закрыть смену");
       setIsLocallyCompleted(true);
       refetchAssignments();
       queryClient.invalidateQueries({ queryKey: ["route-assignments", sessionId] });
       queryClient.invalidateQueries({ queryKey: ["/api/route/sessions", sessionId] });
       window.dispatchEvent(new Event("route:changed"));
-      toast({ title: "Рейс завершён", description: "Смена официально закрыта, рейс убран из активных, водителю отправлено уведомление в Telegram." });
+      const tgInfo = typeof payload.drivers_notified === "number" && payload.drivers_notified > 0
+        ? ` Водителям (${payload.drivers_notified}) отправлено уведомление в Telegram.`
+        : " Рейс перенесён в архив.";
+      toast({
+        title: "Рейс завершён",
+        description: `Смена официально закрыта.${tgInfo}`,
+      });
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "Не удалось закрыть смену");
     } finally {
