@@ -8681,7 +8681,7 @@ def _load_assignment_for_token(token: str) -> tuple[dict, list[dict]]:
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
         """SELECT id, session_id, route_index, driver_id, driver_name, driver_phone, vehicle_name,
-                  route_yandex_url, status, expires_at,
+                  route_yandex_url, status, expires_at, driver_shift_closed,
                   updated_at
            FROM route_assignments WHERE access_token_hash=%s""",
         (token_hash,),
@@ -8968,6 +8968,33 @@ def create_route_assignment(session_id: int, body: AssignmentCreate, request: Re
             driver_phone = driver["phone"] or ""
             directory_vehicle = driver["vehicle_name"] or ""
         vehicle_name = body.vehicle_name.strip() or directory_vehicle or str(route.get("vehicle_name") or "")
+
+        # Check if an assignment already exists and whether deliveries have started
+        cur.execute(
+            """SELECT a.id, a.driver_id, a.driver_name,
+                      COUNT(e.id) FILTER (WHERE e.status IN ('delivered', 'partial', 'failed', 'rescheduled')) AS completed_points
+                 FROM route_assignments a
+                 LEFT JOIN route_executions e ON e.assignment_id = a.id
+                WHERE a.session_id = %s AND a.route_index = %s AND a.owner_id = %s
+                GROUP BY a.id, a.driver_id, a.driver_name""",
+            (session_id, body.route_index, uid),
+        )
+        existing_assign = cur.fetchone()
+        if existing_assign:
+            completed_points = int(existing_assign.get("completed_points") or 0)
+            if completed_points > 0:
+                is_different_driver = False
+                if driver_id is not None:
+                    if existing_assign.get("driver_id") != driver_id:
+                        is_different_driver = True
+                elif driver_name and existing_assign.get("driver_name") != driver_name:
+                    is_different_driver = True
+                if is_different_driver:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Водитель уже выполнил заказ(ы) по этому рейсу (выполнено точек: {completed_points}). Смена водителя недоступна.",
+                    )
+
         cur.execute(
             """INSERT INTO route_assignments
                  (owner_id, session_id, route_index, driver_id, driver_name, driver_phone, vehicle_name,
@@ -9123,40 +9150,69 @@ def update_route_assignment(assignment_id: int, body: AssignmentUpdate, request:
     uid = get_user_id(request)
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    fields, values = [], []
-    if body.driver_name is not None:
-        fields.append("driver_name=%s"); values.append(body.driver_name.strip())
-    if body.driver_id is not None:
+    try:
         cur.execute(
-            "SELECT id, name, phone, vehicle_name FROM drivers WHERE id=%s AND owner_id=%s AND is_active=TRUE",
-            (body.driver_id, uid),
+            """SELECT a.id, a.driver_id, a.driver_name,
+                      COUNT(e.id) FILTER (WHERE e.status IN ('delivered', 'partial', 'failed', 'rescheduled')) AS completed_points
+                 FROM route_assignments a
+                 LEFT JOIN route_executions e ON e.assignment_id = a.id
+                WHERE a.id = %s AND a.owner_id = %s
+                GROUP BY a.id, a.driver_id, a.driver_name""",
+            (assignment_id, uid),
         )
-        driver = cur.fetchone()
-        if not driver:
-            raise HTTPException(status_code=422, detail="Выбранный водитель не найден или неактивен")
-        fields.extend(["driver_id=%s", "driver_name=%s", "driver_phone=%s"])
-        values.extend([driver["id"], driver["name"], driver["phone"] or ""])
-        if body.vehicle_name is None and driver["vehicle_name"]:
-            fields.append("vehicle_name=%s"); values.append(driver["vehicle_name"])
-    if body.vehicle_name is not None:
-        fields.append("vehicle_name=%s"); values.append(body.vehicle_name.strip())
-    if not fields:
-        raise HTTPException(status_code=422, detail="Нет изменений")
-    fields.append("updated_at=NOW()")
-    values.extend([assignment_id, uid])
-    cur.execute(
-        f"""UPDATE route_assignments SET {', '.join(fields)}
-            WHERE id=%s AND owner_id=%s
-            RETURNING id, session_id, route_index, driver_id, driver_name, driver_phone, vehicle_name,
-                      route_yandex_url, status, expires_at, updated_at""",
-        values,
-    )
-    row = cur.fetchone()
-    if not row:
-        cur.close(); conn.close()
-        raise HTTPException(status_code=404, detail="Рейс не найден")
-    conn.commit(); cur.close(); conn.close()
-    return _assignment_summary(dict(row))
+        existing_assign = cur.fetchone()
+        if not existing_assign:
+            raise HTTPException(status_code=404, detail="Рейс не найден")
+
+        completed_points = int(existing_assign.get("completed_points") or 0)
+        if completed_points > 0:
+            is_changing_driver = False
+            if body.driver_id is not None and existing_assign.get("driver_id") != body.driver_id:
+                is_changing_driver = True
+            elif body.driver_name is not None and body.driver_name.strip() != (existing_assign.get("driver_name") or ""):
+                is_changing_driver = True
+            if is_changing_driver:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Водитель уже выполнил заказ(ы) по этому рейсу (выполнено точек: {completed_points}). Смена водителя недоступна.",
+                )
+
+        fields, values = [], []
+        if body.driver_name is not None:
+            fields.append("driver_name=%s"); values.append(body.driver_name.strip())
+        if body.driver_id is not None:
+            cur.execute(
+                "SELECT id, name, phone, vehicle_name FROM drivers WHERE id=%s AND owner_id=%s AND is_active=TRUE",
+                (body.driver_id, uid),
+            )
+            driver = cur.fetchone()
+            if not driver:
+                raise HTTPException(status_code=422, detail="Выбранный водитель не найден или неактивен")
+            fields.extend(["driver_id=%s", "driver_name=%s", "driver_phone=%s"])
+            values.extend([driver["id"], driver["name"], driver["phone"] or ""])
+            if body.vehicle_name is None and driver["vehicle_name"]:
+                fields.append("vehicle_name=%s"); values.append(driver["vehicle_name"])
+        if body.vehicle_name is not None:
+            fields.append("vehicle_name=%s"); values.append(body.vehicle_name.strip())
+        if not fields:
+            raise HTTPException(status_code=422, detail="Нет изменений")
+        fields.append("updated_at=NOW()")
+        values.extend([assignment_id, uid])
+        cur.execute(
+            f"""UPDATE route_assignments SET {', '.join(fields)}
+                WHERE id=%s AND owner_id=%s
+                RETURNING id, session_id, route_index, driver_id, driver_name, driver_phone, vehicle_name,
+                          route_yandex_url, status, expires_at, updated_at""",
+            values,
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Рейс не найден")
+        conn.commit()
+        return _assignment_summary(dict(row))
+    finally:
+        cur.close()
+        conn.close()
 
 
 @app.patch("/api/route/assignments/{assignment_id}/executions/{execution_id}")
