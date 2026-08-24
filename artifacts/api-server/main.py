@@ -3172,30 +3172,36 @@ def whatsapp_driver_url(
     return f"{target}?text={urllib.parse.quote(text)}"
 
 
-def _public_app_url(request: Request) -> str:
+def _public_app_url(request: Optional[Request] = None) -> str:
     """Resolve the public origin used inside driver links shared in WhatsApp and Telegram."""
     configured = PUBLIC_APP_URL
     if configured:
         return configured.rstrip("/")
-    origin = request.headers.get("origin")
-    if origin and "://" in origin:
-        parsed_origin = urllib.parse.urlparse(origin)
-        if parsed_origin.scheme and parsed_origin.netloc and "localhost" not in parsed_origin.netloc and "127.0.0.1" not in parsed_origin.netloc:
-            return origin.rstrip("/")
-    referer = request.headers.get("referer")
-    if referer and "://" in referer:
-        parsed_ref = urllib.parse.urlparse(referer)
-        if parsed_ref.scheme and parsed_ref.netloc and "localhost" not in parsed_ref.netloc and "127.0.0.1" not in parsed_ref.netloc:
-            return f"{parsed_ref.scheme}://{parsed_ref.netloc}"
-    forwarded_host = request.headers.get("x-forwarded-host") or request.headers.get("host")
-    forwarded_proto = request.headers.get("x-forwarded-proto") or request.url.scheme
-    if forwarded_host:
-        host = forwarded_host.split(",")[0].strip()
-        proto = forwarded_proto.split(",")[0].strip()
-        if "localhost" not in host and "127.0.0.1" not in host:
-            return f"{proto}://{host}"
-    base = str(request.base_url).rstrip("/")
-    return base
+    if request is not None:
+        try:
+            origin = request.headers.get("origin")
+            if origin and "://" in origin:
+                parsed_origin = urllib.parse.urlparse(origin)
+                if parsed_origin.scheme and parsed_origin.netloc and "localhost" not in parsed_origin.netloc and "127.0.0.1" not in parsed_origin.netloc:
+                    return origin.rstrip("/")
+            referer = request.headers.get("referer")
+            if referer and "://" in referer:
+                parsed_ref = urllib.parse.urlparse(referer)
+                if parsed_ref.scheme and parsed_ref.netloc and "localhost" not in parsed_ref.netloc and "127.0.0.1" not in parsed_ref.netloc:
+                    return f"{parsed_ref.scheme}://{parsed_ref.netloc}"
+            forwarded_host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+            forwarded_proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+            if forwarded_host:
+                host = forwarded_host.split(",")[0].strip()
+                proto = forwarded_proto.split(",")[0].strip()
+                if "localhost" not in host and "127.0.0.1" not in host:
+                    return f"{proto}://{host}"
+            base = str(request.base_url).rstrip("/")
+            if base and "localhost" not in base and "127.0.0.1" not in base:
+                return base
+        except Exception:
+            pass
+    return "https://smartroute.press"
 
 
 def _telegram_api(method: str, payload: dict) -> dict:
@@ -3267,7 +3273,7 @@ def _telegram_http_url(value: str) -> Optional[str]:
     return None
 
 
-def _issue_assignment_link(cur, assignment_id: int, request: Request) -> tuple[str, str]:
+def _issue_assignment_link(cur, assignment_id: int, request: Optional[Request] = None) -> tuple[str, str]:
     raw_token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
     cur.execute(
@@ -3280,21 +3286,66 @@ def _issue_assignment_link(cur, assignment_id: int, request: Request) -> tuple[s
     return relative, _public_app_url(request) + relative
 
 
-def _configure_telegram_webhook() -> None:
-    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET and PUBLIC_APP_URL):
+_telegram_polling_active = False
+
+
+def _start_telegram_polling() -> None:
+    global _telegram_polling_active
+    if _telegram_polling_active or not TELEGRAM_BOT_TOKEN:
         return
+    _telegram_polling_active = True
+    logger.info("[Telegram] Starting background polling thread...")
+
+    # Drop webhook to ensure getUpdates is allowed by Telegram API
     try:
-        _telegram_api("setWebhook", {
-            "url": f"{PUBLIC_APP_URL}/api/telegram/webhook",
-            "secret_token": TELEGRAM_WEBHOOK_SECRET,
-            # Inline buttons arrive as callback_query; live-location updates
-            # can be delivered through edited_message. Limiting this list to
-            # message silently made the Telegram interface read-only.
-            "allowed_updates": ["message", "edited_message", "callback_query"],
-        })
-        logger.info("Telegram webhook configured")
-    except Exception as exc:
-        logger.warning("Telegram webhook configuration failed: %s", exc)
+        _telegram_api("deleteWebhook", {"drop_pending_updates": False})
+    except Exception as del_err:
+        logger.warning("[Telegram] deleteWebhook notice: %s", del_err)
+
+    last_update_id = 0
+    while _telegram_polling_active:
+        try:
+            if not TELEGRAM_BOT_TOKEN:
+                time.sleep(5)
+                continue
+            res = _telegram_api("getUpdates", {
+                "offset": last_update_id + 1,
+                "timeout": 20,
+                "allowed_updates": ["message", "edited_message", "callback_query"],
+            })
+            if res.get("ok") and isinstance(res.get("result"), list):
+                for update in res["result"]:
+                    last_update_id = max(last_update_id, int(update.get("update_id", 0)))
+                    try:
+                        _handle_telegram_update_internal(update, None)
+                    except Exception as u_err:
+                        logger.error("[Telegram] Error processing polling update: %s", u_err)
+        except Exception as exc:
+            time.sleep(4)
+
+
+def _configure_telegram_integration() -> None:
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    bot_user = _get_telegram_bot_username()
+    logger.info("Initializing Telegram integration for @%s...", bot_user)
+
+    if PUBLIC_APP_URL and "localhost" not in PUBLIC_APP_URL and "127.0.0.1" not in PUBLIC_APP_URL:
+        try:
+            payload = {
+                "url": f"{PUBLIC_APP_URL}/api/telegram/webhook",
+                "allowed_updates": ["message", "edited_message", "callback_query"],
+            }
+            if TELEGRAM_WEBHOOK_SECRET:
+                payload["secret_token"] = TELEGRAM_WEBHOOK_SECRET
+            _telegram_api("setWebhook", payload)
+            logger.info("Telegram webhook configured for %s/api/telegram/webhook", PUBLIC_APP_URL)
+            return
+        except Exception as exc:
+            logger.warning("Telegram setWebhook failed: %s. Starting polling fallback...", exc)
+
+    # If no PUBLIC_APP_URL or setWebhook failed, launch polling
+    _start_telegram_polling()
 
 
 def _telegram_parse_products(products: str, planned_qty: float) -> list[dict]:
@@ -3927,8 +3978,8 @@ async def startup():
         seed_demo_data(owner_id=admin_id)  # seeds only if admin has no stores
     except Exception as db_err:
         logger.warning(f"Database setup during startup skipped or encountered error: {db_err}")
-    if TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET and PUBLIC_APP_URL:
-        threading.Thread(target=_configure_telegram_webhook, daemon=True).start()
+    if TELEGRAM_BOT_TOKEN:
+        threading.Thread(target=_configure_telegram_integration, daemon=True).start()
 
     # ── Periodic in-memory cleanup ────────────────────────────────────────────
     t = threading.Thread(target=_memory_cleanup_loop, daemon=True)
@@ -8135,15 +8186,12 @@ def _telegram_handle_callback(request: Request, callback: dict):
         cur.close(); conn.close()
 
 
-@app.post("/api/telegram/webhook")
-def telegram_webhook(request: Request, payload: dict):
-    if TELEGRAM_WEBHOOK_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != TELEGRAM_WEBHOOK_SECRET:
-        raise HTTPException(status_code=403, detail="Invalid Telegram webhook secret")
+def _handle_telegram_update_internal(payload: dict, request: Optional[Request] = None) -> dict:
     if payload.get("callback_query"):
         return _telegram_handle_callback(request, payload["callback_query"])
     message = payload.get("message") or payload.get("edited_message") or {}
     chat = message.get("chat") or {}
-    text = str(message.get("text") or "")
+    text = str(message.get("text") or "").strip()
     chat_id = chat.get("id")
     if not chat_id:
         return {"ok": True}
@@ -8152,8 +8200,6 @@ def telegram_webhook(request: Request, payload: dict):
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
         # GPS is accepted only from the explicit consent flow in /driver/{token}.
-        # Ignore Telegram locations (including live locations) to keep one
-        # predictable source of coordinates for the dispatcher.
         if location.get("latitude") is not None and location.get("longitude") is not None:
             return {"ok": True}
 
@@ -8286,13 +8332,39 @@ def telegram_webhook(request: Request, payload: dict):
             _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "GPS-отслеживание остановлено."})
             return {"ok": True}
 
+        # Any other message from driver:
+        cur.execute("SELECT id, name FROM drivers WHERE telegram_chat_id=%s AND is_active=TRUE", (int(chat_id),))
+        bound_driver = cur.fetchone()
+        if bound_driver:
+            _telegram_api("sendMessage", {
+                "chat_id": int(chat_id),
+                "text": f"👋 Здравствуйте, {bound_driver['name']}!\n\nИспользуйте команду /route, чтобы просмотреть текущий рейс и путевой лист.",
+            })
+        else:
+            _telegram_api("sendMessage", {
+                "chat_id": int(chat_id),
+                "text": "👋 Здравствуйте! Для подключения к SmartRoute нажмите «📱 Поделиться контактом» ниже или отправьте ваш номер телефона сообщением.",
+                "reply_markup": {
+                    "keyboard": [[{"text": "📱 Поделиться контактом", "request_contact": True}]],
+                    "resize_keyboard": True,
+                    "one_time_keyboard": True,
+                },
+            })
+
         return {"ok": True}
     except Exception as exc:
         conn.rollback()
-        logger.exception("Telegram webhook failed: %s", exc)
+        logger.exception("Telegram handler failed: %s", exc)
         return {"ok": True}
     finally:
         cur.close(); conn.close()
+
+
+@app.post("/api/telegram/webhook")
+def telegram_webhook(request: Request, payload: dict):
+    if TELEGRAM_WEBHOOK_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != TELEGRAM_WEBHOOK_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid Telegram webhook secret")
+    return _handle_telegram_update_internal(payload, request)
 
 
 def _broadcast_route_to_telegram(cur, session_id: int, uid: int, request: Request) -> dict:
