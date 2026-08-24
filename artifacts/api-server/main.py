@@ -3215,10 +3215,28 @@ def _telegram_api(method: str, payload: dict) -> dict:
         raise RuntimeError(str(exc)) from exc
 
 
+def _get_telegram_bot_username() -> str:
+    global TELEGRAM_BOT_USERNAME
+    if TELEGRAM_BOT_USERNAME:
+        return TELEGRAM_BOT_USERNAME
+    if not TELEGRAM_BOT_TOKEN:
+        return ""
+    try:
+        me = _telegram_api("getMe", {})
+        uname = (me.get("result") or {}).get("username")
+        if uname:
+            TELEGRAM_BOT_USERNAME = str(uname).strip().lstrip("@")
+            return TELEGRAM_BOT_USERNAME
+    except Exception as exc:
+        logger.warning("Failed to auto-fetch Telegram bot username: %s", exc)
+    return TELEGRAM_BOT_USERNAME or "Smartroute_Drivers_bot"
+
+
 def _telegram_connect_link(raw_token: str) -> str:
-    if not TELEGRAM_BOT_USERNAME:
-        raise HTTPException(status_code=503, detail="Telegram Bot API не настроен: добавьте TELEGRAM_BOT_USERNAME")
-    return f"https://t.me/{TELEGRAM_BOT_USERNAME}?start={urllib.parse.quote(raw_token, safe='-_')}"
+    bot_username = _get_telegram_bot_username()
+    if not bot_username:
+        raise HTTPException(status_code=503, detail="Telegram Bot API не настроен: укажите TELEGRAM_BOT_TOKEN в переменных окружения")
+    return f"https://t.me/{bot_username}?start={urllib.parse.quote(raw_token, safe='-_')}"
 
 
 def _telegram_http_url(value: str) -> Optional[str]:
@@ -8113,25 +8131,48 @@ def telegram_webhook(request: Request, payload: dict):
         if location.get("latitude") is not None and location.get("longitude") is not None:
             return {"ok": True}
 
-        if text == "/start" or text.startswith("/start "):
+        contact = message.get("contact") or {}
+        contact_phone = _normalize_driver_phone(contact.get("phone_number") or "")
+        sender_username = (chat.get("username") or "").strip().lstrip("@")
+
+        if text == "/start" or text.startswith("/start ") or contact_phone:
             parts = text.split(maxsplit=1)
             raw_token = parts[1].strip() if len(parts) > 1 else ""
-            token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
-            cur.execute(
-                """UPDATE drivers
-                      SET telegram_chat_id=%s, telegram_connected_at=NOW(),
-                          telegram_connect_token_hash=NULL, telegram_token_expires_at=NULL, updated_at=NOW()
-                    WHERE telegram_connect_token_hash=%s AND is_active=TRUE
-                      AND (telegram_token_expires_at IS NULL OR telegram_token_expires_at > NOW())
-                RETURNING name""",
-                (int(chat_id), token_hash),
-            )
-            driver = cur.fetchone()
+            driver = None
+            if raw_token:
+                token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+                cur.execute(
+                    """UPDATE drivers
+                          SET telegram_chat_id=%s, telegram_username=%s, telegram_connected_at=NOW(),
+                              telegram_connect_token_hash=NULL, telegram_token_expires_at=NULL, updated_at=NOW()
+                        WHERE telegram_connect_token_hash=%s AND is_active=TRUE
+                          AND (telegram_token_expires_at IS NULL OR telegram_token_expires_at > NOW())
+                    RETURNING id, name""",
+                    (int(chat_id), sender_username or None, token_hash),
+                )
+                driver = cur.fetchone()
+
+            if not driver and contact_phone:
+                cur.execute(
+                    """UPDATE drivers
+                          SET telegram_chat_id=%s, telegram_username=%s, telegram_connected_at=NOW(),
+                              telegram_connect_token_hash=NULL, telegram_token_expires_at=NULL, updated_at=NOW()
+                        WHERE is_active=TRUE AND phone LIKE %s
+                    RETURNING id, name""",
+                    (int(chat_id), sender_username or None, f"%{contact_phone[-10:]}%"),
+                )
+                driver = cur.fetchone()
+
+            if not driver:
+                # Check if this chat_id is already bound
+                cur.execute("SELECT id, name FROM drivers WHERE telegram_chat_id=%s AND is_active=TRUE", (int(chat_id),))
+                driver = cur.fetchone()
+
             conn.commit()
             if driver:
-                welcome = f"👋 Добро пожаловать в SmartRoute, {driver['name']}!\n\n🟢 Водитель подключён. Здесь вы будете получать рабочие рейсы и отмечать выполнение доставок."
+                welcome = f"👋 Добро пожаловать в SmartRoute, {driver['name']}!\n\n🟢 Вы успешно подключены к системе. Сюда будут приходить назначенные рейсы и маршруты."
             else:
-                welcome = "👋 Добро пожаловать в SmartRoute! Попросите диспетчера выдать персональную ссылку подключения."
+                welcome = "👋 Добро пожаловать в SmartRoute!\n\nДля подключения попросите диспетчера отправить вам персональную ссылку из раздела «Настройки → Водители» или поделитесь контактом."
             _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": welcome})
             return {"ok": True}
 
@@ -8225,13 +8266,24 @@ def _broadcast_route_to_telegram(cur, session_id: int, uid: int, request: Reques
         vehicle_label = (assignment.get("vehicle_name") or "Машина").strip()
 
         chat_id = assignment.get("telegram_chat_id") or assignment.get("telegram_message_chat_id")
+        if not chat_id and (assignment.get("driver_phone") or assignment.get("directory_phone")):
+            raw_phone = _normalize_driver_phone(assignment.get("driver_phone") or assignment.get("directory_phone") or "")
+            if raw_phone:
+                cur.execute(
+                    "SELECT telegram_chat_id FROM drivers WHERE owner_id=%s AND phone LIKE %s AND telegram_chat_id IS NOT NULL LIMIT 1",
+                    (uid, f"%{raw_phone[-10:]}%"),
+                )
+                matched = cur.fetchone()
+                if matched and matched.get("telegram_chat_id"):
+                    chat_id = matched["telegram_chat_id"]
+
         reason = None
         if not assignment.get("driver_id") and not chat_id:
-            reason = "водитель не назначен"
+            reason = "водитель не выбран из справочника"
         elif assignment.get("is_active") is False and not chat_id:
             reason = "водитель архивирован"
         elif not chat_id:
-            reason = "водитель не подключён к Telegram (нет chat_id)"
+            reason = "водитель ещё не нажал «Запустить» (Start) в Telegram-боте (нет chat_id). Отправьте ему ссылку подключения из Настройки → Водители"
 
         if reason:
             skipped += 1
