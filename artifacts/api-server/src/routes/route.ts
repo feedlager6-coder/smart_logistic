@@ -1,8 +1,75 @@
 import { Router } from "express";
-import { dbStore, RouteSessionData, StoreData } from "../store";
+import crypto from "crypto";
+import { dbStore, RouteAssignmentData, RouteSessionData, StoreData } from "../store";
 import { solveVrp } from "../vrp";
+import { ensureAssignmentExecutions, formatPublicUrl, sendAssignmentToDriver } from "../lib/telegram";
 
 const router = Router();
+
+function getPublicBaseUrl(req: any): string {
+  const host = req.get("x-forwarded-host") || req.get("host") || "localhost:3000";
+  const proto = req.get("x-forwarded-proto") || (req.secure ? "https" : "http");
+  return process.env.PUBLIC_APP_URL || `${proto}://${host}`;
+}
+
+function formatAssignment(assignment: RouteAssignmentData, session: RouteSessionData, baseUrl: string) {
+  const executions = ensureAssignmentExecutions(assignment, session);
+  const totalPoints = executions.length;
+  const completedPoints = executions.filter((e) => e.status !== "planned").length;
+  const driverUrl = formatPublicUrl(`/driver/${assignment.access_token}`, baseUrl);
+  
+  const route = session.routes[assignment.route_index];
+  const yandexUrl = route?.yandex_url || assignment.route_yandex_url || "";
+  const whatsappText = `🚚 SmartRoute: рейс ${assignment.vehicle_name}\n📍 Точек: ${totalPoints}\n📱 Ссылка для водителя:\n${driverUrl}`;
+  const whatsappUrl = `https://wa.me/?text=${encodeURIComponent(whatsappText)}`;
+
+  return {
+    id: assignment.id,
+    session_id: assignment.session_id,
+    route_index: assignment.route_index,
+    driver_id: assignment.driver_id,
+    driver_name: assignment.driver_name,
+    driver_phone: assignment.driver_phone,
+    vehicle_name: assignment.vehicle_name,
+    route_yandex_url: yandexUrl,
+    status: assignment.status,
+    total_points: totalPoints,
+    completed_points: completedPoints,
+    driver_url: driverUrl,
+    whatsapp_url: whatsappUrl,
+    telegram_message_id: assignment.telegram_message_id,
+    telegram_message_chat_id: assignment.telegram_message_chat_id,
+    created_at: assignment.created_at,
+    updated_at: assignment.updated_at,
+    executions: executions.map((e) => ({
+      id: e.id,
+      assignment_id: e.assignment_id,
+      visit_order: e.visit_order,
+      store_name: e.store_name,
+      store_phone: e.store_phone,
+      store_client: e.store_client,
+      address: e.address,
+      lat: e.lat,
+      lon: e.lon,
+      products: e.products,
+      quantity: e.quantity,
+      actual_qty: e.actual_qty,
+      amount_rub: e.amount_rub,
+      actual_amount_rub: e.actual_amount_rub,
+      arrive_by: e.arrive_by,
+      status: e.status,
+      payment_method: e.payment_method,
+      payment_status: e.payment_status,
+      driver_comment: e.driver_comment,
+      yandex_url: e.yandex_url,
+      is_remote_completion: e.is_remote_completion,
+      completion_distance_meters: e.completion_distance_meters,
+      rescheduled_date: e.rescheduled_date,
+      remaining_order_date: e.remaining_order_date,
+      delivered_at: e.delivered_at,
+    })),
+  };
+}
 
 // POST /api/route/build
 router.post("/route/build", (req, res) => {
@@ -19,7 +86,7 @@ router.post("/route/build", (req, res) => {
   } else if (Array.isArray(body.stores) && body.stores.length > 0) {
     storesToOptimize = body.stores;
   } else {
-    storesToOptimize = dbStore.stores; // optimize all stores by default
+    storesToOptimize = dbStore.stores;
   }
 
   const vehicles = Array.isArray(body.vehicles) && body.vehicles.length > 0
@@ -57,6 +124,34 @@ router.post("/route/build", (req, res) => {
 
   dbStore.routeSessions.unshift(session);
 
+  // Auto-generate assignments with active drivers
+  session.routes.forEach((route, idx) => {
+    const matchedDriver = dbStore.drivers.find(
+      (d) => d.is_active && (
+        d.vehicle_name.toLowerCase().includes(route.vehicle_name.toLowerCase()) ||
+        route.vehicle_name.toLowerCase().includes(d.name.toLowerCase())
+      )
+    ) || dbStore.drivers[idx % Math.max(1, dbStore.drivers.length)];
+
+    const rawToken = crypto.randomBytes(16).toString("hex");
+    const assignment: RouteAssignmentData = {
+      id: dbStore.assignmentNextId++,
+      session_id: session.id,
+      route_index: idx,
+      driver_id: matchedDriver ? matchedDriver.id : null,
+      driver_name: matchedDriver ? matchedDriver.name : route.vehicle_name,
+      driver_phone: matchedDriver ? matchedDriver.phone : "",
+      vehicle_name: route.vehicle_name,
+      access_token: rawToken,
+      route_yandex_url: route.yandex_url || "",
+      status: "planned",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    dbStore.assignments.push(assignment);
+    ensureAssignmentExecutions(assignment, session);
+  });
+
   res.json({
     session_id: session.id,
     routes: result.routes,
@@ -91,6 +186,7 @@ router.get("/route/sessions/:id", (req, res) => {
 router.delete("/route/sessions/:id", (req, res) => {
   const id = Number(req.params.id);
   dbStore.routeSessions = dbStore.routeSessions.filter((s) => s.id !== id);
+  dbStore.assignments = dbStore.assignments.filter((a) => a.session_id !== id);
   res.json({ ok: true, deleted_id: id });
 });
 
@@ -98,6 +194,194 @@ router.delete("/route/sessions/:id", (req, res) => {
 router.get("/route/active-session", (req, res) => {
   const active = dbStore.routeSessions[0] || null;
   res.json(active);
+});
+
+// GET /api/route/sessions/:id/assignments
+router.get("/route/sessions/:id/assignments", (req, res) => {
+  const sessionId = Number(req.params.id);
+  const session = dbStore.routeSessions.find((s) => s.id === sessionId);
+  if (!session) {
+    return res.json({ assignments: [] });
+  }
+
+  const baseUrl = getPublicBaseUrl(req);
+  const list = dbStore.assignments
+    .filter((a) => a.session_id === sessionId)
+    .map((a) => formatAssignment(a, session, baseUrl));
+
+  res.json({ assignments: list });
+});
+
+// POST /api/route/sessions/:id/assignments
+router.post("/route/sessions/:id/assignments", (req, res) => {
+  const sessionId = Number(req.params.id);
+  const session = dbStore.routeSessions.find((s) => s.id === sessionId);
+  if (!session) {
+    return res.status(404).json({ detail: "Маршрутная сессия не найдена" });
+  }
+
+  const { route_index, driver_id, driver_name, vehicle_name } = req.body || {};
+  const routeIdx = Number(route_index) || 0;
+  const route = session.routes[routeIdx];
+
+  let assignment = dbStore.assignments.find(
+    (a) => a.session_id === sessionId && a.route_index === routeIdx
+  );
+
+  let matchedDriver = driver_id
+    ? dbStore.drivers.find((d) => d.id === Number(driver_id))
+    : undefined;
+
+  if (!matchedDriver && driver_name) {
+    matchedDriver = dbStore.drivers.find(
+      (d) => d.is_active && d.name.toLowerCase() === String(driver_name).trim().toLowerCase()
+    );
+  }
+
+  const dName = matchedDriver?.name || driver_name || route?.vehicle_name || "Водитель";
+  const dPhone = matchedDriver?.phone || "";
+  const vName = vehicle_name || route?.vehicle_name || "Автомобиль";
+
+  if (!assignment) {
+    const rawToken = crypto.randomBytes(16).toString("hex");
+    assignment = {
+      id: dbStore.assignmentNextId++,
+      session_id: sessionId,
+      route_index: routeIdx,
+      driver_id: matchedDriver ? matchedDriver.id : null,
+      driver_name: dName,
+      driver_phone: dPhone,
+      vehicle_name: vName,
+      access_token: rawToken,
+      route_yandex_url: route?.yandex_url || "",
+      status: "planned",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    dbStore.assignments.push(assignment);
+  } else {
+    assignment.driver_id = matchedDriver ? matchedDriver.id : null;
+    assignment.driver_name = dName;
+    assignment.driver_phone = dPhone;
+    if (vName) assignment.vehicle_name = vName;
+    assignment.updated_at = new Date().toISOString();
+  }
+
+  ensureAssignmentExecutions(assignment, session);
+  const baseUrl = getPublicBaseUrl(req);
+  res.json(formatAssignment(assignment, session, baseUrl));
+});
+
+// POST /api/route/assignments/:id/share
+router.post("/route/assignments/:id/share", (req, res) => {
+  const id = Number(req.params.id);
+  const assignment = dbStore.assignments.find((a) => a.id === id);
+  if (!assignment) {
+    return res.status(404).json({ detail: "Рейс не найден" });
+  }
+
+  const baseUrl = getPublicBaseUrl(req);
+  const driverUrl = formatPublicUrl(`/driver/${assignment.access_token}`, baseUrl);
+  const whatsappText = `🚚 SmartRoute: рейс ${assignment.vehicle_name}\n📱 Ссылка для водителя:\n${driverUrl}`;
+  const whatsappUrl = `https://wa.me/?text=${encodeURIComponent(whatsappText)}`;
+
+  res.json({ driver_url: driverUrl, whatsapp_url: whatsappUrl });
+});
+
+// POST /api/route/sessions/:id/assign-all
+router.post("/route/sessions/:id/assign-all", (req, res) => {
+  const sessionId = Number(req.params.id);
+  const session = dbStore.routeSessions.find((s) => s.id === sessionId);
+  if (!session) {
+    return res.status(404).json({ detail: "Маршрутная сессия не найдена" });
+  }
+
+  const baseUrl = getPublicBaseUrl(req);
+  session.routes.forEach((route, idx) => {
+    let assignment = dbStore.assignments.find(
+      (a) => a.session_id === sessionId && a.route_index === idx
+    );
+    const matchedDriver = dbStore.drivers[idx % Math.max(1, dbStore.drivers.length)];
+    if (!assignment) {
+      const rawToken = crypto.randomBytes(16).toString("hex");
+      assignment = {
+        id: dbStore.assignmentNextId++,
+        session_id: sessionId,
+        route_index: idx,
+        driver_id: matchedDriver ? matchedDriver.id : null,
+        driver_name: matchedDriver ? matchedDriver.name : route.vehicle_name,
+        driver_phone: matchedDriver ? matchedDriver.phone : "",
+        vehicle_name: route.vehicle_name,
+        access_token: rawToken,
+        route_yandex_url: route.yandex_url || "",
+        status: "planned",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      dbStore.assignments.push(assignment);
+      ensureAssignmentExecutions(assignment, session);
+    }
+  });
+
+  const list = dbStore.assignments
+    .filter((a) => a.session_id === sessionId)
+    .map((a) => formatAssignment(a, session, baseUrl));
+
+  res.json({ assignments: list });
+});
+
+// POST /api/route/sessions/:id/complete
+router.post("/route/sessions/:id/complete", async (req, res) => {
+  const sessionId = Number(req.params.id);
+  const session = dbStore.routeSessions.find((s) => s.id === sessionId);
+  if (!session) {
+    return res.status(404).json({ detail: "Маршрутная сессия не найдена" });
+  }
+
+  const baseUrl = getPublicBaseUrl(req);
+  const assignments = dbStore.assignments.filter((a) => a.session_id === sessionId);
+  
+  for (const a of assignments) {
+    a.status = "completed";
+    a.updated_at = new Date().toISOString();
+    try {
+      await sendAssignmentToDriver(a, session, baseUrl);
+    } catch {}
+  }
+
+  res.json({ ok: true, completed: assignments.length });
+});
+
+// POST /api/route/assignments/:id/executions/:executionId/rescheduled-order
+router.post("/route/assignments/:id/executions/:executionId/rescheduled-order", (req, res) => {
+  const assignmentId = Number(req.params.id);
+  const executionId = Number(req.params.executionId);
+  const { delivery_date } = req.body || {};
+
+  const assignment = dbStore.assignments.find((a) => a.id === assignmentId);
+  const execution = assignment?.executions?.find((e) => e.id === executionId);
+  if (execution) {
+    execution.rescheduled_date = delivery_date || new Date().toISOString().split("T")[0];
+    execution.updated_at = new Date().toISOString();
+  }
+
+  res.json({ ok: true });
+});
+
+// POST /api/route/assignments/:id/executions/:executionId/remaining-order
+router.post("/route/assignments/:id/executions/:executionId/remaining-order", (req, res) => {
+  const assignmentId = Number(req.params.id);
+  const executionId = Number(req.params.executionId);
+  const { delivery_date } = req.body || {};
+
+  const assignment = dbStore.assignments.find((a) => a.id === assignmentId);
+  const execution = assignment?.executions?.find((e) => e.id === executionId);
+  if (execution) {
+    execution.remaining_order_date = delivery_date || new Date().toISOString().split("T")[0];
+    execution.updated_at = new Date().toISOString();
+  }
+
+  res.json({ ok: true });
 });
 
 export default router;
