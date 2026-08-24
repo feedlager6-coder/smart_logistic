@@ -13,7 +13,7 @@ import threading
 import concurrent.futures
 import uuid as _uuid
 import openpyxl
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 import secrets
 import hashlib
@@ -8338,17 +8338,14 @@ def _handle_telegram_update_internal(payload: dict, request: Optional[Request] =
                 )
                 conn.commit()
 
+                # Remove the old persistent onboarding keyboard from chats
+                # created by previous releases. Route actions are inline and
+                # tracking is controlled from the execution page.
+                _telegram_remove_reply_keyboard(int(chat_id))
                 welcome = f"👋 Здравствуйте, {driver['name']}!\n\n🟢 Вы успешно подключены к SmartRoute как водитель ({driver.get('phone', '')})!\n\nСюда будут поступать ваши рейсы, путевые листы и точки доставок."
                 _telegram_api("sendMessage", {
                     "chat_id": int(chat_id),
                     "text": welcome,
-                    "reply_markup": {
-                        "keyboard": [
-                            [{"text": "🚚 Мой рейс"}],
-                            [{"text": "📍 Начать отслеживание"}],
-                        ],
-                        "resize_keyboard": True,
-                    },
                 })
                 # Check active assignment
                 try:
@@ -8380,6 +8377,9 @@ def _handle_telegram_update_internal(payload: dict, request: Optional[Request] =
             return {"ok": True}
 
         if is_route_cmd:
+            # A driver may still have the persistent keyboard from an older
+            # release even without going through /start again.
+            _telegram_remove_reply_keyboard(int(chat_id))
             driver = _telegram_driver_assignment(cur, int(chat_id))
             if driver:
                 _, driver_url = _issue_assignment_link(cur, int(driver["assignment_id"]), request)

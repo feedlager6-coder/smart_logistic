@@ -228,6 +228,8 @@ export function DriverPage() {
       return false;
     }
   });
+  const [shiftSaving, setShiftSaving] = useState(false);
+  const [shiftError, setShiftError] = useState("");
 
   const { data, isLoading, isError, refetch } = useQuery<DriverData>({
     queryKey: ["driver-assignment", token],
@@ -503,22 +505,34 @@ export function DriverPage() {
     executeSave(execution, explicitStatus);
   };
 
-  const handleToggleShiftClose = () => {
+  const handleToggleShiftClose = async () => {
     const nextState = !shiftClosed;
-    setShiftClosed(nextState);
+    if (!token || shiftSaving) return;
+    setShiftSaving(true);
+    setShiftError("");
     try {
-      localStorage.setItem(`smartroute_shift_closed_${token}`, nextState ? "true" : "false");
-    } catch {
-      // Ignored storage error
-    }
-    if (token) {
-      fetch(`/api/driver/${encodeURIComponent(token)}/shift`, {
+      const response = await fetch(`/api/driver/${encodeURIComponent(token)}/shift`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ shift_closed: nextState }),
-      }).catch((err) => {
-        console.error("Failed to sync shift status to server:", err);
       });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || payload.ok !== true) {
+        throw new Error(payload.detail || "Не удалось сохранить статус смены");
+      }
+      const savedState = Boolean(payload.driver_shift_closed);
+      setShiftClosed(savedState);
+      try {
+        localStorage.setItem(`smartroute_shift_closed_${token}`, savedState ? "true" : "false");
+      } catch {
+        // Ignored storage error
+      }
+      await refetch();
+    } catch (err) {
+      console.error("Failed to sync shift status to server:", err);
+      setShiftError(err instanceof Error ? err.message : "Не удалось сохранить статус смены");
+    } finally {
+      setShiftSaving(false);
     }
   };
 
@@ -858,8 +872,11 @@ export function DriverPage() {
                     variant={shiftClosed ? "outline" : "default"}
                     className={`font-bold text-xs h-9 px-4 ${!shiftClosed ? "bg-emerald-600 hover:bg-emerald-700 text-white" : ""}`}
                     onClick={handleToggleShiftClose}
+                    disabled={shiftSaving}
                   >
-                    {shiftClosed ? (
+                    {shiftSaving ? (
+                      <Loader2 className="w-4 h-4 animate-spin mr-1.5" />
+                    ) : shiftClosed ? (
                       <>
                         <Undo2 className="w-4 h-4 mr-1.5" />
                         Возобновить смену
@@ -874,6 +891,11 @@ export function DriverPage() {
                 </div>
               </CardContent>
             </Card>
+            {shiftError && (
+              <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700" role="alert">
+                {shiftError}
+              </div>
+            )}
 
             {/* Cash & Inventory Reconciliation Block (Кассовая ведомость) */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
