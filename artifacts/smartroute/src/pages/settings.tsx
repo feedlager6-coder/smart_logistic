@@ -101,6 +101,12 @@ function DriversPanel() {
       ? `https://wa.me/${driver.phone.replace(/\D/g, "")}?text=${encodeURIComponent(text)}`
       : link;
     window.open(target, "_blank", "noopener,noreferrer");
+    if (channel === "telegram") {
+      toast({
+        title: "Telegram открыт",
+        description: `В диалоге с ботом нажмите «Запустить» (Start) или кнопку «Поделиться контактом» для завершения подключения.`,
+      });
+    }
   }
 
   async function addDriver() {
@@ -144,6 +150,16 @@ function DriversPanel() {
       <div>
         <h2 className="text-lg font-semibold flex items-center gap-2"><Users className="w-5 h-5 text-primary" />Водители</h2>
         <p className="text-sm text-muted-foreground mt-1">Подключите водителя к Telegram один раз — после этого рейсы можно отправлять ему автоматически.</p>
+      </div>
+      <div className="rounded-lg bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800 p-3.5 text-sm text-sky-900 dark:text-sky-200 space-y-1.5">
+        <div className="font-semibold flex items-center gap-1.5 text-xs sm:text-sm">
+          <Send className="w-4 h-4 text-sky-600 shrink-0" />
+          Как подключить водителя к Telegram:
+        </div>
+        <ul className="list-disc list-inside space-y-1 text-xs text-sky-800 dark:text-sky-300">
+          <li><strong>По персональной ссылке:</strong> Нажмите «Telegram» или «WhatsApp», чтобы отправить ссылку. Водителю достаточно нажать <strong>Start / Запустить</strong> в боте.</li>
+          <li><strong>По номеру телефона:</strong> Водитель может просто найти бота в Telegram (<strong>@Smartroute_Drivers_bot</strong>) и нажать <strong>«📱 Поделиться контактом»</strong> либо отправить свой номер телефона сообщением.</li>
+        </ul>
       </div>
       <Card className="border-primary/30 bg-primary/5">
         <CardContent className="pt-5">
