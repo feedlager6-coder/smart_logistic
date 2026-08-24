@@ -220,8 +220,12 @@ def _api_rate_limit(key: str, max_calls: int, window_seconds: int) -> None:
 
 
 # Paths that do NOT require authentication
-_AUTH_PUBLIC_PATHS = {"/api/healthz", "/api/auth/login",
-                      "/api/v1/openapi.json", "/api/v1/docs", "/api/telegram/webhook"}
+_AUTH_PUBLIC_PATHS = {
+    "/api/healthz", "/api/auth/login",
+    "/api/v1/openapi.json", "/api/v1/docs",
+    "/api/telegram/webhook", "/api/telegram/webhook/",
+    "/api/telegram/status", "/api/telegram/restart-polling",
+}
 # Webhook ingest paths use token-in-URL auth (checked inside the handler)
 _AUTH_WEBHOOK_PREFIX = "/api/v1/webhooks/ingest/"
 _DRIVER_API_PREFIX = "/api/driver/"
@@ -3287,50 +3291,75 @@ def _issue_assignment_link(cur, assignment_id: int, request: Optional[Request] =
 
 
 _telegram_polling_active = False
+_telegram_last_poll_time = None
+_telegram_last_error = None
+_telegram_updates_count = 0
 
 
 def _start_telegram_polling() -> None:
-    global _telegram_polling_active
+    global _telegram_polling_active, _telegram_last_poll_time, _telegram_last_error, _telegram_updates_count
     if _telegram_polling_active or not TELEGRAM_BOT_TOKEN:
         return
     _telegram_polling_active = True
-    logger.info("[Telegram] Starting background polling thread...")
+    logger.info("[Telegram] Starting background Long-Polling thread...")
 
     # Drop webhook to ensure getUpdates is allowed by Telegram API
     try:
         _telegram_api("deleteWebhook", {"drop_pending_updates": False})
+        logger.info("[Telegram] Active webhooks removed. Long-Polling is active and listening.")
     except Exception as del_err:
         logger.warning("[Telegram] deleteWebhook notice: %s", del_err)
 
     last_update_id = 0
+    consecutive_errors = 0
     while _telegram_polling_active:
         try:
             if not TELEGRAM_BOT_TOKEN:
                 time.sleep(5)
                 continue
+            _telegram_last_poll_time = datetime.now(timezone.utc).isoformat()
             res = _telegram_api("getUpdates", {
                 "offset": last_update_id + 1,
                 "timeout": 20,
                 "allowed_updates": ["message", "edited_message", "callback_query"],
             })
+            consecutive_errors = 0
             if res.get("ok") and isinstance(res.get("result"), list):
                 for update in res["result"]:
+                    _telegram_updates_count += 1
                     last_update_id = max(last_update_id, int(update.get("update_id", 0)))
                     try:
+                        logger.info("[Telegram] Processing incoming update id=%s", update.get("update_id"))
                         _handle_telegram_update_internal(update, None)
                     except Exception as u_err:
-                        logger.error("[Telegram] Error processing polling update: %s", u_err)
+                        logger.error("[Telegram] Error processing update id=%s: %s", update.get("update_id"), u_err)
         except Exception as exc:
-            time.sleep(4)
+            err_msg = str(exc)
+            _telegram_last_error = err_msg
+            consecutive_errors += 1
+            logger.warning("[Telegram] Polling error (%s): %s", consecutive_errors, err_msg)
+            # If Telegram reports conflict due to active webhook, clear it immediately
+            if "conflict" in err_msg.lower() or "webhook" in err_msg.lower() or "409" in err_msg:
+                try:
+                    logger.info("[Telegram] Conflict detected — deleting webhook to re-enable polling...")
+                    _telegram_api("deleteWebhook", {"drop_pending_updates": False})
+                except Exception as w_err:
+                    logger.warning("[Telegram] Error clearing conflicting webhook: %s", w_err)
+            sleep_sec = min(15, 2 * consecutive_errors)
+            time.sleep(sleep_sec)
 
 
 def _configure_telegram_integration() -> None:
     if not TELEGRAM_BOT_TOKEN:
+        logger.info("[Telegram] TELEGRAM_BOT_TOKEN not provided — skipping bot start.")
         return
     bot_user = _get_telegram_bot_username()
     logger.info("Initializing Telegram integration for @%s...", bot_user)
 
-    if PUBLIC_APP_URL and "localhost" not in PUBLIC_APP_URL and "127.0.0.1" not in PUBLIC_APP_URL:
+    telegram_mode = os.environ.get("TELEGRAM_MODE", "").strip().lower()
+    use_webhook = telegram_mode == "webhook" and bool(PUBLIC_APP_URL and "localhost" not in PUBLIC_APP_URL and "127.0.0.1" not in PUBLIC_APP_URL)
+
+    if use_webhook:
         try:
             payload = {
                 "url": f"{PUBLIC_APP_URL}/api/telegram/webhook",
@@ -3342,9 +3371,9 @@ def _configure_telegram_integration() -> None:
             logger.info("Telegram webhook configured for %s/api/telegram/webhook", PUBLIC_APP_URL)
             return
         except Exception as exc:
-            logger.warning("Telegram setWebhook failed: %s. Starting polling fallback...", exc)
+            logger.warning("Telegram setWebhook failed: %s. Falling back to Long-Polling...", exc)
 
-    # If no PUBLIC_APP_URL or setWebhook failed, launch polling
+    # By default, use Long-Polling (100% reliable without domain / SSL requirements)
     _start_telegram_polling()
 
 
@@ -8382,10 +8411,52 @@ def _handle_telegram_update_internal(payload: dict, request: Optional[Request] =
 
 
 @app.post("/api/telegram/webhook")
-def telegram_webhook(request: Request, payload: dict):
-    if TELEGRAM_WEBHOOK_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != TELEGRAM_WEBHOOK_SECRET:
-        raise HTTPException(status_code=403, detail="Invalid Telegram webhook secret")
+@app.post("/api/telegram/webhook/")
+async def telegram_webhook(request: Request):
+    if TELEGRAM_WEBHOOK_SECRET:
+        token = request.headers.get("X-Telegram-Bot-Api-Secret-Token") or request.headers.get("x-telegram-bot-api-secret-token")
+        if token != TELEGRAM_WEBHOOK_SECRET:
+            logger.warning("[Telegram Webhook] Invalid secret token")
+            raise HTTPException(status_code=403, detail="Invalid Telegram webhook secret")
+    try:
+        payload = await request.json()
+    except Exception as parse_err:
+        logger.warning("[Telegram Webhook] JSON parse error: %s", parse_err)
+        return {"ok": True}
     return _handle_telegram_update_internal(payload, request)
+
+
+@app.get("/api/telegram/status")
+def telegram_status(request: Request):
+    is_configured = bool(TELEGRAM_BOT_TOKEN)
+    bot_username = _get_telegram_bot_username() if is_configured else ""
+    webhook_info = {}
+    if is_configured:
+        try:
+            res = _telegram_api("getWebhookInfo", {})
+            webhook_info = res.get("result") or {}
+        except Exception as exc:
+            webhook_info = {"error": str(exc)}
+    return {
+        "configured": is_configured,
+        "bot_username": bot_username,
+        "polling_active": _telegram_polling_active,
+        "last_poll_time": _telegram_last_poll_time,
+        "updates_processed": _telegram_updates_count,
+        "last_error": _telegram_last_error,
+        "webhook_info": webhook_info,
+    }
+
+
+@app.post("/api/telegram/restart-polling")
+def telegram_restart_polling(request: Request):
+    global _telegram_polling_active
+    if not TELEGRAM_BOT_TOKEN:
+        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN не задан")
+    _telegram_polling_active = False
+    time.sleep(1)
+    threading.Thread(target=_start_telegram_polling, daemon=True).start()
+    return {"status": "restarted", "polling_active": True}
 
 
 def _broadcast_route_to_telegram(cur, session_id: int, uid: int, request: Request) -> dict:
