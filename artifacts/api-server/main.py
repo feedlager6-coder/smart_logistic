@@ -3296,7 +3296,8 @@ def _telegram_driver_assignment(cur, chat_id: int, assignment_id: Optional[int] 
 def _telegram_next_data(cur, assignment_id: int) -> dict:
     cur.execute(
         """SELECT a.id, a.owner_id, a.driver_name, a.vehicle_name, a.route_yandex_url, a.session_id,
-                  a.route_index, s.result_json, s.date::text AS delivery_date,
+                  a.route_index, a.status AS assignment_status, s.result_json, s.date::text AS delivery_date,
+                  s.is_completed AS session_is_completed,
                   d.telegram_tracking_enabled, d.telegram_live_location_active,
                   d.telegram_live_location_until,
                   loc.lat, loc.lon, loc.captured_at
@@ -3316,7 +3317,7 @@ def _telegram_next_data(cur, assignment_id: int) -> dict:
     cur.execute(
         """SELECT id, visit_order, store_name, address, lat, lon, products,
                   quantity, actual_qty, actual_items_json, status, payment_method,
-                  payment_status, driver_comment, yandex_url
+                  payment_status, driver_comment, yandex_url, amount_rub, actual_amount_rub
              FROM route_executions WHERE assignment_id=%s ORDER BY visit_order""",
         (assignment_id,),
     )
@@ -3356,16 +3357,34 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: str, dispatcher: 
     username = (dispatcher.get("dispatcher_telegram_username") or "").strip().lstrip("@")
     phone = _normalize_driver_phone(dispatcher.get("dispatcher_phone") or "")
 
-    if not next_execution:
+    assignment_status = str(assignment.get("assignment_status") or assignment.get("status") or "").lower()
+    session_completed = bool(assignment.get("session_is_completed") or assignment.get("is_completed"))
+    is_completed = (not next_execution) or (assignment_status == "completed") or session_completed
+
+    if is_completed:
         driver_name = (assignment.get("driver_name") or "").strip()
-        greeting = f", {driver_name}" if driver_name else ""
+        greeting = f", {driver_name}" if driver_name and driver_name.lower() != "водитель" else ""
         vehicle_label = assignment.get("vehicle_name") or "Машина"
+        delivered_count = sum(1 for e in executions if e.get("status") in ("delivered", "partial"))
+        failed_count = sum(1 for e in executions if e.get("status") in ("failed", "rescheduled"))
+        collected_rub = sum(
+            float(e.get("actual_amount_rub") or e.get("amount_rub") or 0)
+            for e in executions
+            if e.get("status") in ("delivered", "partial") or e.get("payment_status") == "paid"
+        )
+        stats_lines = []
+        if route_points > 0:
+            stats_lines.append(f"📦 Доставлено: {delivered_count} из {route_points} точек")
+        if failed_count > 0:
+            stats_lines.append(f"⚠️ Возвраты / переносы: {failed_count}")
+        if collected_rub > 0:
+            stats_lines.append(f"💵 Собрано оплат: {collected_rub:,.0f} ₽".replace(",", " "))
+        stats_block = ("\n" + "\n".join(stats_lines) + "\n") if stats_lines else "\n"
         lines = [
-            "🏁 Рейс завершён!",
-            f"{vehicle_label} · Все {route_points} точек успешно обработаны",
-            "",
+            "🏁 Рейс официально завершён диспетчером!",
+            f"🚗 {vehicle_label} · Смена успешно закрыта{stats_block}",
             f"Спасибо за отличную работу и безопасный рейс{greeting}! 🚚✨",
-            "Все данные и отчёты приняты диспетчером. Хорошего отдыха!",
+            "Все данные и кассовые отчёты приняты. Хорошего отдыха!",
         ]
         completed_keyboard = []
         if username:
@@ -8094,6 +8113,99 @@ def telegram_webhook(request: Request, payload: dict):
         cur.close(); conn.close()
 
 
+def _broadcast_route_to_telegram(cur, session_id: int, uid: int, request: Request) -> dict:
+    if not TELEGRAM_BOT_TOKEN:
+        return {"sent": 0, "total": 0, "skipped": 0, "errors": ["Telegram Bot API не настроен"]}
+
+    cur.execute(
+        """SELECT a.id, a.route_index, a.driver_name, a.vehicle_name,
+                  a.driver_id, a.driver_phone, a.telegram_message_id, a.telegram_message_chat_id,
+                  d.name AS directory_driver_name, d.phone AS directory_phone,
+                  d.is_active, d.telegram_chat_id, d.telegram_username
+             FROM route_assignments a
+             LEFT JOIN drivers d ON d.id = a.driver_id
+            WHERE a.session_id = %s AND a.owner_id = %s
+            ORDER BY a.route_index""",
+        (session_id, uid),
+    )
+    assignments = [dict(row) for row in cur.fetchall()]
+    total_assignments = len(assignments)
+    sent = 0
+    skipped = 0
+    errors = []
+
+    for assignment in assignments:
+        assignment_id = int(assignment["id"])
+        driver_name = (assignment.get("directory_driver_name") or assignment.get("driver_name") or "Водитель").strip()
+        vehicle_label = (assignment.get("vehicle_name") or "Машина").strip()
+
+        # Step 1: Resolve chat_id directly
+        chat_id = assignment.get("telegram_chat_id") or assignment.get("telegram_message_chat_id")
+
+        # Step 2: Fallback lookup in drivers table by phone or name
+        if not chat_id:
+            driver_phone = _normalize_driver_phone(assignment.get("driver_phone") or assignment.get("directory_phone") or "")
+            if driver_phone:
+                cur.execute(
+                    """SELECT telegram_chat_id FROM drivers
+                        WHERE owner_id=%s AND regexp_replace(phone, '[^0-9]', '', 'g') = regexp_replace(%s, '[^0-9]', '', 'g')
+                          AND telegram_chat_id IS NOT NULL LIMIT 1""",
+                    (uid, driver_phone),
+                )
+                d_row = cur.fetchone()
+                if d_row and d_row.get("telegram_chat_id"):
+                    chat_id = d_row["telegram_chat_id"]
+
+            if not chat_id and driver_name and driver_name.lower() != "водитель":
+                cur.execute(
+                    """SELECT telegram_chat_id FROM drivers
+                        WHERE owner_id=%s AND LOWER(TRIM(name)) = LOWER(TRIM(%s))
+                          AND telegram_chat_id IS NOT NULL LIMIT 1""",
+                    (uid, driver_name),
+                )
+                d_row = cur.fetchone()
+                if d_row and d_row.get("telegram_chat_id"):
+                    chat_id = d_row["telegram_chat_id"]
+
+        if not assignment.get("driver_id") and not chat_id:
+            skipped += 1
+            errors.append(f"{driver_name} ({vehicle_label}): водитель не назначен")
+            continue
+        elif assignment.get("is_active") is False and not chat_id:
+            skipped += 1
+            errors.append(f"{driver_name} ({vehicle_label}): водитель архивирован")
+            continue
+        elif not chat_id:
+            skipped += 1
+            errors.append(f"{driver_name} ({vehicle_label}): нет Telegram chat_id")
+            continue
+
+        try:
+            _, driver_url = _issue_assignment_link(cur, assignment_id, request)
+            telegram_response = _telegram_render_assignment(
+                cur,
+                assignment_id,
+                int(chat_id),
+                request,
+                driver_url=driver_url,
+            )
+            telegram_message_id = (telegram_response.get("result") or {}).get("message_id") if isinstance(telegram_response, dict) else None
+            if telegram_message_id:
+                cur.execute(
+                    """UPDATE route_assignments
+                          SET telegram_message_id=%s, telegram_message_chat_id=%s, updated_at=NOW()
+                        WHERE id=%s""",
+                    (int(telegram_message_id), int(chat_id), assignment_id),
+                )
+            sent += 1
+        except Exception as exc:
+            skipped += 1
+            errors.append(f"{driver_name} ({vehicle_label}): ошибка Telegram — {str(exc)[:180]}")
+            logger.exception("Telegram route broadcast failed for assignment %s: %s", assignment_id, exc)
+
+    return {"sent": sent, "total": total_assignments, "skipped": skipped, "errors": errors}
+
+
 @app.post("/api/telegram/route-sessions/{session_id}/send")
 def send_route_to_telegram(session_id: int, request: Request):
     uid = get_user_id(request)
@@ -8101,59 +8213,16 @@ def send_route_to_telegram(session_id: int, request: Request):
         raise HTTPException(status_code=503, detail="Telegram Bot API не настроен: добавьте TELEGRAM_BOT_TOKEN")
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    sent = 0
-    skipped = 0
-    errors = []
     try:
-        cur.execute("SELECT result_json, date::text AS delivery_date FROM route_sessions WHERE id=%s AND owner_id=%s", (session_id, uid))
-        session = cur.fetchone()
-        if not session:
+        cur.execute("SELECT id FROM route_sessions WHERE id=%s AND owner_id=%s", (session_id, uid))
+        if not cur.fetchone():
             raise HTTPException(status_code=404, detail="Маршрут не найден")
-        result = json.loads(session.get("result_json") or "{}")
-        routes = result.get("routes") or []
-        cur.execute(
-            """SELECT a.id, a.route_index, a.driver_name, a.vehicle_name,
-                       a.driver_id, d.name AS directory_driver_name, d.is_active,
-                       d.telegram_chat_id
-                  FROM route_assignments a LEFT JOIN drivers d ON d.id=a.driver_id
-                 WHERE a.session_id=%s AND a.owner_id=%s
-                 ORDER BY a.route_index""",
-            (session_id, uid),
-        )
-        assignments = cur.fetchall()
-        total_assignments = len(assignments)
-        for assignment in assignments:
-            driver_name = assignment.get("directory_driver_name") or assignment.get("driver_name") or "Водитель"
-            reason = None
-            if not assignment.get("driver_id"):
-                reason = "водитель не назначен"
-            elif not assignment.get("is_active"):
-                reason = "водитель архивирован"
-            elif assignment.get("telegram_chat_id") is None:
-                reason = "водитель не подключён к Telegram (нет chat_id)"
-            if reason:
-                skipped += 1
-                errors.append(f"{driver_name}: {reason}")
-                continue
-            try:
-                _, driver_url = _issue_assignment_link(cur, int(assignment["id"]), request)
-                telegram_response = _telegram_render_assignment(cur, int(assignment["id"]), int(assignment["telegram_chat_id"]), request, driver_url=driver_url)
-                telegram_message_id = (telegram_response.get("result") or {}).get("message_id") if isinstance(telegram_response, dict) else None
-                if telegram_message_id:
-                    cur.execute(
-                        "UPDATE route_assignments SET telegram_message_id=%s, telegram_message_chat_id=%s, updated_at=NOW() WHERE id=%s",
-                        (int(telegram_message_id), int(assignment["telegram_chat_id"]), int(assignment["id"])),
-                    )
-                sent += 1
-            except Exception as exc:
-                conn.rollback()
-                skipped += 1
-                errors.append(f"{driver_name}: ошибка Telegram API — {str(exc)[:180]}")
-                logger.exception("Telegram route send failed for assignment %s: %s", assignment["id"], exc)
+        res = _broadcast_route_to_telegram(cur, session_id, uid, request)
         conn.commit()
-        return {"sent": sent, "total": total_assignments, "skipped": skipped, "errors": errors}
+        return res
     finally:
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()
 
 
 @app.get("/api/route/sessions/{id}")
@@ -9737,146 +9806,19 @@ def complete_route_session(session_id: int, request: Request):
         )
         conn.commit()
 
-        # Query all assignments for this session
-        cur.execute(
-            """SELECT a.id, a.route_index, a.driver_id, a.driver_name, a.driver_phone,
-                      a.vehicle_name, a.status, a.telegram_message_id, a.telegram_message_chat_id,
-                      d.name AS directory_driver_name, d.phone AS directory_phone,
-                      d.telegram_chat_id, d.telegram_username, d.is_active
-                 FROM route_assignments a
-                 LEFT JOIN drivers d ON d.id = a.driver_id
-                WHERE a.session_id = %s
-                ORDER BY a.route_index""",
-            (session_id,),
-        )
-        assignments = [dict(row) for row in cur.fetchall()]
-        total_assignments = len(assignments)
-        drivers_notified = 0
-        telegram_errors = []
-
-        if TELEGRAM_BOT_TOKEN:
-            dispatcher = get_company_settings(user_id=uid)
-            disp_username = (dispatcher.get("dispatcher_telegram_username") or "").strip().lstrip("@")
-            disp_phone = _normalize_driver_phone(dispatcher.get("dispatcher_phone") or "")
-
-            sent_chat_ids = set()
-
-            for assignment in assignments:
-                assignment_id = int(assignment["id"])
-                driver_name = (assignment.get("directory_driver_name") or assignment.get("driver_name") or "").strip()
-                vehicle_label = (assignment.get("vehicle_name") or "Машина").strip()
-
-                # Step 1: Resolve chat_id
-                chat_id = assignment.get("telegram_chat_id") or assignment.get("telegram_message_chat_id")
-
-                # Step 2: Fallback lookup in drivers table if not found directly
-                if not chat_id:
-                    driver_phone = _normalize_driver_phone(assignment.get("driver_phone") or assignment.get("directory_phone") or "")
-                    if driver_phone:
-                        cur.execute(
-                            """SELECT telegram_chat_id FROM drivers
-                                WHERE owner_id=%s AND regexp_replace(phone, '[^0-9]', '', 'g') = regexp_replace(%s, '[^0-9]', '', 'g')
-                                  AND telegram_chat_id IS NOT NULL LIMIT 1""",
-                            (uid, driver_phone),
-                        )
-                        d_row = cur.fetchone()
-                        if d_row and d_row.get("telegram_chat_id"):
-                            chat_id = d_row["telegram_chat_id"]
-
-                    if not chat_id and driver_name and driver_name.lower() != "водитель":
-                        cur.execute(
-                            """SELECT telegram_chat_id FROM drivers
-                                WHERE owner_id=%s AND LOWER(TRIM(name)) = LOWER(TRIM(%s))
-                                  AND telegram_chat_id IS NOT NULL LIMIT 1""",
-                            (uid, driver_name),
-                        )
-                        d_row = cur.fetchone()
-                        if d_row and d_row.get("telegram_chat_id"):
-                            chat_id = d_row["telegram_chat_id"]
-
-                if not chat_id:
-                    logger.info("Assignment %s (driver '%s') has no telegram_chat_id, skipping TG completion notification", assignment_id, driver_name)
-                    continue
-
-                # Step 3: Fetch stop execution stats
-                cur.execute(
-                    """SELECT COUNT(id) AS total_points,
-                              COUNT(id) FILTER (WHERE status IN ('delivered', 'partial')) AS delivered_points,
-                              COUNT(id) FILTER (WHERE status IN ('failed', 'rescheduled')) AS failed_points,
-                              COALESCE(SUM(actual_amount_rub) FILTER (WHERE status IN ('delivered', 'partial') OR payment_status = 'paid'), 0) AS total_collected_rub
-                         FROM route_executions
-                        WHERE assignment_id = %s""",
-                    (assignment_id,),
-                )
-                stats = cur.fetchone() or {}
-                total_pts = int(stats.get("total_points") or 0)
-                deliv_pts = int(stats.get("delivered_points") or 0)
-                fail_pts = int(stats.get("failed_points") or 0)
-                collected = float(stats.get("total_collected_rub") or 0)
-
-                try:
-                    greeting = f", {driver_name}" if driver_name and driver_name.lower() != "водитель" else ""
-                    summary_lines = []
-                    if total_pts > 0:
-                        summary_lines.append(f"📦 Доставлено: {deliv_pts} из {total_pts} точек")
-                    if fail_pts > 0:
-                        summary_lines.append(f"⚠️ Возвраты / переносы: {fail_pts}")
-                    if collected > 0:
-                        summary_lines.append(f"💵 Собрано оплат: {collected:,.0f} ₽".replace(",", " "))
-
-                    stats_block = ("\n" + "\n".join(summary_lines) + "\n") if summary_lines else "\n"
-
-                    text = (
-                        f"🏁 Рейс официально завершён диспетчером!\n"
-                        f"🚗 {vehicle_label} · Смена успешно закрыта{stats_block}\n"
-                        f"Спасибо за отличную работу и доставку{greeting}! 🚚✨\n"
-                        f"Все данные и кассовые отчёты приняты. Хорошего отдыха!"
-                    )
-
-                    keyboard = []
-                    if disp_username:
-                        keyboard.append([{"text": "☎️ Диспетчер", "url": f"https://t.me/{disp_username}"}])
-                    elif disp_phone:
-                        keyboard.append([{"text": "☎️ Диспетчер", "callback_data": f"tg:dispatcher:{assignment_id}"}])
-
-                    payload = {
-                        "chat_id": int(chat_id),
-                        "text": text,
-                    }
-                    if keyboard:
-                        payload["reply_markup"] = {"inline_keyboard": keyboard}
-
-                    if int(chat_id) not in sent_chat_ids:
-                        _telegram_api("sendMessage", payload)
-                        sent_chat_ids.add(int(chat_id))
-                        drivers_notified += 1
-
-                    # Update existing pinned / card message if present
-                    msg_id = assignment.get("telegram_message_id")
-                    if msg_id:
-                        try:
-                            _telegram_render_assignment(
-                                cur,
-                                assignment_id,
-                                int(chat_id),
-                                request,
-                                message_id=int(msg_id),
-                            )
-                        except Exception as card_err:
-                            logger.info("Telegram card edit skipped on completion for assignment %s: %s", assignment_id, card_err)
-
-                except Exception as exc:
-                    logger.warning("Telegram driver completion notification failed for assignment %s: %s", assignment_id, exc)
-                    telegram_errors.append(f"{vehicle_label} ({driver_name or 'Водитель'}): {exc}")
-
-            conn.commit()
+        # Broadcast completion card and notifications to all assigned drivers in Telegram
+        res = _broadcast_route_to_telegram(cur, session_id, uid, request)
+        conn.commit()
 
         return {
             "ok": True,
             "session_id": session_id,
-            "drivers_notified": drivers_notified,
-            "total_assignments": total_assignments,
-            "telegram_errors": telegram_errors,
+            "is_completed": True,
+            "sent": res.get("sent", 0),
+            "drivers_notified": res.get("sent", 0),
+            "total_assignments": res.get("total", 0),
+            "skipped": res.get("skipped", 0),
+            "telegram_errors": res.get("errors", []),
         }
     except HTTPException:
         conn.rollback()
