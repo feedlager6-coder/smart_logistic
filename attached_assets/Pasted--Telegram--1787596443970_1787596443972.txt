@@ -1,0 +1,89 @@
+Задача: Полностью исправить интеграцию Telegram-бота с базой данных водителей и получением рейсов в SmartRoute (FastAPI / PostgreSQL).
+
+Проблема:
+При переходе по персональной ссылке подключения водителя (https://t.me/<bot_username>?start=<token>) или при отправке номера телефона бот в Telegram отвечает:
+«⚠️ Ссылка подключения не найдена или срок её действия истёк. Вы можете быстро подключиться по номеру телефона...»
+А при отправке номера телефона бот отвечает:
+«⚠️ Водитель с номером ... не найден в базе SmartRoute».
+
+Необходимо выполнить следующие исправления:
+
+1. Схема базы данных (PostgreSQL) в init_db / миграциях:
+Убедиться, что в таблице `drivers` присутствуют и корректно создаются следующие поля:
+- telegram_chat_id BIGINT (именно BIGINT, так как Telegram chat_id может превышать 32-битный INTEGER)
+- telegram_username TEXT
+- telegram_connected_at TIMESTAMP
+- telegram_connect_token_hash TEXT
+- telegram_token_expires_at TIMESTAMP
+- telegram_tracking_enabled BOOLEAN DEFAULT FALSE
+- is_active BOOLEAN DEFAULT TRUE
+
+Добавить гарантированное выполнение ALTER TABLE при старте:
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_chat_id BIGINT;
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_username TEXT;
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_connected_at TIMESTAMP;
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_connect_token_hash TEXT;
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_token_expires_at TIMESTAMP;
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_tracking_enabled BOOLEAN DEFAULT FALSE;
+
+2. Генерация ссылки подключения водителя (POST /api/drivers/{driver_id}/telegram-connect):
+- Генерировать криптостойкий токен: raw_token = secrets.token_urlsafe(24)
+- Считать хэш: token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+- Сохранять в БД:
+  UPDATE drivers 
+  SET telegram_connect_token_hash = %s, 
+      telegram_token_expires_at = NOW() + INTERVAL '30 days',
+      updated_at = NOW()
+  WHERE id = %s AND is_active = TRUE
+- Возвращать ссылку вида: f"https://t.me/{bot_username}?start={raw_token}"
+- Важно: если getMe у бота не может получить bot_username, использовать значение из TELEGRAM_BOT_USERNAME в переменных окружения.
+
+3. Обработчик Telegram Webhook (POST /api/telegram/webhook):
+При получении входящего сообщения (/start <token>, кнопки «Поделиться контактом» или текстового ввода номера):
+а) Поиск по токену:
+- Извлечь raw_token из команды `/start <token>`.
+- Рассчитать token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest().
+- Искать водителя:
+  SELECT id, name, phone, owner_id FROM drivers
+  WHERE (telegram_connect_token_hash = %s OR telegram_connect_token_hash = %s)
+    AND is_active = TRUE
+    AND (telegram_token_expires_at IS NULL OR telegram_token_expires_at > NOW())
+  LIMIT 1;
+
+б) Поиск по номеру телефона (если по токену не найден):
+- Очистить входящий номер от всех нецифровых символов (re.sub(r'\D', '', phone)).
+- Взять последние 10 цифр (например, для 79285886584 и 89285886584 это 9285886584).
+- Искать в БД с нормализацией:
+  SELECT id, name, phone, owner_id FROM drivers
+  WHERE is_active = TRUE
+    AND (
+      REGEXP_REPLACE(phone, '[^0-9]', '', 'g') = %s
+      OR (LENGTH(REGEXP_REPLACE(phone, '[^0-9]', '', 'g')) >= 10 AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = %s)
+      OR phone LIKE %s
+    )
+  LIMIT 1;
+
+в) Поиск по уже привязанному telegram_chat_id:
+- Если водитель уже ранее нажимал старт:
+  SELECT id, name, phone, owner_id FROM drivers WHERE telegram_chat_id = %s AND is_active = TRUE LIMIT 1;
+
+г) При успешном нахождении водителя:
+- Привязать chat_id:
+  UPDATE drivers
+  SET telegram_chat_id = %s,
+      telegram_username = COALESCE(%s, telegram_username),
+      telegram_connected_at = NOW(),
+      updated_at = NOW()
+  WHERE id = %s;
+- Выполнить conn.commit().
+- Отправить водителю приветственное сообщение с постоянной кнопкой ReplyKeyboardMarkup:
+  {"keyboard": [[{"text": "🚚 Мой рейс"}], [{"text": "📍 Начать отслеживание"}]], "resize_keyboard": True}
+- Проверить наличие активных рейсов в таблице `route_assignments` и сразу отрендерить актуальный путевой лист с кнопками Яндекс.Карт и смены статусов.
+
+4. Проверка работы с базой данных в Railway/Replit:
+- Убедиться, что DATABASE_URL указывает на ту же базу данных, к которой обращается фронтенд при добавлении водителей в справочник.
+- Если переменная DATABASE_URL содержит 'postgres://', автоматически заменять на 'postgresql://' для корректной работы драйверов psycopg2/asyncpg.
+- Проверить, что webhook бота зарегистрирован на правильный публичный домен:
+  https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://<YOUR_DOMAIN>/api/telegram/webhook
+
+Проверь весь путь от создания водителя в интерфейсе до привязки в боте, убедись в отсутствии необработанных исключений и протестируй привязку по номеру 79285886584.

@@ -1776,7 +1776,11 @@ def _rebalance_max_stops(routes: list, full_matrix: list, max_stops: int,
 def _db_connect_kwargs() -> dict:
     """Parse DATABASE_URL into psycopg2 connect keyword arguments."""
     url = DATABASE_URL.strip()
-    if url.startswith("postgres://") or url.startswith("postgresql://"):
+    # Railway can still expose the legacy postgres:// scheme. Normalize it
+    # before handing the URL to urllib/psycopg2.
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
         parsed = urllib.parse.urlparse(url)
         return dict(
             host=parsed.hostname,
@@ -2044,6 +2048,7 @@ def init_db():
     """)
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_username TEXT")
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_chat_id BIGINT")
+    cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE")
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_connected_at TIMESTAMP")
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_connect_token_hash TEXT")
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_token_expires_at TIMESTAMP")
@@ -3254,7 +3259,7 @@ def _get_telegram_bot_username() -> str:
             return TELEGRAM_BOT_USERNAME
     except Exception as exc:
         logger.warning("Failed to auto-fetch Telegram bot username: %s", exc)
-    return TELEGRAM_BOT_USERNAME or "Smartroute_Drivers_bot"
+    return TELEGRAM_BOT_USERNAME
 
 
 def _telegram_connect_link(raw_token: str) -> str:
@@ -8001,6 +8006,7 @@ def archive_driver(driver_id: int, request: Request):
 
 
 @app.post("/api/drivers/{driver_id}/telegram-link")
+@app.post("/api/drivers/{driver_id}/telegram-connect")
 def create_telegram_link(driver_id: int, request: Request):
     uid = get_user_id(request)
     raw_token = secrets.token_urlsafe(24)
@@ -8249,15 +8255,15 @@ def _handle_telegram_update_internal(payload: dict, request: Optional[Request] =
         text_digits = re.sub(r"\D", "", text)
         is_phone_text = len(text_digits) >= 7 and not text.startswith("/")
 
-        is_start_cmd = text == "/start" or text.startswith("/start")
+        start_match = re.match(r"^/start(?:@\w+)?(?:\s+(.+))?$", text, flags=re.IGNORECASE)
+        is_start_cmd = bool(start_match)
         is_route_cmd = text in {"/route", "/myroute", "🚚 Мой рейс", "Мой рейс", "рейс", "Рейс"}
 
         if is_start_cmd or contact_phone or is_phone_text:
             raw_token = ""
-            if text.startswith("/start"):
-                # Handle /start <token> or /start@BotUsername <token>
-                parts = re.sub(r"^/start(?:@\w+)?\s*", "", text).strip()
-                raw_token = urllib.parse.unquote(parts) if parts else ""
+            if start_match:
+                # Handle /start, /start <token>, and /start@BotUsername <token>.
+                raw_token = urllib.parse.unquote((start_match.group(1) or "").strip())
 
             driver = None
 
@@ -8332,7 +8338,10 @@ def _handle_telegram_update_internal(payload: dict, request: Optional[Request] =
                     "chat_id": int(chat_id),
                     "text": welcome,
                     "reply_markup": {
-                        "keyboard": [[{"text": "🚚 Мой рейс"}]],
+                        "keyboard": [
+                            [{"text": "🚚 Мой рейс"}],
+                            [{"text": "📍 Начать отслеживание"}],
+                        ],
                         "resize_keyboard": True,
                     },
                 })
