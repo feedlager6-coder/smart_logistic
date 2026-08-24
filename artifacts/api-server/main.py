@@ -3293,6 +3293,65 @@ def _telegram_driver_assignment(cur, chat_id: int, assignment_id: Optional[int] 
     return cur.fetchone()
 
 
+def _ensure_assignment_executions(cur, assignment_id: int, session_id: int, route_index: int, uid: int) -> None:
+    cur.execute(
+        "SELECT COUNT(*) AS count FROM route_executions WHERE assignment_id=%s",
+        (assignment_id,),
+    )
+    if int((cur.fetchone() or {}).get("count") or 0) > 0:
+        return
+
+    cur.execute("SELECT result_json, date FROM route_sessions WHERE id=%s AND owner_id=%s", (session_id, uid))
+    session = cur.fetchone()
+    if not session or not session.get("result_json"):
+        return
+    result = json.loads(session["result_json"])
+    routes = result.get("routes") or []
+    if route_index < 0 or route_index >= len(routes):
+        return
+    route = routes[route_index]
+
+    delivery_date = result.get("delivery_date") or (str(session["date"]) if session.get("date") else None)
+    quantities_by_store: dict[int, float] = {}
+    amounts_by_store: dict[int, float] = {}
+    if delivery_date:
+        cur.execute(
+            """SELECT store_id, COALESCE(SUM(quantity), 0) AS quantity, COALESCE(SUM(amount_rub), 0) AS amount_rub
+                 FROM daily_orders
+                WHERE owner_id=%s AND delivery_date=%s AND store_id IS NOT NULL
+                GROUP BY store_id""",
+            (uid, delivery_date),
+        )
+        for row in cur.fetchall():
+            quantities_by_store[int(row["store_id"])] = float(row["quantity"] or 0)
+            amounts_by_store[int(row["store_id"])] = float(row["amount_rub"] or 0)
+
+    for stop in route.get("stores") or []:
+        cur.execute(
+            """INSERT INTO route_executions
+               (assignment_id, store_id, visit_order, store_name, address, lat, lon,
+                products, quantity, actual_qty, amount_rub, arrive_by, yandex_url,
+                payment_status)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (
+                assignment_id, stop.get("store_id"), stop.get("order", 0),
+                stop.get("store_name", ""), stop.get("address", ""),
+                stop.get("lat"), stop.get("lon"), stop.get("products", ""),
+                _execution_quantity(
+                    stop.get("quantity"),
+                    stop.get("products"),
+                    quantities_by_store.get(int(stop["store_id"]), 0)
+                    if stop.get("store_id") is not None
+                    else 0,
+                ),
+                0,
+                float(stop.get("amount_rub") or (amounts_by_store.get(int(stop["store_id"]), 0) if stop.get("store_id") is not None else 0)),
+                stop.get("arrive_by", ""),
+                stop.get("yandex_url", ""), "pending",
+            ),
+        )
+
+
 def _telegram_next_data(cur, assignment_id: int) -> dict:
     cur.execute(
         """SELECT a.id, a.owner_id, a.driver_name, a.vehicle_name, a.route_yandex_url, a.session_id,
@@ -3314,6 +3373,9 @@ def _telegram_next_data(cur, assignment_id: int) -> dict:
     assignment = cur.fetchone()
     if not assignment:
         raise ValueError("assignment not found")
+
+    _ensure_assignment_executions(cur, assignment_id, int(assignment["session_id"]), int(assignment["route_index"]), int(assignment["owner_id"]))
+
     cur.execute(
         """SELECT id, visit_order, store_name, address, lat, lon, products,
                   quantity, actual_qty, actual_items_json, status, payment_method,
@@ -3322,7 +3384,7 @@ def _telegram_next_data(cur, assignment_id: int) -> dict:
         (assignment_id,),
     )
     executions = [dict(row) for row in cur.fetchall()]
-    next_execution = next((item for item in executions if item.get("status") == "planned"), None)
+    next_execution = next((item for item in executions if item.get("status") not in ("delivered", "partial", "failed", "rescheduled")), None)
     eta = None
     if next_execution and assignment.get("lat") is not None and next_execution.get("lat") is not None:
         distance_km = haversine_meters(
@@ -3343,9 +3405,9 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: str, dispatcher: 
     assignment = data["assignment"]
     executions = data["executions"]
     next_execution = data["next"]
-    route_points = len(executions)
     result = json.loads(assignment.get("result_json") or "{}")
     route = (result.get("routes") or [{}])[int(assignment.get("route_index") or 0)] if result.get("routes") else {}
+    route_points = len(executions) if executions else len(route.get("stores") or [])
     total_km = round(float(route.get("total_km") or 0), 1)
     raw_navigation_urls = route.get("yandex_urls") or ([assignment.get("route_yandex_url")] if assignment.get("route_yandex_url") else [])
     navigation_urls = []
@@ -3359,7 +3421,8 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: str, dispatcher: 
 
     assignment_status = str(assignment.get("assignment_status") or assignment.get("status") or "").lower()
     session_completed = bool(assignment.get("session_is_completed") or assignment.get("is_completed"))
-    is_completed = (not next_execution) or (assignment_status == "completed") or session_completed
+    all_points_done = bool(executions) and (next_execution is None)
+    is_completed = session_completed or (assignment_status == "completed") or all_points_done
 
     if is_completed:
         driver_name = (assignment.get("driver_name") or "").strip()
@@ -8117,6 +8180,14 @@ def _broadcast_route_to_telegram(cur, session_id: int, uid: int, request: Reques
     if not TELEGRAM_BOT_TOKEN:
         return {"sent": 0, "total": 0, "skipped": 0, "errors": ["Telegram Bot API не настроен"]}
 
+    cur.execute("SELECT result_json FROM route_sessions WHERE id=%s AND owner_id=%s", (session_id, uid))
+    session = cur.fetchone()
+    if not session:
+        return {"sent": 0, "total": 0, "skipped": 0, "errors": ["Маршрут не найден"]}
+    result = json.loads(session.get("result_json") or "{}")
+    routes = result.get("routes") or []
+    total_routes = len(routes)
+
     cur.execute(
         """SELECT a.id, a.route_index, a.driver_name, a.vehicle_name,
                   a.driver_id, a.driver_phone, a.telegram_message_id, a.telegram_message_chat_id,
@@ -8129,10 +8200,20 @@ def _broadcast_route_to_telegram(cur, session_id: int, uid: int, request: Reques
         (session_id, uid),
     )
     assignments = [dict(row) for row in cur.fetchall()]
-    total_assignments = len(assignments)
+    total_count = max(total_routes, len(assignments))
     sent = 0
     skipped = 0
     errors = []
+
+    if total_count == 0:
+        return {"sent": 0, "total": 0, "skipped": 0, "errors": ["Маршруты не содержат рейсов для отправки"]}
+
+    assigned_indices = {int(a["route_index"]) for a in assignments if a.get("route_index") is not None}
+    for idx, r in enumerate(routes):
+        if idx not in assigned_indices:
+            skipped += 1
+            v_name = r.get("vehicle_name") or f"Рейс #{idx+1}"
+            errors.append(f"{v_name}: водитель не назначен")
 
     for assignment in assignments:
         assignment_id = int(assignment["id"])
@@ -8177,10 +8258,11 @@ def _broadcast_route_to_telegram(cur, session_id: int, uid: int, request: Reques
             continue
         elif not chat_id:
             skipped += 1
-            errors.append(f"{driver_name} ({vehicle_label}): нет Telegram chat_id")
+            errors.append(f"{driver_name} ({vehicle_label}): нет Telegram chat_id (водитель не подключён к боту)")
             continue
 
         try:
+            cur.execute("SAVEPOINT assign_sp")
             _, driver_url = _issue_assignment_link(cur, assignment_id, request)
             telegram_response = _telegram_render_assignment(
                 cur,
@@ -8197,13 +8279,15 @@ def _broadcast_route_to_telegram(cur, session_id: int, uid: int, request: Reques
                         WHERE id=%s""",
                     (int(telegram_message_id), int(chat_id), assignment_id),
                 )
+            cur.execute("RELEASE SAVEPOINT assign_sp")
             sent += 1
         except Exception as exc:
+            cur.execute("ROLLBACK TO SAVEPOINT assign_sp")
             skipped += 1
-            errors.append(f"{driver_name} ({vehicle_label}): ошибка Telegram — {str(exc)[:180]}")
+            errors.append(f"{driver_name} ({vehicle_label}): {str(exc)[:180]}")
             logger.exception("Telegram route broadcast failed for assignment %s: %s", assignment_id, exc)
 
-    return {"sent": sent, "total": total_assignments, "skipped": skipped, "errors": errors}
+    return {"sent": sent, "total": total_count, "skipped": skipped, "errors": errors}
 
 
 @app.post("/api/telegram/route-sessions/{session_id}/send")
