@@ -7980,7 +7980,7 @@ def create_telegram_link(driver_id: int, request: Request):
     try:
         cur.execute(
             """UPDATE drivers
-                  SET telegram_connect_token_hash=%s, telegram_token_expires_at=NOW()+INTERVAL '24 hours',
+                  SET telegram_connect_token_hash=%s, telegram_token_expires_at=NOW()+INTERVAL '30 days',
                       updated_at=NOW()
                 WHERE id=%s AND owner_id=%s AND is_active=TRUE
             RETURNING id, name, phone""",
@@ -7991,9 +7991,14 @@ def create_telegram_link(driver_id: int, request: Request):
             raise HTTPException(status_code=404, detail="Водитель не найден")
         conn.commit()
         link = _telegram_connect_link(raw_token)
-        message = f"Здравствуйте, {driver['name']}! Откройте ссылку и нажмите Start, чтобы получать рейсы SmartRoute в Telegram: {link}"
+        bot_uname = _get_telegram_bot_username()
+        tg_direct = f"tg://resolve?domain={bot_uname}&start={raw_token}"
+        share_url = f"https://t.me/share/url?url={urllib.parse.quote(link)}&text={urllib.parse.quote(f'Здравствуйте, {driver[\"name\"]}! Подключитесь к SmartRoute в Telegram для получения рейсов:')}"
+        message = f"Здравствуйте, {driver['name']}! Откройте ссылку и нажмите «Запустить» (Start), чтобы получать рейсы SmartRoute в Telegram:\n{link}"
         return {
             "telegram_link": link,
+            "tg_direct_url": tgDirect if 'tgDirect' in locals() else tg_direct,
+            "telegram_share_url": share_url,
             "message": message,
             "whatsapp_url": f"https://wa.me/{_normalize_driver_phone(driver['phone'])}?text={urllib.parse.quote(message)}",
             "sms_url": f"sms:{_normalize_driver_phone(driver['phone'])}?body={urllib.parse.quote(message)}",
@@ -8223,12 +8228,11 @@ def _handle_telegram_update_internal(payload: dict, request: Optional[Request] =
                 token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
                 cur.execute(
                     """UPDATE drivers
-                          SET telegram_chat_id=%s, telegram_username=%s, telegram_connected_at=NOW(),
-                              telegram_connect_token_hash=NULL, telegram_token_expires_at=NULL, updated_at=NOW()
+                          SET telegram_chat_id=%s, telegram_username=%s, telegram_connected_at=NOW(), updated_at=NOW()
                         WHERE (telegram_connect_token_hash=%s OR telegram_connect_token_hash=%s)
                           AND is_active=TRUE
                           AND (telegram_token_expires_at IS NULL OR telegram_token_expires_at > NOW())
-                    RETURNING id, name""",
+                    RETURNING id, name, phone""",
                     (int(chat_id), sender_username or None, token_hash, raw_token),
                 )
                 driver = cur.fetchone()
@@ -8239,41 +8243,56 @@ def _handle_telegram_update_internal(payload: dict, request: Optional[Request] =
                 if len(digits10) >= 7:
                     cur.execute(
                         """UPDATE drivers
-                              SET telegram_chat_id=%s, telegram_username=%s, telegram_connected_at=NOW(),
-                                  telegram_connect_token_hash=NULL, telegram_token_expires_at=NULL, updated_at=NOW()
+                              SET telegram_chat_id=%s, telegram_username=%s, telegram_connected_at=NOW(), updated_at=NOW()
                             WHERE is_active=TRUE 
                               AND (
                                 RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = %s
                                 OR REGEXP_REPLACE(phone, '[^0-9]', '', 'g') = %s
                                 OR phone LIKE %s
                               )
-                        RETURNING id, name""",
+                        RETURNING id, name, phone""",
                         (int(chat_id), sender_username or None, digits10, phone_to_match, f"%{digits10}%"),
                     )
                     driver = cur.fetchone()
 
+            if not driver and sender_username:
+                cur.execute(
+                    """UPDATE drivers
+                          SET telegram_chat_id=%s, telegram_connected_at=NOW(), updated_at=NOW()
+                        WHERE is_active=TRUE AND LOWER(telegram_username) = LOWER(%s)
+                    RETURNING id, name, phone""",
+                    (int(chat_id), sender_username),
+                )
+                driver = cur.fetchone()
+
             if not driver:
                 # Check if this chat_id is already bound
-                cur.execute("SELECT id, name FROM drivers WHERE telegram_chat_id=%s AND is_active=TRUE", (int(chat_id),))
+                cur.execute("SELECT id, name, phone FROM drivers WHERE telegram_chat_id=%s AND is_active=TRUE", (int(chat_id),))
                 driver = cur.fetchone()
 
             conn.commit()
             if driver:
-                welcome = f"👋 Добро пожаловать в SmartRoute, {driver['name']}!\n\n🟢 Вы успешно подключены к системе. Сюда будут приходить назначенные рейсы и путевые листы."
+                welcome = f"👋 Здравствуйте, {driver['name']}!\n\n🟢 Вы успешно подключены к SmartRoute как водитель ({driver.get('phone', '')})!\n\nСюда будут поступать ваши рейсы, путевые листы и точки доставок."
                 _telegram_api("sendMessage", {
                     "chat_id": int(chat_id),
                     "text": welcome,
-                    "reply_markup": {"remove_keyboard": True},
+                    "reply_markup": {
+                        "keyboard": [[{"text": "🚚 Мой рейс"}]],
+                        "resize_keyboard": True,
+                    },
                 })
                 # Check active assignment
-                assigned = _telegram_driver_assignment(cur, int(chat_id))
-                if assigned:
-                    _, driver_url = _issue_assignment_link(cur, int(assigned["assignment_id"]), request)
-                    conn.commit()
-                    _telegram_render_assignment(cur, int(assigned["assignment_id"]), int(chat_id), request, driver_url=driver_url)
+                try:
+                    assigned = _telegram_driver_assignment(cur, int(chat_id))
+                    if assigned:
+                        _, driver_url = _issue_assignment_link(cur, int(assigned["assignment_id"]), request)
+                        conn.commit()
+                        _telegram_render_assignment(cur, int(assigned["assignment_id"]), int(chat_id), request, driver_url=driver_url)
+                except Exception as assign_exc:
+                    logger.warning("Error rendering initial assignment: %s", assign_exc)
             else:
                 if raw_token:
-                    welcome = "⚠️ Ссылка подключения не найдена или срок её действия истёк.\n\nВы можете легко подключиться по номеру телефона — нажмите кнопку «📱 Поделиться контактом» ниже, отправьте номер сообщением (например, +7 928 000-00-00), либо запросите у диспетчера новую ссылку."
+                    welcome = "⚠️ Ссылка подключения не найдена или срок её действия истёк.\n\nВы можете быстро подключиться по номеру телефона — нажмите кнопку «📱 Поделиться контактом» ниже, отправьте номер сообщением (например, +7 928 000-00-00), либо запросите у диспетчера новую ссылку."
                 elif phone_to_match:
                     welcome = f"⚠️ Водитель с номером {phone_to_match} не найден в базе SmartRoute.\n\nПожалуйста, убедитесь, что диспетчер указал этот номер в разделе «Настройки → Водители», или перейдите по персональной ссылке от диспетчера."
                 else:
