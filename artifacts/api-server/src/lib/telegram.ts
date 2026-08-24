@@ -82,6 +82,8 @@ export async function getTelegramBotUsername(): Promise<string> {
 
 export async function generateDriverTelegramLink(driverId: number, baseUrl: string): Promise<{
   telegram_link: string;
+  tg_direct_url: string;
+  telegram_share_url: string;
   message: string;
   whatsapp_url: string;
   sms_url: string;
@@ -96,16 +98,22 @@ export async function generateDriverTelegramLink(driverId: number, baseUrl: stri
   
   driver.telegram_connect_token = rawToken;
   driver.telegram_connect_token_hash = tokenHash;
-  driver.telegram_token_expires_at = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+  // Keep token valid for 30 days so drivers can reconnect anytime
+  driver.telegram_token_expires_at = new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString();
   driver.updated_at = new Date().toISOString();
 
   const botUsername = await getTelegramBotUsername();
   const link = `https://t.me/${botUsername}?start=${rawToken}`;
+  const tgDirect = `tg://resolve?domain=${botUsername}&start=${rawToken}`;
+  const shareText = `Здравствуйте, ${driver.name}! Нажмите «Запустить» (Start) в боте, чтобы получать путевые листы SmartRoute:`;
+  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(shareText)}`;
   const message = `Здравствуйте, ${driver.name}! Откройте ссылку и нажмите «Запустить» (Start), чтобы получать рейсы SmartRoute в Telegram:\n${link}`;
   
   const rawPhone = driver.phone.replace(/\D/g, "");
   return {
     telegram_link: link,
+    tg_direct_url: tgDirect,
+    telegram_share_url: shareUrl,
     message,
     whatsapp_url: `https://wa.me/${rawPhone}?text=${encodeURIComponent(message)}`,
     sms_url: `sms:${rawPhone}?body=${encodeURIComponent(message)}`,
@@ -436,24 +444,30 @@ export async function processTelegramUpdate(payload: any, baseUrl: string = ""):
           (d.telegram_connect_token === cleanToken ||
             d.telegram_connect_token === rawToken ||
             d.telegram_connect_token_hash === tokenHash ||
-            d.telegram_connect_token_hash === cleanToken)
+            d.telegram_connect_token_hash === cleanToken ||
+            d.telegram_chat_id === chatId)
       );
 
       if (driver) {
         driver.telegram_chat_id = chatId;
         driver.telegram_username = username || driver.telegram_username || null;
         driver.telegram_connected_at = new Date().toISOString();
-        driver.telegram_connect_token = null;
-        driver.telegram_connect_token_hash = null;
         driver.updated_at = new Date().toISOString();
         dbStore.save();
 
-        const welcome = `👋 Добро пожаловать в SmartRoute, ${driver.name}!\n\n🟢 Вы успешно подключены к системе. Сюда будут приходить назначенные рейсы и путевые листы.`;
-        await telegramApi("sendMessage", {
-          chat_id: chatId,
-          text: welcome,
-          reply_markup: { remove_keyboard: true },
-        });
+        const welcome = `👋 Здравствуйте, ${driver.name}!\n\n🟢 Вы успешно подключены к SmartRoute как водитель!\n\nСюда будут поступать ваши рейсы, путевые листы и точки доставки.`;
+        try {
+          await telegramApi("sendMessage", {
+            chat_id: chatId,
+            text: welcome,
+            reply_markup: {
+              keyboard: [[{ text: "🚚 Мой рейс" }]],
+              resize_keyboard: true,
+            },
+          });
+        } catch (msgErr) {
+          console.warn("[Telegram] Error sending welcome msg:", msgErr);
+        }
 
         // Check if there is an active assignment for this driver right now
         const activeAssignment = dbStore.assignments
@@ -463,13 +477,17 @@ export async function processTelegramUpdate(payload: any, baseUrl: string = ""):
         if (activeAssignment) {
           const session = dbStore.routeSessions.find((s) => s.id === activeAssignment.session_id);
           if (session) {
-            await sendAssignmentToDriver(activeAssignment, session, baseUrl);
+            try {
+              await sendAssignmentToDriver(activeAssignment, session, baseUrl);
+            } catch (assignErr) {
+              console.warn("[Telegram] Error sending initial assignment:", assignErr);
+            }
           }
         }
         return { ok: true };
       } else {
         // Token not found / expired
-        const msg = `⚠️ Ссылка подключения не найдена или срок её действия истёк.\n\nВы можете легко подключиться по номеру телефона — нажмите кнопку «📱 Поделиться контактом» ниже, отправьте номер сообщением (например, +7 928 000-00-00), либо запросите у диспетчера новую ссылку.`;
+        const msg = `⚠️ Ссылка подключения не найдена или срок её действия истёк.\n\nВы можете быстро подключиться по номеру телефона — нажмите кнопку «📱 Поделиться контактом» ниже, отправьте номер сообщением (например, +7 928 000-00-00), либо запросите у диспетчера новую ссылку.`;
         await telegramApi("sendMessage", {
           chat_id: chatId,
           text: msg,
@@ -484,13 +502,26 @@ export async function processTelegramUpdate(payload: any, baseUrl: string = ""):
     }
 
     // /start without token
-    const existingDriver = findDriverByChatId(chatId);
-    if (existingDriver) {
-      const msg = `👋 С возвращением в SmartRoute, ${existingDriver.name}!\n\n🟢 Вы подключены к системе.\n\nКоманды:\n/route — Посмотреть текущий рейс\n/help — Справка`;
+    let driver = findDriverByChatId(chatId);
+    if (!driver && username) {
+      driver = dbStore.drivers.find((d) => d.is_active && d.telegram_username && d.telegram_username.toLowerCase() === username.toLowerCase());
+      if (driver) {
+        driver.telegram_chat_id = chatId;
+        driver.telegram_connected_at = new Date().toISOString();
+        driver.updated_at = new Date().toISOString();
+        dbStore.save();
+      }
+    }
+
+    if (driver) {
+      const msg = `👋 С возвращением в SmartRoute, ${driver.name}!\n\n🟢 Вы подключены к системе как водитель (${driver.phone}).\n\nИспользуйте кнопку «🚚 Мой рейс» или команду /route, чтобы посмотреть текущий путевой лист.`;
       await telegramApi("sendMessage", {
         chat_id: chatId,
         text: msg,
-        reply_markup: { remove_keyboard: true },
+        reply_markup: {
+          keyboard: [[{ text: "🚚 Мой рейс" }]],
+          resize_keyboard: true,
+        },
       });
       return { ok: true };
     }
@@ -596,8 +627,8 @@ export async function processTelegramUpdate(payload: any, baseUrl: string = ""):
     }
   }
 
-  // 4. Handle /route or /myroute
-  if (text === "/route" || text === "/myroute") {
+  // 4. Handle /route or /myroute or button '🚚 Мой рейс'
+  if (text === "/route" || text === "/myroute" || text === "🚚 Мой рейс" || text.toLowerCase().includes("мой рейс")) {
     const driver = findDriverByChatId(chatId);
     if (!driver) {
       await telegramApi("sendMessage", {

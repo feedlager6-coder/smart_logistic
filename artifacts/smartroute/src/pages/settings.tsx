@@ -90,22 +90,40 @@ function DriversPanel() {
     const link = telegramLinks[driver.id] || await createTelegramLink(driver);
     if (!link) return;
     await navigator.clipboard.writeText(link);
-    toast({ title: "Ссылка скопирована" });
+    toast({
+      title: "Персональная ссылка скопирована!",
+      description: "Отправьте её водителю. После перехода по ссылке и нажатия «Запустить» (Start) бот мгновенно привяжет водителя.",
+    });
   }
 
-  async function shareTelegramLink(driver: Driver, channel: "whatsapp" | "telegram") {
+  async function shareTelegramLink(driver: Driver, channel: "whatsapp" | "telegram_share" | "telegram_direct") {
     const link = telegramLinks[driver.id] || await createTelegramLink(driver);
     if (!link) return;
-    const text = `Здравствуйте, ${driver.name}! Откройте ссылку и нажмите Start, чтобы получать рейсы SmartRoute в Telegram: ${link}`;
-    const target = channel === "whatsapp"
-      ? `https://wa.me/${driver.phone.replace(/\D/g, "")}?text=${encodeURIComponent(text)}`
-      : link;
+    const text = `Здравствуйте, ${driver.name}! Откройте персональную ссылку и нажмите «Запустить» (Start), чтобы подключиться к SmartRoute и получать рейсы:\n${link}`;
+    let target = link;
+    if (channel === "whatsapp") {
+      target = `https://wa.me/${driver.phone.replace(/\D/g, "")}?text=${encodeURIComponent(text)}`;
+    } else if (channel === "telegram_share") {
+      target = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(`Здравствуйте, ${driver.name}! Подключитесь к SmartRoute:`)}`;
+    }
     window.open(target, "_blank", "noopener,noreferrer");
-    if (channel === "telegram") {
+    if (channel === "telegram_direct") {
       toast({
         title: "Telegram открыт",
-        description: `В диалоге с ботом нажмите «Запустить» (Start) или кнопку «Поделиться контактом» для завершения подключения.`,
+        description: `В диалоге с ботом нажмите «Запустить» (Start) для автоматической привязки.`,
       });
+    }
+  }
+
+  async function disconnectTelegram(driver: Driver) {
+    if (!window.confirm(`Отвязать Telegram от водителя «${driver.name}»?`)) return;
+    try {
+      const res = await fetch(`/api/drivers/${driver.id}/disconnect-telegram`, { method: "POST", credentials: "include" });
+      if (!res.ok) throw new Error("Не удалось отвязать Telegram");
+      await loadDrivers();
+      toast({ title: "Telegram отвязан" });
+    } catch (err: any) {
+      toast({ title: "Ошибка", description: err.message, variant: "destructive" });
     }
   }
 
@@ -181,17 +199,32 @@ function DriversPanel() {
               <div className="flex items-center gap-1.5 text-sm text-muted-foreground"><Phone className="w-3.5 h-3.5" />{driver.phone}</div>
               <div className="text-sm text-muted-foreground min-w-[130px]">{driver.vehicle_name || "Машина не указана"}</div>
               <div className="min-w-[190px] text-sm">
-                <div className={driver.telegram_connected ? "text-emerald-700" : "text-muted-foreground"}>
-                  {driver.telegram_connected ? "🟢 Подключён" : "⚪ Не подключён"}
+                <div className={driver.telegram_connected ? "text-emerald-700 dark:text-emerald-400 font-medium" : "text-muted-foreground"}>
+                  {driver.telegram_connected ? "🟢 Подключён к Telegram" : "⚪ Не подключён"}
                 </div>
+                {driver.telegram_username && <div className="text-xs text-sky-700 dark:text-sky-400">@{driver.telegram_username}</div>}
                 {driver.telegram_connected_at && <div className="text-xs text-muted-foreground">{new Date(driver.telegram_connected_at).toLocaleString("ru-RU")}</div>}
               </div>
-              <div className="flex flex-wrap items-center gap-1.5 w-full sm:w-auto sm:max-w-[360px]">
-                <Button size="sm" variant="outline" className="gap-1" onClick={() => copyTelegramLink(driver)} disabled={linkLoading === driver.id}><Copy className="w-3.5 h-3.5" />Скопировать ссылку</Button>
-                <Button size="sm" variant="ghost" title="Отправить ссылку в WhatsApp" onClick={() => shareTelegramLink(driver, "whatsapp")}><MessageCircle className="w-3.5 h-3.5 text-emerald-600" />WhatsApp</Button>
-                <Button size="sm" variant="ghost" title="Открыть Telegram" onClick={() => shareTelegramLink(driver, "telegram")}><Send className="w-3.5 h-3.5 text-sky-600" />Telegram</Button>
+              <div className="flex flex-wrap items-center gap-1.5 w-full sm:w-auto">
+                <Button size="sm" variant="outline" className="gap-1 text-xs" onClick={() => copyTelegramLink(driver)} disabled={linkLoading === driver.id}>
+                  <Copy className="w-3.5 h-3.5" />
+                  {linkLoading === driver.id ? "Подготовка…" : "Скопировать ссылку"}
+                </Button>
+                <Button size="sm" variant="ghost" className="gap-1 text-xs text-emerald-700 hover:text-emerald-800" title="Отправить персональную ссылку водителю в WhatsApp" onClick={() => shareTelegramLink(driver, "whatsapp")}>
+                  <MessageCircle className="w-3.5 h-3.5 text-emerald-600" />
+                  WhatsApp
+                </Button>
+                <Button size="sm" variant="ghost" className="gap-1 text-xs text-sky-700 hover:text-sky-800" title="Открыть бота в Telegram" onClick={() => shareTelegramLink(driver, "telegram_direct")}>
+                  <Send className="w-3.5 h-3.5 text-sky-600" />
+                  Открыть бота
+                </Button>
+                {driver.telegram_connected && (
+                  <Button size="sm" variant="ghost" className="text-xs text-amber-700 hover:text-amber-800" onClick={() => disconnectTelegram(driver)} title="Отвязать аккаунт Telegram">
+                    Отвязать TG
+                  </Button>
+                )}
               </div>
-              <Button size="sm" variant="ghost" className="text-destructive" onClick={() => archiveDriver(driver)}>Убрать</Button>
+              <Button size="sm" variant="ghost" className="text-destructive text-xs" onClick={() => archiveDriver(driver)}>Убрать</Button>
             </div>
           ))}
         </div>
