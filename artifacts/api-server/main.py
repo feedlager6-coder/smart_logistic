@@ -7993,11 +7993,13 @@ def create_telegram_link(driver_id: int, request: Request):
         link = _telegram_connect_link(raw_token)
         bot_uname = _get_telegram_bot_username()
         tg_direct = f"tg://resolve?domain={bot_uname}&start={raw_token}"
-        share_url = f"https://t.me/share/url?url={urllib.parse.quote(link)}&text={urllib.parse.quote(f'Здравствуйте, {driver[\"name\"]}! Подключитесь к SmartRoute в Telegram для получения рейсов:')}"
-        message = f"Здравствуйте, {driver['name']}! Откройте ссылку и нажмите «Запустить» (Start), чтобы получать рейсы SmartRoute в Telegram:\n{link}"
+        driver_name = driver["name"]
+        share_text = f"Здравствуйте, {driver_name}! Подключитесь к SmartRoute в Telegram для получения рейсов:"
+        share_url = f"https://t.me/share/url?url={urllib.parse.quote(link)}&text={urllib.parse.quote(share_text)}"
+        message = f"Здравствуйте, {driver_name}! Откройте ссылку и нажмите «Запустить» (Start), чтобы получать рейсы SmartRoute в Telegram:\n{link}"
         return {
             "telegram_link": link,
-            "tg_direct_url": tgDirect if 'tgDirect' in locals() else tg_direct,
+            "tg_direct_url": tg_direct,
             "telegram_share_url": share_url,
             "message": message,
             "whatsapp_url": f"https://wa.me/{_normalize_driver_phone(driver['phone'])}?text={urllib.parse.quote(message)}",
