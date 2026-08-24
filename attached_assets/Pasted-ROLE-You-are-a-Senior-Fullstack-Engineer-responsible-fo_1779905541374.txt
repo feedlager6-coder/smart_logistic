@@ -1,0 +1,105 @@
+ROLE: You are a Senior Fullstack Engineer responsible for stabilizing the SmartRoute production flow.
+
+IMPORTANT:
+Before ANY changes:
+
+1. Run:
+    git status
+2. Create a backup commit:
+    git add .
+    git commit -m “backup before stores/import fixes”
+3. Push backup:
+    git push origin main
+
+Only after successful backup continue.
+
+GOAL:
+Fix the broken Stores flow and improve location accuracy.
+
+CURRENT BUGS:
+
+* “Add Store” does nothing
+* “Download Template” returns 404
+* Full route flow cannot be tested
+* Coordinates are not supported yet
+
+TASKS:
+
+STEP 1 — Debug Stores Creation
+
+* Inspect frontend stores page
+* Inspect backend POST /api/stores
+* Check browser console and network requests
+* Fix the form submit flow
+* Ensure a created store appears immediately in UI
+
+STEP 2 — Fix Excel Template Download
+
+* Inspect /api/stores/template route
+* Fix frontend URL if incorrect
+* Ensure file downloads correctly
+* Add proper filename and content-type headers
+
+STEP 3 — Add Precise Location Support
+Add these fields everywhere:
+
+* latitude
+* longitude
+* map_url
+
+Update:
+
+* database models
+* Pydantic schemas
+* API endpoints
+* frontend forms
+* Excel import/export
+
+STEP 4 — Smart Geocoding Logic
+Implement logic:
+
+* if latitude/longitude are provided manually → use them
+* otherwise geocode from address automatically
+
+STEP 5 — Upgrade Excel Template
+Add columns:
+
+* store_name
+* address
+* city
+* latitude
+* longitude
+* map_url
+* unload_minutes
+* open_time
+* close_time
+
+STEP 6 — Validation
+
+* Prevent empty stores
+* Validate coordinates format
+* Validate working hours
+* Show frontend toast errors
+
+STEP 7 — Testing
+After implementation:
+
+* create stores manually
+* import Excel
+* build a route
+* verify result page works correctly
+
+STEP 8 — Documentation Update
+Update:
+
+* CHANGELOG.md
+* CONTEXT.md
+* API.md
+* ROADMAP.md
+
+At the end:
+
+1. Run tests
+2. Show summary of changes
+3. Create final git commit
+4. Push to GitHub automatically if possible

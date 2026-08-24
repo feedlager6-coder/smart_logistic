@@ -1,0 +1,359 @@
+Создай профессиональное веб-приложение 
+SmartRoute для оптимизации маршрутов 
+доставки дистрибьюторов.
+
+ВАЖНО: У меня уже есть рабочий Telegram бот
+с готовой логикой. Весь код логики 
+переиспользуй из него.
+
+=== ГОТОВЫЙ КОД ДЛЯ ПЕРЕИСПОЛЬЗОВАНИЯ ===
+
+1. АЛГОРИТМ ОПТИМИЗАЦИИ (OR-Tools):
+
+from ortools.constraint_solver import routing_enums_pb2
+from ortools.constraint_solver import pywrapcp
+import math
+
+def haversine_meters(c1, c2):
+    R = 6371000
+    lat1, lon1 = math.radians(c1[0]), math.radians(c1[1])
+    lat2, lon2 = math.radians(c2[0]), math.radians(c2[1])
+    dlat, dlon = lat2 - lat1, lon2 - lon1
+    a = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
+    return int(R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a)))
+
+def solve_vrp(all_coords, num_vehicles, capacities=None, demands=None):
+    """
+    all_coords: список (lat, lon), первый элемент — склад/старт
+    num_vehicles: количество машин
+    capacities: список грузоподъёмностей каждой машины (кг)
+    demands: список весов грузов для каждой точки (кроме старта)
+    Возвращает: список маршрутов, каждый маршрут — список индексов
+    """
+    n = len(all_coords)
+    matrix = [[haversine_meters(all_coords[i], all_coords[j]) 
+               for j in range(n)] for i in range(n)]
+    
+    manager = pywrapcp.RoutingIndexManager(n, num_vehicles, 0)
+    routing = pywrapcp.RoutingModel(manager)
+    
+    def distance_callback(from_index, to_index):
+        return matrix[manager.IndexToNode(from_index)][manager.IndexToNode(to_index)]
+    
+    transit_idx = routing.RegisterTransitCallback(distance_callback)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
+    
+    # Грузоподъёмность если указана
+    if capacities and demands:
+        def demand_callback(from_index):
+            node = manager.IndexToNode(from_index)
+            return demands[node] if node > 0 else 0
+        demand_idx = routing.RegisterUnaryTransitCallback(demand_callback)
+        routing.AddDimensionWithVehicleCapacity(
+            demand_idx, 0, capacities, True, "Capacity"
+        )
+    
+    params = pywrapcp.DefaultRoutingSearchParameters()
+    params.first_solution_strategy = (
+        routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    )
+    params.local_search_metaheuristic = (
+        routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    )
+    params.time_limit.seconds = 10
+    
+    solution = routing.SolveWithParameters(params)
+    
+    routes = []
+    if solution:
+        for v in range(num_vehicles):
+            route = []
+            idx = routing.Start(v)
+            while not routing.IsEnd(idx):
+                node = manager.IndexToNode(idx)
+                if node != 0:
+                    route.append(node)
+                idx = solution.Value(routing.NextVar(idx))
+            if route:
+                routes.append(route)
+    return routes
+
+2. ГЕОКОДЕР:
+
+import urllib.request
+import urllib.parse
+import json
+
+geocode_cache = {}
+
+def geocode_address(address, city=""):
+    query = f"{city} {address}".strip()
+    if query in geocode_cache:
+        return geocode_cache[query]
+    
+    url = (
+        "https://nominatim.openstreetmap.org/search?"
+        f"q={urllib.parse.quote(query)}"
+        "&format=json&limit=1&accept-language=ru"
+    )
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "smartroute-app-1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        if data:
+            lat = float(data[0]["lat"])
+            lon = float(data[0]["lon"])
+            geocode_cache[query] = (lat, lon)
+            return (lat, lon)
+    except Exception:
+        pass
+    return None
+
+3. РАСЧЁТ ЭКОНОМИИ:
+
+def calculate_savings(optimized_km, num_points, num_vehicles):
+    # Оценка расстояния без оптимизации
+    # (случайный порядок в среднем на 30% длиннее)
+    unoptimized_km = optimized_km * 1.3
+    saved_km = unoptimized_km - optimized_km
+    cost_per_km = 12  # рублей
+    saved_rub_day = round(saved_km * cost_per_km)
+    saved_rub_month = saved_rub_day * 30
+    return {
+        "optimized_km": round(optimized_km, 1),
+        "unoptimized_km": round(unoptimized_km, 1),
+        "saved_km": round(saved_km, 1),
+        "saved_rub_day": saved_rub_day,
+        "saved_rub_month": saved_rub_month
+    }
+
+4. ГЕНЕРАЦИЯ ССЫЛКИ ЯНДЕКС НАВИГАТОР:
+
+def yandex_nav_url(coords_list):
+    # coords_list: список (lat, lon) в порядке объезда
+    points = "~".join(f"{lat},{lon}" for lat, lon in coords_list)
+    return f"https://yandex.ru/maps/?rtext={points}&rtt=auto"
+
+=== ТЕХНИЧЕСКИЙ СТЕК ===
+
+Backend: Python FastAPI
+Frontend: React + TailwindCSS
+База данных: SQLite (через aiosqlite)
+Карты: Leaflet.js + OpenStreetMap
+Оптимизация: ortools (код выше)
+
+=== СТРУКТУРА БАЗЫ ДАННЫХ ===
+
+-- Компании
+CREATE TABLE companies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    city TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Магазины/точки доставки
+CREATE TABLE stores (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER,
+    name TEXT NOT NULL,
+    address TEXT NOT NULL,
+    lat REAL,
+    lon REAL,
+    time_window_from TEXT DEFAULT '09:00',
+    time_window_to TEXT DEFAULT '18:00',
+    unload_minutes INTEGER DEFAULT 15,
+    FOREIGN KEY (company_id) REFERENCES companies(id)
+);
+
+-- История маршрутов
+CREATE TABLE route_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER,
+    date TEXT,
+    num_vehicles INTEGER,
+    total_km REAL,
+    saved_km REAL,
+    saved_rub INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+=== СТРАНИЦЫ ПРИЛОЖЕНИЯ ===
+
+1. ГЛАВНАЯ СТРАНИЦА "/"
+Красивый лендинг с описанием продукта:
+- Заголовок: "SmartRoute — умная логистика для вашего бизнеса"
+- Три карточки с преимуществами:
+  * Экономия до 30% на топливе
+  * Оптимизация для 1-50 машин
+  * Учёт грузоподъёмности и временных окон
+- Кнопка "Войти в систему"
+
+2. СТРАНИЦА "/stores" — БАЗА МАГАЗИНОВ
+Таблица с колонками:
+Название | Адрес | Статус геокодинга | Временное окно | Время разгрузки | Действия
+
+Кнопки вверху:
+- "Добавить магазин" (форма)
+- "Импорт из Excel" 
+  Принимает .xlsx с колонками:
+  Название, Адрес, Временное окно от, до, Время разгрузки
+  После загрузки автоматически геокодирует все адреса
+  Показывает прогресс бар геокодирования
+
+Статус геокодинга:
+✅ Найден (зелёный)
+⏳ В процессе (жёлтый)  
+❌ Не найден (красный, можно исправить вручную)
+
+3. СТРАНИЦА "/route" — НОВЫЙ МАРШРУТ
+Левая панель (40%):
+- Заголовок "Выберите магазины для доставки сегодня"
+- Поиск по названию
+- Список всех магазинов с чекбоксами
+- "Выбрать все" / "Снять все"
+- Счётчик: "Выбрано: 23 магазина"
+
+Правая панель (60%):
+- Поле "Количество машин" (число 1-50)
+- Динамический список машин:
+  Машина 1: Водитель [поле ввода имени], 
+             Грузоподъёмность [поле, кг]
+  Машина 2: ...
+  (добавляется автоматически по количеству)
+- Чекбокс "Учитывать временные окна магазинов"
+- Чекбокс "Учитывать время разгрузки"
+- Большая синяя кнопка "🚀 Построить маршруты"
+- Статус: "⏳ Оптимизирую маршруты..." (во время расчёта)
+
+4. СТРАНИЦА "/result" — РЕЗУЛЬТАТЫ
+Верхняя панель с итогами:
+┌─────────────────────────────────────────┐
+│ 📏 Общий пробег: 234 км                │
+│ 💰 Экономия: 67 км = 8 040 руб/день    │
+│ 📅 В месяц: ~241 200 руб               │
+└─────────────────────────────────────────┘
+
+Карта Leaflet (высота 400px):
+- Каждая машина своим цветом
+- Маркеры с номерами точек
+- Линии маршрутов
+- Склад отмечен звездой
+
+Под картой — карточки маршрутов:
+┌─────────────────────────────────────────┐
+│ 🚗 Машина 1 — Иванов                   │
+│ 12 точек • 45 км • ~1ч 30мин           │
+│                                         │
+│ 1. Магазин Пятёрочка — ул.Ленина 5    │
+│    ⏰ Приехать до 10:00                 │
+│ 2. Магазин Магнит — ул.Гагарина 12    │
+│ ...                                     │
+│                                         │
+│ [🗺 Открыть в Яндекс Навигаторе]       │
+│ [📱 Отправить в WhatsApp]              │
+└─────────────────────────────────────────┘
+
+Кнопки внизу страницы:
+[📄 Скачать PDF отчёт] [🔄 Новый маршрут]
+
+5. СТРАНИЦА "/analytics" — АНАЛИТИКА
+Графики (используй Chart.js):
+- Пробег по дням (линейный график)
+- Экономия в рублях по месяцам (столбчатый)
+- Топ-10 самых частых магазинов (горизонтальный бар)
+
+Карточки с итогами за месяц:
+- Всего маршрутов построено
+- Сэкономлено км
+- Сэкономлено рублей
+- Среднее количество точек в маршруте
+
+=== API ENDPOINTS (FastAPI) ===
+
+GET  /api/stores          — список магазинов
+POST /api/stores          — добавить магазин
+POST /api/stores/import   — импорт из Excel (multipart)
+DELETE /api/stores/{id}   — удалить магазин
+
+POST /api/route/build     — построить маршруты
+Тело запроса:
+{
+  "store_ids": [1,2,3,4,5],
+  "vehicles": [
+    {"name": "Иванов", "capacity_kg": 1500},
+    {"name": "Петров", "capacity_kg": 1000}
+  ],
+  "use_time_windows": true,
+  "use_unload_time": true
+}
+Ответ:
+{
+  "routes": [
+    {
+      "vehicle_name": "Иванов",
+      "stores": [...],
+      "total_km": 45.2,
+      "yandex_url": "https://...",
+      "whatsapp_url": "https://wa.me/?text=..."
+    }
+  ],
+  "savings": {
+    "saved_km": 23.1,
+    "saved_rub_day": 8040,
+    "saved_rub_month": 241200
+  }
+}
+
+GET  /api/analytics/daily   — статистика по дням
+GET  /api/analytics/monthly — статистика по месяцам
+
+=== ДИЗАЙН ===
+
+Цветовая схема:
+- Основной: #2563EB (синий)
+- Акцент: #10B981 (зелёный для экономии)
+- Фон: #F8FAFC
+- Карточки: белые с тенью
+
+Шрифт: Inter (подключить через Google Fonts)
+
+Навигация (sidebar слева):
+🏠 Главная
+🏪 База магазинов  
+🗺 Новый маршрут
+📊 Аналитика
+
+=== REQUIREMENTS ===
+
+fastapi
+uvicorn
+ortools
+aiosqlite
+openpyxl
+python-multipart
+httpx
+
+=== ВАЖНЫЕ ДЕТАЛИ ===
+
+1. Геокодирование при импорте делать асинхронно
+   с задержкой 1 секунда между запросами
+   чтобы не превысить лимит Nominatim
+
+2. WhatsApp ссылка для водителя:
+   Текст: "Твой маршрут на сегодня:\n1. Магазин...\n[ссылка Яндекс]"
+   URL: https://wa.me/?text={encoded_text}
+
+3. Маршрут на карте рисовать через
+   Leaflet Polyline с разными цветами
+   для каждой машины
+
+4. Во время расчёта маршрута показывать
+   анимированный спиннер и текст
+   "Оптимизирую маршруты для X машин..."
+
+5. PDF отчёт генерировать через
+   браузерную печать window.print()
+   со специальным CSS для печати

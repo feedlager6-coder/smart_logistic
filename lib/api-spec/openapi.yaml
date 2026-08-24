@@ -1,0 +1,953 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.2.0
+  description: SmartRoute API - Delivery route optimization
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: auth
+    description: Authentication (JWT via HttpOnly cookie)
+  - name: stores
+    description: Store management
+  - name: routes
+    description: Route optimization
+  - name: analytics
+    description: Analytics and statistics
+  - name: settings
+    description: Company cost model settings
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: smartroute_token
+
+security:
+  - cookieAuth: []
+
+paths:
+  /auth/login:
+    post:
+      operationId: authLogin
+      tags: [auth]
+      summary: Log in
+      description: >
+        Authenticate with username and password (form-encoded).
+        On success sets an HttpOnly JWT cookie (`smartroute_token`).
+        This endpoint does NOT require authentication.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                  example: admin
+                password:
+                  type: string
+                  format: password
+      responses:
+        "200":
+          description: Login successful — JWT cookie set
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  username:
+                    type: string
+        "401":
+          description: Invalid credentials
+        "422":
+          description: Missing username or password
+
+  /auth/logout:
+    post:
+      operationId: authLogout
+      tags: [auth]
+      summary: Log out
+      description: Clears the JWT cookie.
+      responses:
+        "200":
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+
+  /auth/me:
+    get:
+      operationId: authMe
+      tags: [auth]
+      summary: Current user
+      description: Returns the currently authenticated user info.
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  username:
+                    type: string
+        "401":
+          description: Not authenticated
+
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /stores:
+    get:
+      operationId: listStores
+      tags: [stores]
+      summary: List all stores
+      responses:
+        "200":
+          description: List of stores
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Store"
+    post:
+      operationId: createStore
+      tags: [stores]
+      summary: Create a store
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StoreInput"
+      responses:
+        "201":
+          description: Created store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Store"
+
+  /stores/template:
+    get:
+      operationId: getStoresTemplate
+      tags: [stores]
+      summary: Download Excel template for store import
+      responses:
+        "200":
+          description: Excel template file (.xlsx)
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+
+  /stores/import:
+    post:
+      operationId: importStores
+      tags: [stores]
+      summary: Import stores from Excel file
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+              required:
+                - file
+      responses:
+        "200":
+          description: Import result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportResult"
+
+  /stores/{id}:
+    get:
+      operationId: getStore
+      tags: [stores]
+      summary: Get a store by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Store"
+        "404":
+          description: Not found
+    put:
+      operationId: updateStore
+      tags: [stores]
+      summary: Update a store
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StoreUpdate"
+      responses:
+        "200":
+          description: Updated store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Store"
+    delete:
+      operationId: deleteStore
+      tags: [stores]
+      summary: Delete a store
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /stores/{id}/geocode:
+    post:
+      operationId: geocodeStore
+      tags: [stores]
+      summary: Geocode a store address
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Geocoded store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Store"
+
+  /route/build:
+    post:
+      operationId: buildRoute
+      tags: [routes]
+      summary: Build optimized delivery routes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RouteRequest"
+      responses:
+        "200":
+          description: Optimized routes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteResult"
+
+  /route/sessions:
+    get:
+      operationId: listRouteSessions
+      tags: [routes]
+      summary: List route sessions (paginated)
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: Paginated list of route sessions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteSessionList"
+
+  /route/sessions/{id}:
+    get:
+      operationId: getRouteSession
+      tags: [routes]
+      summary: Get a saved route session by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Full route session data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteResult"
+        "404":
+          description: Not found
+    delete:
+      operationId: deleteRouteSession
+      tags: [routes]
+      summary: Delete a route session by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        "404":
+          description: Not found
+
+  /settings:
+    get:
+      operationId: getSettings
+      tags: [settings]
+      summary: Get company cost model settings
+      responses:
+        "200":
+          description: Current settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanySettings"
+    put:
+      operationId: updateSettings
+      tags: [settings]
+      summary: Update company cost model settings (cost_per_km auto-calculated)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompanySettingsInput"
+      responses:
+        "200":
+          description: Updated settings with calculated cost_per_km
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanySettings"
+        "400":
+          description: Invalid input (non-positive values)
+
+  /analytics/summary:
+    get:
+      operationId: getAnalyticsSummary
+      tags: [analytics]
+      summary: Monthly analytics summary
+      responses:
+        "200":
+          description: Analytics summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyticsSummary"
+
+  /analytics/daily:
+    get:
+      operationId: getAnalyticsDaily
+      tags: [analytics]
+      summary: Daily analytics (default last 30 days, or custom range)
+      parameters:
+        - name: date_from
+          in: query
+          schema:
+            type: string
+            description: "Start date YYYY-MM-DD (inclusive)"
+        - name: date_to
+          in: query
+          schema:
+            type: string
+            description: "End date YYYY-MM-DD (inclusive)"
+      responses:
+        "200":
+          description: Daily stats
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DailyStat"
+
+  /analytics/monthly:
+    get:
+      operationId: getAnalyticsMonthly
+      tags: [analytics]
+      summary: Monthly analytics (default last 12 months, or custom range)
+      parameters:
+        - name: date_from
+          in: query
+          schema:
+            type: string
+            description: "Start date YYYY-MM-DD (inclusive)"
+        - name: date_to
+          in: query
+          schema:
+            type: string
+            description: "End date YYYY-MM-DD (inclusive)"
+      responses:
+        "200":
+          description: Monthly stats
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/MonthlyStat"
+
+  /analytics/vehicle-load:
+    get:
+      operationId: getAnalyticsVehicleLoad
+      tags: [analytics]
+      summary: Average points per vehicle per day
+      parameters:
+        - name: date_from
+          in: query
+          schema:
+            type: string
+        - name: date_to
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Vehicle load data
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/VehicleLoadItem"
+
+  /analytics/top-stores:
+    get:
+      operationId: getTopStores
+      tags: [analytics]
+      summary: Top 10 most frequently visited stores
+      responses:
+        "200":
+          description: Top stores
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TopStore"
+
+components:
+  schemas:
+    CompanySettings:
+      type: object
+      properties:
+        fuel_price:
+          type: number
+          description: "Цена топлива, ₽/литр"
+        fuel_consumption:
+          type: number
+          description: "Расход топлива, л/100 км"
+        cost_per_km:
+          type: number
+          description: "Рассчитанная стоимость км = fuel_price × consumption / 100"
+      required:
+        - fuel_price
+        - fuel_consumption
+        - cost_per_km
+
+    CompanySettingsInput:
+      type: object
+      properties:
+        fuel_price:
+          type: number
+          description: "Цена топлива, ₽/литр"
+        fuel_consumption:
+          type: number
+          description: "Расход топлива, л/100 км"
+      required:
+        - fuel_price
+        - fuel_consumption
+
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    Store:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        address:
+          type: string
+        city:
+          type: string
+          description: City name
+        phone:
+          type: string
+          description: Contact phone
+        client:
+          type: string
+          description: Client / counterparty name
+        lat:
+          type: ["number", "null"]
+        lon:
+          type: ["number", "null"]
+        map_url:
+          type: ["string", "null"]
+          description: Direct map link (Yandex/Google/2GIS)
+        geocode_status:
+          type: string
+          enum: [found, pending, not_found]
+        time_window_from:
+          type: string
+        time_window_to:
+          type: string
+        unload_minutes:
+          type: integer
+        created_at:
+          type: string
+      required:
+        - id
+        - name
+        - address
+        - geocode_status
+        - time_window_from
+        - time_window_to
+        - unload_minutes
+
+    StoreInput:
+      type: object
+      properties:
+        name:
+          type: string
+        address:
+          type: ["string", "null"]
+          description: Street address (optional if yandex_url is provided)
+        city:
+          type: ["string", "null"]
+          description: City name (prepended to address for geocoding)
+        phone:
+          type: ["string", "null"]
+          description: Contact phone
+        client:
+          type: ["string", "null"]
+          description: Client / counterparty name
+        yandex_url:
+          type: ["string", "null"]
+          description: Yandex Maps link — coords extracted automatically
+        lat:
+          type: ["number", "null"]
+          description: Latitude (highest priority, skips geocoding)
+        lon:
+          type: ["number", "null"]
+          description: Longitude (highest priority, skips geocoding)
+        map_url:
+          type: ["string", "null"]
+          description: Direct map link stored for reference
+        time_window_from:
+          type: string
+        time_window_to:
+          type: string
+        unload_minutes:
+          type: integer
+      required:
+        - name
+
+    StoreUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        address:
+          type: string
+        city:
+          type: ["string", "null"]
+        phone:
+          type: ["string", "null"]
+        client:
+          type: ["string", "null"]
+        yandex_url:
+          type: ["string", "null"]
+        lat:
+          type: ["number", "null"]
+        lon:
+          type: ["number", "null"]
+        map_url:
+          type: ["string", "null"]
+        time_window_from:
+          type: string
+        time_window_to:
+          type: string
+        unload_minutes:
+          type: integer
+
+    ImportResult:
+      type: object
+      properties:
+        total:
+          type: integer
+        imported:
+          type: integer
+        failed:
+          type: integer
+        stores:
+          type: array
+          items:
+            $ref: "#/components/schemas/Store"
+      required:
+        - total
+        - imported
+        - failed
+        - stores
+
+    RouteRequest:
+      type: object
+      properties:
+        store_ids:
+          type: array
+          items:
+            type: integer
+        vehicles:
+          type: array
+          items:
+            $ref: "#/components/schemas/VehicleInput"
+        depot_lat:
+          type: ["number", "null"]
+        depot_lon:
+          type: ["number", "null"]
+        use_time_windows:
+          type: boolean
+        use_unload_time:
+          type: boolean
+        max_stops_per_vehicle:
+          type: ["integer", "null"]
+          description: "Мягкий лимит точек на машину. Рекомендуется 24 при дисбалансе (ratio >3x). Параметр опциональный — null = без ограничения."
+      required:
+        - store_ids
+        - vehicles
+
+    VehicleInput:
+      type: object
+      properties:
+        name:
+          type: string
+        capacity_kg:
+          type: ["integer", "null"]
+        capacity_m3:
+          type: ["number", "null"]
+          description: "Объём кузова (м³). Независимое ограничение от kg. null = без ограничения по объёму."
+        average_speed:
+          type: ["number", "null"]
+          description: Average speed in km/h for this vehicle (overrides global default)
+      required:
+        - name
+
+    RouteResult:
+      type: object
+      properties:
+        session_id:
+          type: ["integer", "null"]
+        routes:
+          type: array
+          items:
+            $ref: "#/components/schemas/VehicleRoute"
+        savings:
+          $ref: "#/components/schemas/Savings"
+        total_km:
+          type: number
+        matrix_source:
+          type: string
+          enum: [graphhopper, osrm, haversine, mixed]
+          description: Distance matrix source used for optimization (mixed = combination of sources per cluster)
+        geocoder_used:
+          type: string
+          enum: [yandex, nominatim]
+          description: Geocoding service used for address resolution
+      required:
+        - routes
+        - savings
+        - total_km
+
+    VehicleRoute:
+      type: object
+      properties:
+        vehicle_name:
+          type: string
+        stores:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteStop"
+        total_km:
+          type: number
+        estimated_minutes:
+          type: integer
+        yandex_url:
+          type: string
+          description: "Первая ссылка Яндекс.Навигатора (первые 20 точек). Для совместимости."
+        yandex_urls:
+          type: array
+          items:
+            type: string
+          description: "Список ссылок Яндекс.Навигатора — по одной на каждые 20 точек маршрута."
+        whatsapp_url:
+          type: string
+      required:
+        - vehicle_name
+        - stores
+        - total_km
+        - estimated_minutes
+        - yandex_url
+        - yandex_urls
+        - whatsapp_url
+
+    RouteStop:
+      type: object
+      properties:
+        order:
+          type: integer
+        store_id:
+          type: integer
+        store_name:
+          type: string
+        address:
+          type: string
+        lat:
+          type: ["number", "null"]
+        lon:
+          type: ["number", "null"]
+        arrive_by:
+          type: ["string", "null"]
+      required:
+        - order
+        - store_id
+        - store_name
+        - address
+
+    Savings:
+      type: object
+      properties:
+        optimized_km:
+          type: number
+        unoptimized_km:
+          type: number
+        saved_km:
+          type: number
+        saved_pct:
+          type: integer
+        saved_fuel_l:
+          type: number
+        saved_fuel_cost_rub:
+          type: integer
+          description: "Экономия только на топливе, руб. (saved_fuel_l × цена дизеля)"
+        saved_rub_day:
+          type: integer
+          description: "Полная экономия в день, руб. (топливо + водитель + обслуживание, 31 руб/км × ROAD_FACTOR=1.4)"
+        saved_rub_month:
+          type: integer
+          description: "Полная экономия в месяц = saved_rub_day × 30"
+      required:
+        - optimized_km
+        - unoptimized_km
+        - saved_km
+        - saved_pct
+        - saved_fuel_l
+        - saved_fuel_cost_rub
+        - saved_rub_day
+        - saved_rub_month
+
+    AnalyticsSummary:
+      type: object
+      properties:
+        total_routes:
+          type: integer
+        total_km:
+          type: number
+        saved_km:
+          type: number
+        saved_rub:
+          type: integer
+        avg_points_per_route:
+          type: number
+      required:
+        - total_routes
+        - total_km
+        - saved_km
+        - saved_rub
+        - avg_points_per_route
+
+    DailyStat:
+      type: object
+      properties:
+        date:
+          type: string
+        routes:
+          type: integer
+        total_km:
+          type: number
+        saved_km:
+          type: number
+        saved_rub:
+          type: integer
+      required:
+        - date
+        - routes
+        - total_km
+        - saved_km
+        - saved_rub
+
+    MonthlyStat:
+      type: object
+      properties:
+        month:
+          type: string
+        routes:
+          type: integer
+        total_km:
+          type: number
+        saved_rub:
+          type: integer
+      required:
+        - month
+        - routes
+        - total_km
+        - saved_rub
+
+    TopStore:
+      type: object
+      properties:
+        store_id:
+          type: integer
+        store_name:
+          type: string
+        visit_count:
+          type: integer
+      required:
+        - store_id
+        - store_name
+        - visit_count
+
+    RouteSessionItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        date:
+          type: string
+        num_vehicles:
+          type: integer
+        total_km:
+          type: number
+        saved_km:
+          type: number
+        saved_rub:
+          type: integer
+        num_points:
+          type: integer
+        created_at:
+          type: ["string", "null"]
+      required:
+        - id
+        - date
+        - num_vehicles
+        - total_km
+        - saved_km
+        - saved_rub
+        - num_points
+
+    RouteSessionList:
+      type: object
+      properties:
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteSessionItem"
+      required:
+        - total
+        - page
+        - page_size
+        - items
+
+    VehicleLoadItem:
+      type: object
+      properties:
+        date:
+          type: string
+        avg_points_per_vehicle:
+          type: number
+        total_points:
+          type: integer
+        total_vehicles:
+          type: integer
+      required:
+        - date
+        - avg_points_per_vehicle
+        - total_points
+        - total_vehicles
