@@ -3173,15 +3173,29 @@ def whatsapp_driver_url(
 
 
 def _public_app_url(request: Request) -> str:
-    """Resolve the public origin used inside driver links shared in WhatsApp."""
+    """Resolve the public origin used inside driver links shared in WhatsApp and Telegram."""
     configured = PUBLIC_APP_URL
     if configured:
-        return configured
+        return configured.rstrip("/")
+    origin = request.headers.get("origin")
+    if origin and "://" in origin:
+        parsed_origin = urllib.parse.urlparse(origin)
+        if parsed_origin.scheme and parsed_origin.netloc and "localhost" not in parsed_origin.netloc and "127.0.0.1" not in parsed_origin.netloc:
+            return origin.rstrip("/")
+    referer = request.headers.get("referer")
+    if referer and "://" in referer:
+        parsed_ref = urllib.parse.urlparse(referer)
+        if parsed_ref.scheme and parsed_ref.netloc and "localhost" not in parsed_ref.netloc and "127.0.0.1" not in parsed_ref.netloc:
+            return f"{parsed_ref.scheme}://{parsed_ref.netloc}"
     forwarded_host = request.headers.get("x-forwarded-host") or request.headers.get("host")
     forwarded_proto = request.headers.get("x-forwarded-proto") or request.url.scheme
     if forwarded_host:
-        return f"{forwarded_proto.split(',')[0].strip()}://{forwarded_host.split(',')[0].strip()}"
-    return str(request.base_url).rstrip("/")
+        host = forwarded_host.split(",")[0].strip()
+        proto = forwarded_proto.split(",")[0].strip()
+        if "localhost" not in host and "127.0.0.1" not in host:
+            return f"{proto}://{host}"
+    base = str(request.base_url).rstrip("/")
+    return base
 
 
 def _telegram_api(method: str, payload: dict) -> dict:
@@ -3242,8 +3256,13 @@ def _telegram_connect_link(raw_token: str) -> str:
 def _telegram_http_url(value: str) -> Optional[str]:
     """Return only URLs Telegram accepts in inline-button url fields."""
     candidate = str(value or "").strip()
+    if not candidate:
+        return None
     parsed = urllib.parse.urlparse(candidate)
     if parsed.scheme in {"http", "https"} and parsed.netloc:
+        netloc_lower = parsed.netloc.lower()
+        if "localhost" in netloc_lower or "127.0.0.1" in netloc_lower or "0.0.0.0" in netloc_lower:
+            return None
         return candidate
     return None
 
@@ -3490,6 +3509,8 @@ def _telegram_card(data: dict, assignment_id: int, driver_url: str, dispatcher: 
         "",
         "💡 Для удобной работы откройте «📦 Исполнение» — там подсвечена следующая точка и навигация строится по очереди.",
     ]
+    if driver_url and not safe_driver_url:
+        lines.append(f"\n📱 Ссылка для водителя:\n{driver_url}")
     keyboard = []
     if safe_driver_url:
         keyboard.append([{"text": "📦 Исполнение рейса", "url": safe_driver_url}])
@@ -3552,14 +3573,19 @@ def _telegram_render_assignment(cur, assignment_id: int, chat_id: int, request: 
         # A malformed navigation URL or button must not block the driver from
         # receiving the assignment. Retry with a clean execution link button.
         logger.warning("Telegram inline route card rejected, retrying compact card: %s", exc)
-        compact_keyboard = []
         safe_link = _telegram_http_url(driver_url)
         if safe_link:
-            compact_keyboard.append([{"text": "📦 Исполнение рейса", "url": safe_link}])
-        compact_payload = {"chat_id": chat_id, "text": text}
-        if compact_keyboard:
-            compact_payload["reply_markup"] = {"inline_keyboard": compact_keyboard}
-        return _telegram_api("sendMessage", compact_payload)
+            try:
+                compact_keyboard = [[{"text": "📦 Исполнение рейса", "url": safe_link}]]
+                compact_payload = {"chat_id": chat_id, "text": text, "reply_markup": {"inline_keyboard": compact_keyboard}}
+                return _telegram_api("sendMessage", compact_payload)
+            except Exception as exc2:
+                logger.warning("Telegram compact card retry failed: %s", exc2)
+        # Guaranteed fallback: send as plain text without any inline keyboard markup
+        fallback_text = text
+        if driver_url and driver_url not in fallback_text:
+            fallback_text = f"{text}\n\n📦 Ссылка на исполнение:\n{driver_url}"
+        return _telegram_api("sendMessage", {"chat_id": chat_id, "text": fallback_text})
 
 
 def _telegram_save_execution(cur, assignment_id: int, execution_id: int, status: str, actual_qty: float, actual_items: Optional[dict] = None, comment: str = ""):
@@ -8250,8 +8276,9 @@ def _broadcast_route_to_telegram(cur, session_id: int, uid: int, request: Reques
             ORDER BY a.route_index""",
         (session_id, uid),
     )
-    assignments = [dict(row) for row in cur.fetchall()]
-    total_count = max(total_routes, len(assignments))
+    raw_assignments = [dict(row) for row in cur.fetchall()]
+    assignments_by_route = {int(row["route_index"]): row for row in raw_assignments if row.get("route_index") is not None}
+    total_count = max(total_routes, len(assignments_by_route))
     sent = 0
     skipped = 0
     errors = []
@@ -8259,11 +8286,19 @@ def _broadcast_route_to_telegram(cur, session_id: int, uid: int, request: Reques
     if total_count == 0:
         return {"sent": 0, "total": 0, "skipped": 0, "errors": ["Маршруты не содержат рейсов для отправки"]}
 
-    for assignment in assignments:
+    for route_index in range(total_routes):
+        route = routes[route_index]
+        vehicle_label = (route.get("vehicle_name") or f"Машина {route_index + 1}").strip()
+        assignment = assignments_by_route.get(route_index)
+
+        if not assignment:
+            skipped += 1
+            errors.append(f"{vehicle_label}: водитель ещё не назначен")
+            continue
+
         assignment_id = int(assignment["id"])
-        _ensure_assignment_executions(cur, assignment_id, session_id, int(assignment.get("route_index") or 0), uid)
+        _ensure_assignment_executions(cur, assignment_id, session_id, route_index, uid)
         driver_name = (assignment.get("directory_driver_name") or assignment.get("driver_name") or "Водитель").strip()
-        vehicle_label = (assignment.get("vehicle_name") or "Машина").strip()
 
         chat_id = assignment.get("telegram_chat_id") or assignment.get("telegram_message_chat_id")
         if not chat_id and (assignment.get("driver_phone") or assignment.get("directory_phone")):
