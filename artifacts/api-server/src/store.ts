@@ -342,6 +342,12 @@ const initialDrivers: DriverData[] = [
   },
 ];
 
+import fs from "fs";
+import path from "path";
+
+const DATA_DIR = path.resolve(process.cwd(), "data");
+const DB_FILE = path.join(DATA_DIR, "smartroute_store.json");
+
 class MemoryStore {
   stores: StoreData[] = [...initialStores];
   drivers: DriverData[] = [...initialDrivers];
@@ -371,6 +377,62 @@ class MemoryStore {
     done: boolean;
     result: { name: string; status: "created" | "failed" | "skipped"; store_id?: number }[];
   }> = new Map();
+
+  constructor() {
+    this.loadFromDisk();
+  }
+
+  loadFromDisk() {
+    try {
+      if (fs.existsSync(DB_FILE)) {
+        const raw = fs.readFileSync(DB_FILE, "utf-8");
+        const data = JSON.parse(raw);
+        if (Array.isArray(data.stores) && data.stores.length > 0) this.stores = data.stores;
+        if (Array.isArray(data.drivers) && data.drivers.length > 0) this.drivers = data.drivers;
+        if (Array.isArray(data.routeSessions)) this.routeSessions = data.routeSessions;
+        if (Array.isArray(data.assignments)) this.assignments = data.assignments;
+        if (Array.isArray(data.dailyOrders)) this.dailyOrders = data.dailyOrders;
+        if (Array.isArray(data.importHistory)) this.importHistory = data.importHistory;
+        if (data.settings && typeof data.settings === "object") this.settings = { ...this.settings, ...data.settings };
+        if (data.storeNextId) this.storeNextId = data.storeNextId;
+        if (data.driverNextId) this.driverNextId = data.driverNextId;
+        if (data.sessionNextId) this.sessionNextId = data.sessionNextId;
+        if (data.assignmentNextId) this.assignmentNextId = data.assignmentNextId;
+        if (data.executionNextId) this.executionNextId = data.executionNextId;
+        if (data.orderNextId) this.orderNextId = data.orderNextId;
+        if (data.importNextId) this.importNextId = data.importNextId;
+      }
+    } catch (err) {
+      console.warn("[MemoryStore] Failed to load data from disk, using defaults:", err);
+    }
+  }
+
+  save() {
+    try {
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+      const data = {
+        stores: this.stores,
+        drivers: this.drivers,
+        routeSessions: this.routeSessions,
+        assignments: this.assignments,
+        dailyOrders: this.dailyOrders,
+        importHistory: this.importHistory,
+        settings: this.settings,
+        storeNextId: this.storeNextId,
+        driverNextId: this.driverNextId,
+        sessionNextId: this.sessionNextId,
+        assignmentNextId: this.assignmentNextId,
+        executionNextId: this.executionNextId,
+        orderNextId: this.orderNextId,
+        importNextId: this.importNextId,
+      };
+      fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), "utf-8");
+    } catch (err) {
+      console.error("[MemoryStore] Failed to save data to disk:", err);
+    }
+  }
 }
 
 export const dbStore = new MemoryStore();

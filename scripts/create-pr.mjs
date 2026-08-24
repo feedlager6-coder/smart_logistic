@@ -1,4 +1,6 @@
 import { execSync } from "child_process";
+import fs from "fs";
+import path from "path";
 
 async function run() {
   const token = (
@@ -55,45 +57,48 @@ async function run() {
   const defaultBranch = repoData.default_branch || "main";
   console.log(`Repository found! Default branch is '${defaultBranch}'.`);
 
-  console.log("[2/5] Preparing git workspace and commits...");
-  execSync('git config --global user.name "SmartRoute Bot" || true');
-  execSync('git config --global user.email "bot@smartroute.local" || true');
-
-  try {
-    execSync("git rev-parse --is-inside-work-tree", { stdio: "ignore" });
-  } catch {
-    execSync("git init");
-  }
-
+  const tempDir = path.resolve("/tmp", `repo_${Date.now()}`);
   const remoteUrl = `https://x-access-token:${token}@github.com/${repoOwner}/${repoName}.git`;
-  try {
-    execSync("git remote remove origin", { stdio: "ignore" });
-  } catch {}
-  execSync(`git remote add origin ${remoteUrl}`);
 
-  console.log(`[3/5] Fetching remote branch ${defaultBranch}...`);
-  try {
-    execSync(`git fetch origin ${defaultBranch}`);
-  } catch (err) {
-    console.warn("Could not fetch remote branch:", err);
+  console.log(`[2/5] Cloning repository into clean temporary directory ${tempDir}...`);
+  execSync(`git clone --depth 1 --branch ${defaultBranch} ${remoteUrl} ${tempDir}`);
+  execSync(`git config user.name "SmartRoute Bot"`, { cwd: tempDir });
+  execSync(`git config user.email "bot@smartroute.local"`, { cwd: tempDir });
+
+  console.log("[3/5] Copying updated project files into temporary directory...");
+  const srcRoot = process.cwd();
+  const excludeList = new Set(["node_modules", ".git", "dist", ".cache", ".env", ".npm", ".turbo", ".next"]);
+
+  function copyDirRecursive(src, dst) {
+    if (!fs.existsSync(dst)) {
+      fs.mkdirSync(dst, { recursive: true });
+    }
+    const entries = fs.readdirSync(src, { withFileTypes: true });
+    for (const entry of entries) {
+      if (excludeList.has(entry.name)) continue;
+      const srcPath = path.join(src, entry.name);
+      const dstPath = path.join(dst, entry.name);
+      if (entry.isDirectory()) {
+        copyDirRecursive(srcPath, dstPath);
+      } else {
+        fs.copyFileSync(srcPath, dstPath);
+      }
+    }
   }
 
-  execSync(`git checkout -B ${branchName}`);
-  try {
-    execSync(`git reset --mixed origin/${defaultBranch}`);
-  } catch (err) {
-    console.warn("Could not mixed-reset to origin:", err);
-  }
-  execSync("git add -A");
+  copyDirRecursive(srcRoot, tempDir);
+
+  console.log(`[4/5] Creating branch '${branchName}', committing and pushing...`);
+  execSync(`git checkout -b ${branchName}`, { cwd: tempDir });
+  execSync("git add -A", { cwd: tempDir });
 
   try {
-    execSync(`git commit -m "${commitMessage}"`);
+    execSync(`git commit -m "${commitMessage}"`, { cwd: tempDir });
   } catch (err) {
-    console.log("Commit message or error:", err.message);
+    console.log("Git commit output/message:", err.message);
   }
 
-  console.log(`[4/5] Pushing branch '${branchName}' to GitHub...`);
-  execSync(`git push -u origin ${branchName} --force`);
+  execSync(`git push -u origin ${branchName} --force`, { cwd: tempDir });
 
   console.log(`[5/5] Creating Pull Request against '${defaultBranch}'...`);
   const prRes = await fetch(`https://api.github.com/repos/${repoOwner}/${repoName}/pulls`, {
@@ -106,20 +111,30 @@ async function run() {
     },
     body: JSON.stringify({
       title: prTitle,
+      body: prBody,
       head: branchName,
       base: defaultBranch,
-      body: prBody,
     }),
   });
 
-  const prData = await prRes.json();
   if (!prRes.ok) {
-    console.error(`Failed to create PR (${prRes.status}):`, JSON.stringify(prData, null, 2));
+    const errorText = await prRes.text();
+    console.error(`ERROR: Failed to create Pull Request (${prRes.status}): ${errorText}`);
     process.exit(1);
   }
 
-  console.log(`\n🎉 SUCCESS! Pull Request created successfully:`);
-  console.log(prData.html_url);
+  const prData = await prRes.json();
+  console.log("\n=======================================================");
+  console.log("🎉 SUCCESS: Pull Request created successfully!");
+  console.log(`PR Link: ${prData.html_url}`);
+  console.log(`PR Number: #${prData.number}`);
+  console.log(`Branch: ${branchName} -> ${defaultBranch}`);
+  console.log("=======================================================\n");
+
+  // Cleanup temp dir
+  try {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  } catch {}
 }
 
 run().catch((err) => {
