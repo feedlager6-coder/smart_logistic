@@ -7,7 +7,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@tanstack/react-query": "catalog:"
+    "@tanstack/react-query": "^5.66.9"
   },
   "peerDependencies": {
     "react": ">=18"

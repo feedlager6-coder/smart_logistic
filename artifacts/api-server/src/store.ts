@@ -19,6 +19,76 @@ export interface SettingsData {
   fuel_price: number;
   fuel_consumption: number;
   cost_per_km: number;
+  dispatcher_telegram_username?: string;
+  dispatcher_phone?: string;
+}
+
+export interface DriverData {
+  id: number;
+  name: string;
+  phone: string;
+  vehicle_name: string;
+  is_active: boolean;
+  telegram_chat_id: number | null;
+  telegram_username: string | null;
+  telegram_connected_at: string | null;
+  telegram_connect_token?: string | null;
+  telegram_connect_token_hash?: string | null;
+  telegram_token_expires_at?: string | null;
+  telegram_tracking_enabled?: boolean;
+  telegram_pending_action?: string | null;
+  telegram_pending_execution_id?: number | null;
+  telegram_pending_payload?: any;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RouteExecutionData {
+  id: number;
+  assignment_id: number;
+  store_id: number | null;
+  visit_order: number;
+  store_name: string;
+  store_phone?: string;
+  store_client?: string;
+  address: string;
+  lat: number | null;
+  lon: number | null;
+  products: string;
+  quantity: number;
+  actual_qty: number;
+  amount_rub: number;
+  actual_amount_rub: number;
+  arrive_by: string;
+  status: "planned" | "delivered" | "partial" | "failed" | "rescheduled";
+  payment_method: "cash" | "card" | "transfer" | "none";
+  payment_status: "pending" | "paid" | "not_paid";
+  driver_comment: string;
+  yandex_url: string;
+  is_remote_completion?: boolean;
+  completion_distance_meters?: number | null;
+  rescheduled_date?: string;
+  remaining_order_date?: string;
+  delivered_at?: string | null;
+  updated_at: string;
+}
+
+export interface RouteAssignmentData {
+  id: number;
+  session_id: number;
+  route_index: number;
+  driver_id: number | null;
+  driver_name: string;
+  driver_phone?: string;
+  vehicle_name: string;
+  access_token: string;
+  route_yandex_url: string;
+  status: "planned" | "in_progress" | "completed";
+  telegram_message_id?: number | null;
+  telegram_message_chat_id?: number | null;
+  created_at: string;
+  updated_at: string;
+  executions?: RouteExecutionData[];
 }
 
 export interface RouteStopData {
@@ -221,18 +291,76 @@ const initialStores: StoreData[] = [
   },
 ];
 
+const initialDrivers: DriverData[] = [
+  {
+    id: 1,
+    name: "Ахмед",
+    phone: "+7 (928) 555-01-01",
+    vehicle_name: "Газель 1 (А123АА)",
+    is_active: true,
+    telegram_chat_id: null,
+    telegram_username: null,
+    telegram_connected_at: null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+  {
+    id: 2,
+    name: "Магомед",
+    phone: "+7 (928) 555-02-02",
+    vehicle_name: "Газель 2 (В456ВВ)",
+    is_active: true,
+    telegram_chat_id: null,
+    telegram_username: null,
+    telegram_connected_at: null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+  {
+    id: 3,
+    name: "Руслан",
+    phone: "+7 (928) 555-03-03",
+    vehicle_name: "Ларгус (С789СС)",
+    is_active: true,
+    telegram_chat_id: null,
+    telegram_username: null,
+    telegram_connected_at: null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+  {
+    id: 4,
+    name: "Шамиль",
+    phone: "+7 (928) 555-04-04",
+    vehicle_name: "Газель 3 (Е012ЕЕ)",
+    is_active: true,
+    telegram_chat_id: null,
+    telegram_username: null,
+    telegram_connected_at: null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+];
+
 class MemoryStore {
   stores: StoreData[] = [...initialStores];
+  drivers: DriverData[] = [...initialDrivers];
   routeSessions: RouteSessionData[] = [];
+  assignments: RouteAssignmentData[] = [];
   dailyOrders: DailyOrderData[] = [];
   importHistory: ImportHistoryRecord[] = [];
   settings: SettingsData = {
     fuel_price: 67,
     fuel_consumption: 13,
     cost_per_km: Math.round((67 * 13) / 100 * 100) / 100, // 8.71
+    dispatcher_telegram_username: "",
+    dispatcher_phone: "+7 (928) 000-00-00",
   };
   storeNextId = 9;
+  driverNextId = 5;
   sessionNextId = 1;
+  assignmentNextId = 1;
+  executionNextId = 1;
   orderNextId = 1;
   importNextId = 1;
   bulkJobs: Map<string, {
