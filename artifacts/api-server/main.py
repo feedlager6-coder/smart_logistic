@@ -2049,6 +2049,12 @@ def init_db():
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_username TEXT")
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_chat_id BIGINT")
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE")
+    # Older installations may have had a nullable is_active column. Such rows
+    # are real drivers, but `is_active=TRUE` does not match NULL in PostgreSQL.
+    # Backfill first, then enforce the invariant for all future writes.
+    cur.execute("UPDATE drivers SET is_active=TRUE WHERE is_active IS NULL")
+    cur.execute("ALTER TABLE drivers ALTER COLUMN is_active SET DEFAULT TRUE")
+    cur.execute("ALTER TABLE drivers ALTER COLUMN is_active SET NOT NULL")
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_connected_at TIMESTAMP")
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_connect_token_hash TEXT")
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_token_expires_at TIMESTAMP")
@@ -3412,7 +3418,7 @@ def _telegram_driver_assignment(cur, chat_id: int, assignment_id: Optional[int] 
                a.session_id, a.route_index
           FROM drivers d
           JOIN route_assignments a ON a.driver_id=d.id
-         WHERE d.telegram_chat_id=%s AND d.is_active=TRUE
+         WHERE d.telegram_chat_id=%s AND COALESCE(d.is_active, TRUE)=TRUE
     """
     params = [chat_id]
     if assignment_id is not None:
@@ -8273,7 +8279,7 @@ def _handle_telegram_update_internal(payload: dict, request: Optional[Request] =
                 cur.execute(
                     """SELECT id, name, phone, owner_id FROM drivers
                         WHERE (telegram_connect_token_hash=%s OR telegram_connect_token_hash=%s)
-                          AND is_active=TRUE
+                          AND COALESCE(is_active, TRUE)=TRUE
                           AND (telegram_token_expires_at IS NULL OR telegram_token_expires_at > NOW())
                         ORDER BY id DESC LIMIT 1""",
                     (token_hash, raw_token),
@@ -8288,15 +8294,13 @@ def _handle_telegram_update_internal(payload: dict, request: Optional[Request] =
                 digits7 = digits_clean[-7:] if len(digits_clean) >= 7 else digits_clean
                 cur.execute(
                     """SELECT id, name, phone, owner_id FROM drivers
-                        WHERE is_active=TRUE 
+                        WHERE COALESCE(is_active, TRUE)=TRUE
                           AND (
-                            REGEXP_REPLACE(phone, '[^0-9]', '', 'g') = %s
-                            OR (LENGTH(REGEXP_REPLACE(phone, '[^0-9]', '', 'g')) >= 10 AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = %s)
-                            OR (LENGTH(REGEXP_REPLACE(phone, '[^0-9]', '', 'g')) >= 7 AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 7) = %s)
-                            OR phone LIKE %s
+                            RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = %s
+                            OR RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g'), 7) = %s
                           )
                         ORDER BY id DESC LIMIT 1""",
-                    (digits_clean, digits10, digits7, f"%{digits7}%"),
+                    (digits10, digits7),
                 )
                 driver = cur.fetchone()
 
@@ -8304,7 +8308,8 @@ def _handle_telegram_update_internal(payload: dict, request: Optional[Request] =
             if not driver and sender_username:
                 cur.execute(
                     """SELECT id, name, phone, owner_id FROM drivers
-                        WHERE is_active=TRUE AND telegram_username IS NOT NULL AND LOWER(telegram_username) = LOWER(%s)
+                        WHERE COALESCE(is_active, TRUE)=TRUE AND telegram_username IS NOT NULL
+                          AND LOWER(telegram_username) = LOWER(%s)
                         ORDER BY id DESC LIMIT 1""",
                     (sender_username,),
                 )
@@ -8314,7 +8319,7 @@ def _handle_telegram_update_internal(payload: dict, request: Optional[Request] =
             if not driver:
                 cur.execute(
                     """SELECT id, name, phone, owner_id FROM drivers
-                        WHERE telegram_chat_id=%s AND is_active=TRUE
+                        WHERE telegram_chat_id=%s AND COALESCE(is_active, TRUE)=TRUE
                         ORDER BY id DESC LIMIT 1""",
                     (int(chat_id),),
                 )
@@ -8395,7 +8400,7 @@ def _handle_telegram_update_internal(payload: dict, request: Optional[Request] =
             _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "Геолокация включается на странице «Исполнение» — кнопкой «Разрешить геолокацию»."})
             return {"ok": True}
 
-        cur.execute("SELECT id, telegram_pending_action, telegram_pending_execution_id FROM drivers WHERE telegram_chat_id=%s AND is_active=TRUE", (int(chat_id),))
+        cur.execute("SELECT id, telegram_pending_action, telegram_pending_execution_id FROM drivers WHERE telegram_chat_id=%s AND COALESCE(is_active, TRUE)=TRUE", (int(chat_id),))
         pending_driver = cur.fetchone()
         if pending_driver and text and not text.startswith("/") and pending_driver.get("telegram_pending_action") in {"failed", "rescheduled"}:
             driver = _telegram_driver_assignment(cur, int(chat_id), execution_id=int(pending_driver["telegram_pending_execution_id"]))
@@ -8424,7 +8429,7 @@ def _handle_telegram_update_internal(payload: dict, request: Optional[Request] =
             return {"ok": True}
 
         # Any other message from driver:
-        cur.execute("SELECT id, name FROM drivers WHERE telegram_chat_id=%s AND is_active=TRUE", (int(chat_id),))
+        cur.execute("SELECT id, name FROM drivers WHERE telegram_chat_id=%s AND COALESCE(is_active, TRUE)=TRUE", (int(chat_id),))
         bound_driver = cur.fetchone()
         if bound_driver:
             _telegram_api("sendMessage", {
