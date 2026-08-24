@@ -3201,6 +3201,16 @@ def _telegram_api(method: str, payload: dict) -> dict:
         return result
     except HTTPException:
         raise
+    except urllib.error.HTTPError as exc:
+        desc = str(exc)
+        try:
+            raw = exc.read().decode("utf-8")
+            parsed = json.loads(raw)
+            desc = parsed.get("description") or raw
+        except Exception:
+            pass
+        logger.error("Telegram API HTTPError on %s: %s", method, desc)
+        raise RuntimeError(f"Telegram API: {desc}") from exc
     except Exception as exc:
         raise RuntimeError(str(exc)) from exc
 
@@ -3509,7 +3519,7 @@ def _telegram_render_assignment(cur, assignment_id: int, chat_id: int, request: 
     dispatcher = cur.fetchone() or {}
     text, markup = _telegram_card(data, assignment_id, driver_url, dispatcher)
     payload = {"chat_id": chat_id, "text": text}
-    if markup:
+    if markup and isinstance(markup, dict) and markup.get("inline_keyboard"):
         payload["reply_markup"] = markup
     if message_id:
         edit_payload = dict(payload)
@@ -3521,16 +3531,16 @@ def _telegram_render_assignment(cur, assignment_id: int, chat_id: int, request: 
     try:
         return _telegram_api("sendMessage", payload)
     except Exception as exc:
-        # A malformed legacy navigation URL must not block the driver from
-        # receiving the assignment. Retry with the execution link only.
+        # A malformed navigation URL or button must not block the driver from
+        # receiving the assignment. Retry with a clean execution link button.
         logger.warning("Telegram inline route card rejected, retrying compact card: %s", exc)
-        compact_markup = {"inline_keyboard": [
-            row for row in (markup.get("inline_keyboard", []) if isinstance(markup, dict) else [])
-            if any(button.get("text") == "📦 Исполнение" for button in row)
-        ]}
+        compact_keyboard = []
+        safe_link = _telegram_http_url(driver_url)
+        if safe_link:
+            compact_keyboard.append([{"text": "📦 Исполнение рейса", "url": safe_link}])
         compact_payload = {"chat_id": chat_id, "text": text}
-        if compact_markup.get("inline_keyboard"):
-            compact_payload["reply_markup"] = compact_markup
+        if compact_keyboard:
+            compact_payload["reply_markup"] = {"inline_keyboard": compact_keyboard}
         return _telegram_api("sendMessage", compact_payload)
 
 
@@ -8178,7 +8188,7 @@ def telegram_webhook(request: Request, payload: dict):
 
 def _broadcast_route_to_telegram(cur, session_id: int, uid: int, request: Request) -> dict:
     if not TELEGRAM_BOT_TOKEN:
-        return {"sent": 0, "total": 0, "skipped": 0, "errors": ["Telegram Bot API не настроен"]}
+        return {"sent": 0, "total": 0, "skipped": 0, "errors": ["Telegram Bot API не настроен: укажите TELEGRAM_BOT_TOKEN в переменных окружения"]}
 
     cur.execute("SELECT result_json FROM route_sessions WHERE id=%s AND owner_id=%s", (session_id, uid))
     session = cur.fetchone()
@@ -8187,6 +8197,51 @@ def _broadcast_route_to_telegram(cur, session_id: int, uid: int, request: Reques
     result = json.loads(session.get("result_json") or "{}")
     routes = result.get("routes") or []
     total_routes = len(routes)
+
+    if total_routes == 0:
+        return {"sent": 0, "total": 0, "skipped": 0, "errors": ["Маршруты не содержат рейсов для отправки"]}
+
+    cur.execute("SELECT id, name, phone, vehicle_name, telegram_chat_id FROM drivers WHERE owner_id=%s AND is_active=TRUE", (uid,))
+    active_drivers = [dict(row) for row in cur.fetchall()]
+
+    # Ensure all routes have an assignment created and executions populated
+    for idx, r in enumerate(routes):
+        cur.execute(
+            "SELECT id, driver_id FROM route_assignments WHERE session_id=%s AND route_index=%s AND owner_id=%s",
+            (session_id, idx, uid),
+        )
+        existing = cur.fetchone()
+        if not existing:
+            matched_driver = None
+            v_name = (r.get("vehicle_name") or "").strip().lower()
+            if v_name:
+                for d in active_drivers:
+                    d_vname = (d.get("vehicle_name") or "").strip().lower()
+                    d_name = (d.get("name") or "").strip().lower()
+                    if (d_vname and d_vname == v_name) or (d_name and d_name == v_name):
+                        matched_driver = d
+                        break
+            if not matched_driver and len(routes) == 1 and len(active_drivers) == 1:
+                matched_driver = active_drivers[0]
+
+            raw_token = secrets.token_urlsafe(32)
+            token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+            d_id = matched_driver["id"] if matched_driver else None
+            d_name = matched_driver["name"] if matched_driver else (r.get("driver_name") or "Водитель")
+            d_phone = matched_driver["phone"] if matched_driver else (r.get("driver_phone") or "")
+            v_label = r.get("vehicle_name") or (matched_driver.get("vehicle_name") if matched_driver else "") or f"Рейс #{idx+1}"
+
+            cur.execute(
+                """INSERT INTO route_assignments
+                     (owner_id, session_id, route_index, driver_id, driver_name, driver_phone, vehicle_name,
+                      route_yandex_url, access_token_hash, token_created_at, expires_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),NOW() + INTERVAL '48 hours')
+                   RETURNING id""",
+                (uid, session_id, idx, d_id, d_name, d_phone, v_label, r.get("yandex_url") or "", token_hash),
+            )
+            new_assign = cur.fetchone()
+            if new_assign:
+                _ensure_assignment_executions(cur, int(new_assign["id"]), session_id, idx, uid)
 
     cur.execute(
         """SELECT a.id, a.route_index, a.driver_name, a.vehicle_name,
@@ -8205,18 +8260,9 @@ def _broadcast_route_to_telegram(cur, session_id: int, uid: int, request: Reques
     skipped = 0
     errors = []
 
-    if total_count == 0:
-        return {"sent": 0, "total": 0, "skipped": 0, "errors": ["Маршруты не содержат рейсов для отправки"]}
-
-    assigned_indices = {int(a["route_index"]) for a in assignments if a.get("route_index") is not None}
-    for idx, r in enumerate(routes):
-        if idx not in assigned_indices:
-            skipped += 1
-            v_name = r.get("vehicle_name") or f"Рейс #{idx+1}"
-            errors.append(f"{v_name}: водитель не назначен")
-
     for assignment in assignments:
         assignment_id = int(assignment["id"])
+        _ensure_assignment_executions(cur, assignment_id, session_id, int(assignment.get("route_index") or 0), uid)
         driver_name = (assignment.get("directory_driver_name") or assignment.get("driver_name") or "Водитель").strip()
         vehicle_label = (assignment.get("vehicle_name") or "Машина").strip()
 
@@ -8248,15 +8294,7 @@ def _broadcast_route_to_telegram(cur, session_id: int, uid: int, request: Reques
                 if d_row and d_row.get("telegram_chat_id"):
                     chat_id = d_row["telegram_chat_id"]
 
-        if not assignment.get("driver_id") and not chat_id:
-            skipped += 1
-            errors.append(f"{driver_name} ({vehicle_label}): водитель не назначен")
-            continue
-        elif assignment.get("is_active") is False and not chat_id:
-            skipped += 1
-            errors.append(f"{driver_name} ({vehicle_label}): водитель архивирован")
-            continue
-        elif not chat_id:
+        if not chat_id:
             skipped += 1
             errors.append(f"{driver_name} ({vehicle_label}): нет Telegram chat_id (водитель не подключён к боту)")
             continue
