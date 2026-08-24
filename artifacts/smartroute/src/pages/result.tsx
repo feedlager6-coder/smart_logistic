@@ -1106,6 +1106,7 @@ export function ResultPage() {
       });
       const payload = await response.json().catch(() => ({})) as {
         detail?: string;
+        sent?: number;
         drivers_notified?: number;
         total_assignments?: number;
         telegram_errors?: string[];
@@ -1116,8 +1117,9 @@ export function ResultPage() {
       queryClient.invalidateQueries({ queryKey: ["route-assignments", sessionId] });
       queryClient.invalidateQueries({ queryKey: ["/api/route/sessions", sessionId] });
       window.dispatchEvent(new Event("route:changed"));
-      const tgInfo = typeof payload.drivers_notified === "number" && payload.drivers_notified > 0
-        ? ` Водителям (${payload.drivers_notified}) отправлено уведомление в Telegram.`
+      const notified = payload.drivers_notified ?? payload.sent ?? 0;
+      const tgInfo = notified > 0
+        ? ` Водителям (${notified}) отправлено итоговое уведомление в Telegram.`
         : " Рейс перенесён в архив.";
       toast({
         title: "Рейс завершён",
