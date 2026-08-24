@@ -11,16 +11,14 @@
 # ── Stage 1: Build frontend ───────────────────────────────────────────────────
 FROM node:20-slim AS frontend
 
-# Install pnpm directly (more reliable than corepack when packageManager
-# field is absent from package.json; pnpm v10 reads lockfile v9 correctly)
+# Install pnpm directly
 RUN npm install -g pnpm@10 --quiet
 
 WORKDIR /workspace
 
-# ── Layer 1: workspace config (invalidated only when lockfile changes) ────────
-# tsconfig.base.json + tsconfig.json are needed because artifacts/smartroute/tsconfig.json
-# extends "../../tsconfig.base.json" — Vite resolves it at build time.
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc tsconfig.base.json tsconfig.json ./
+# ── Layer 1: workspace config (wildcards prevent missing file errors) ──────────
+COPY package.json tsconfig.base.json tsconfig.json ./
+COPY pnpm-workspace.yaml* .npmrc* pnpm-lock.yaml* ./
 
 # ── Layer 2: all package.json files (needed for pnpm workspace graph) ─────────
 COPY lib/api-client-react/package.json ./lib/api-client-react/
@@ -32,16 +30,14 @@ COPY artifacts/smartroute/package.json ./artifacts/smartroute/
 COPY artifacts/api-server/package.json ./artifacts/api-server/
 COPY artifacts/mockup-sandbox/package.json ./artifacts/mockup-sandbox/
 
-# ── Install all workspace deps (cached when package.json unchanged) ───────────
-RUN pnpm install --frozen-lockfile
+# ── Install workspace deps ────────────────────────────────────────────────────
+RUN pnpm install --no-frozen-lockfile
 
 # ── Layer 3: source code ──────────────────────────────────────────────────────
 COPY lib/                  ./lib/
 COPY artifacts/smartroute/ ./artifacts/smartroute/
 
 # ── Build ─────────────────────────────────────────────────────────────────────
-# BASE_PATH=/ → all asset URLs are root-relative (correct for Railway)
-# PORT fallback is baked into vite.config.ts (5173), not needed here
 RUN BASE_PATH=/ pnpm --filter @workspace/smartroute run build
 
 
@@ -51,7 +47,6 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install Python dependencies
-# psycopg2-binary and aiofiles are self-contained; no system libs needed
 COPY artifacts/api-server/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
