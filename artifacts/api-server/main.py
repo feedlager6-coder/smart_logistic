@@ -8161,9 +8161,17 @@ def telegram_webhook(request: Request, payload: dict):
         contact_phone = _normalize_driver_phone(contact.get("phone_number") or "")
         sender_username = (chat.get("username") or "").strip().lstrip("@")
 
-        if text == "/start" or text.startswith("/start ") or contact_phone:
-            parts = text.split(maxsplit=1)
-            raw_token = parts[1].strip() if len(parts) > 1 else ""
+        # Check if text is phone number (e.g. "+7 928 588 65 84" or "89285886584")
+        text_digits = re.sub(r"\D", "", text)
+        is_phone_text = len(text_digits) >= 10 and not text.startswith("/")
+
+        if text == "/start" or text.startswith("/start") or contact_phone or is_phone_text:
+            raw_token = ""
+            if text.startswith("/start"):
+                # Handle /start <token> or /start@BotUsername <token>
+                parts = re.sub(r"^/start(?:@\w+)?\s*", "", text).strip()
+                raw_token = urllib.parse.unquote(parts) if parts else ""
+
             driver = None
             if raw_token:
                 token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
@@ -8171,23 +8179,32 @@ def telegram_webhook(request: Request, payload: dict):
                     """UPDATE drivers
                           SET telegram_chat_id=%s, telegram_username=%s, telegram_connected_at=NOW(),
                               telegram_connect_token_hash=NULL, telegram_token_expires_at=NULL, updated_at=NOW()
-                        WHERE telegram_connect_token_hash=%s AND is_active=TRUE
+                        WHERE (telegram_connect_token_hash=%s OR telegram_connect_token_hash=%s)
+                          AND is_active=TRUE
                           AND (telegram_token_expires_at IS NULL OR telegram_token_expires_at > NOW())
                     RETURNING id, name""",
-                    (int(chat_id), sender_username or None, token_hash),
+                    (int(chat_id), sender_username or None, token_hash, raw_token),
                 )
                 driver = cur.fetchone()
 
-            if not driver and contact_phone:
-                cur.execute(
-                    """UPDATE drivers
-                          SET telegram_chat_id=%s, telegram_username=%s, telegram_connected_at=NOW(),
-                              telegram_connect_token_hash=NULL, telegram_token_expires_at=NULL, updated_at=NOW()
-                        WHERE is_active=TRUE AND phone LIKE %s
-                    RETURNING id, name""",
-                    (int(chat_id), sender_username or None, f"%{contact_phone[-10:]}%"),
-                )
-                driver = cur.fetchone()
+            phone_to_match = contact_phone or (text_digits if is_phone_text else "")
+            if not driver and phone_to_match:
+                digits10 = phone_to_match[-10:]
+                if len(digits10) >= 7:
+                    cur.execute(
+                        """UPDATE drivers
+                              SET telegram_chat_id=%s, telegram_username=%s, telegram_connected_at=NOW(),
+                                  telegram_connect_token_hash=NULL, telegram_token_expires_at=NULL, updated_at=NOW()
+                            WHERE is_active=TRUE 
+                              AND (
+                                RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = %s
+                                OR REGEXP_REPLACE(phone, '[^0-9]', '', 'g') = %s
+                                OR phone LIKE %s
+                              )
+                        RETURNING id, name""",
+                        (int(chat_id), sender_username or None, digits10, phone_to_match, f"%{digits10}%"),
+                    )
+                    driver = cur.fetchone()
 
             if not driver:
                 # Check if this chat_id is already bound
@@ -8196,10 +8213,35 @@ def telegram_webhook(request: Request, payload: dict):
 
             conn.commit()
             if driver:
-                welcome = f"👋 Добро пожаловать в SmartRoute, {driver['name']}!\n\n🟢 Вы успешно подключены к системе. Сюда будут приходить назначенные рейсы и маршруты."
+                welcome = f"👋 Добро пожаловать в SmartRoute, {driver['name']}!\n\n🟢 Вы успешно подключены к системе. Сюда будут приходить назначенные рейсы и путевые листы."
+                _telegram_api("sendMessage", {
+                    "chat_id": int(chat_id),
+                    "text": welcome,
+                    "reply_markup": {"remove_keyboard": True},
+                })
+                # Check active assignment
+                assigned = _telegram_driver_assignment(cur, int(chat_id))
+                if assigned:
+                    _, driver_url = _issue_assignment_link(cur, int(assigned["assignment_id"]), request)
+                    conn.commit()
+                    _telegram_render_assignment(cur, int(assigned["assignment_id"]), int(chat_id), request, driver_url=driver_url)
             else:
-                welcome = "👋 Добро пожаловать в SmartRoute!\n\nДля подключения попросите диспетчера отправить вам персональную ссылку из раздела «Настройки → Водители» или поделитесь контактом."
-            _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": welcome})
+                if raw_token:
+                    welcome = "⚠️ Ссылка подключения не найдена или срок её действия истёк.\n\nВы можете легко подключиться по номеру телефона — нажмите кнопку «📱 Поделиться контактом» ниже, отправьте номер сообщением (например, +7 928 000-00-00), либо запросите у диспетчера новую ссылку."
+                elif phone_to_match:
+                    welcome = f"⚠️ Водитель с номером {phone_to_match} не найден в базе SmartRoute.\n\nПожалуйста, убедитесь, что диспетчер указал этот номер в разделе «Настройки → Водители», или перейдите по персональной ссылке от диспетчера."
+                else:
+                    welcome = "👋 Добро пожаловать в SmartRoute!\n\nДля подключения выберите удобный способ:\n1️⃣ Нажмите кнопку «📱 Поделиться контактом» внизу.\n2️⃣ Или отправьте ваш номер телефона сообщением (например, +7 928 000-00-00).\n3️⃣ Либо перейдите по персональной ссылке от диспетчера из раздела «Настройки → Водители»."
+
+                _telegram_api("sendMessage", {
+                    "chat_id": int(chat_id),
+                    "text": welcome,
+                    "reply_markup": {
+                        "keyboard": [[{"text": "📱 Поделиться контактом", "request_contact": True}]],
+                        "resize_keyboard": True,
+                        "one_time_keyboard": True,
+                    },
+                })
             return {"ok": True}
 
         if text in {"/route", "/myroute"}:

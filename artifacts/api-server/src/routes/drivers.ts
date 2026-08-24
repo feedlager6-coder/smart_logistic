@@ -50,6 +50,7 @@ router.post("/drivers", (req, res) => {
   };
 
   dbStore.drivers.unshift(newDriver);
+  dbStore.save();
   res.status(201).json(formatDriver(newDriver));
 });
 
@@ -67,6 +68,7 @@ router.patch("/drivers/:id", (req, res) => {
   if (vehicle_name !== undefined) driver.vehicle_name = String(vehicle_name).trim();
   if (is_active !== undefined) driver.is_active = Boolean(is_active);
   driver.updated_at = new Date().toISOString();
+  dbStore.save();
 
   res.json(formatDriver(driver));
 });
@@ -82,6 +84,7 @@ router.delete("/drivers/:id", (req, res) => {
   // Soft-delete or remove
   dbStore.drivers[index].is_active = false;
   dbStore.drivers[index].updated_at = new Date().toISOString();
+  dbStore.save();
   res.json({ ok: true, id });
 });
 
@@ -94,6 +97,7 @@ router.post("/drivers/:id/telegram-link", async (req, res) => {
 
   try {
     const linkData = await generateDriverTelegramLink(id, baseUrl);
+    dbStore.save();
     res.json(linkData);
   } catch (err: any) {
     res.status(400).json({ detail: err.message || "Не удалось сгенерировать ссылку Telegram" });
@@ -112,6 +116,7 @@ router.post("/drivers/:id/disconnect-telegram", (req, res) => {
   driver.telegram_username = null;
   driver.telegram_connected_at = null;
   driver.updated_at = new Date().toISOString();
+  dbStore.save();
 
   res.json(formatDriver(driver));
 });

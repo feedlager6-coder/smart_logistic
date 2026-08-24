@@ -9,7 +9,11 @@ let cachedBotUsername: string = (process.env.TELEGRAM_BOT_USERNAME || "").trim()
 
 export function normalizePhone(phone: string | null | undefined): string {
   if (!phone) return "";
-  const digits = phone.replace(/\D/g, "");
+  return String(phone).replace(/\D/g, "");
+}
+
+export function extract10Digits(phone: string | null | undefined): string {
+  const digits = normalizePhone(phone);
   if (digits.length >= 10) {
     return digits.slice(-10);
   }
@@ -17,11 +21,18 @@ export function normalizePhone(phone: string | null | undefined): string {
 }
 
 export function findDriverByPhone(phone: string): DriverData | undefined {
-  const norm = normalizePhone(phone);
-  if (!norm || norm.length < 7) return undefined;
-  return dbStore.drivers.find(
-    (d) => d.is_active && normalizePhone(d.phone).endsWith(norm)
-  );
+  const norm10 = extract10Digits(phone);
+  const rawDigits = normalizePhone(phone);
+  if (!norm10 || norm10.length < 7) return undefined;
+  return dbStore.drivers.find((d) => {
+    if (!d.is_active) return false;
+    const dNorm10 = extract10Digits(d.phone);
+    const dRaw = normalizePhone(d.phone);
+    if (dNorm10 === norm10) return true;
+    if (dNorm10 && norm10 && (dNorm10.endsWith(norm10) || norm10.endsWith(dNorm10))) return true;
+    if (dRaw && rawDigits && (dRaw === rawDigits || dRaw.endsWith(rawDigits) || rawDigits.endsWith(dRaw))) return true;
+    return false;
+  });
 }
 
 export function findDriverByChatId(chatId: number): DriverData | undefined {
@@ -414,15 +425,18 @@ export async function processTelegramUpdate(payload: any, baseUrl: string = ""):
 
   // 1. Check if user sent a /start command with a token
   if (text.startsWith("/start")) {
-    const parts = text.split(/\s+/);
-    const rawToken = parts[1]?.trim();
+    const rawToken = text.replace(/^\/start(?:@\w+)?\s*/i, "").trim();
+    const cleanToken = decodeURIComponent(rawToken);
 
-    if (rawToken) {
-      const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
+    if (cleanToken) {
+      const tokenHash = crypto.createHash("sha256").update(cleanToken).digest("hex");
       const driver = dbStore.drivers.find(
         (d) =>
           d.is_active &&
-          (d.telegram_connect_token === rawToken || d.telegram_connect_token_hash === tokenHash)
+          (d.telegram_connect_token === cleanToken ||
+            d.telegram_connect_token === rawToken ||
+            d.telegram_connect_token_hash === tokenHash ||
+            d.telegram_connect_token_hash === cleanToken)
       );
 
       if (driver) {
@@ -432,6 +446,7 @@ export async function processTelegramUpdate(payload: any, baseUrl: string = ""):
         driver.telegram_connect_token = null;
         driver.telegram_connect_token_hash = null;
         driver.updated_at = new Date().toISOString();
+        dbStore.save();
 
         const welcome = `👋 Добро пожаловать в SmartRoute, ${driver.name}!\n\n🟢 Вы успешно подключены к системе. Сюда будут приходить назначенные рейсы и путевые листы.`;
         await telegramApi("sendMessage", {
@@ -454,7 +469,7 @@ export async function processTelegramUpdate(payload: any, baseUrl: string = ""):
         return { ok: true };
       } else {
         // Token not found / expired
-        const msg = `⚠️ Ссылка подключения не найдена или срок её действия истёк.\n\nВы можете легко подключиться по номеру телефона — нажмите кнопку «📱 Поделиться контактом» ниже, либо запросите у диспетчера новую ссылку.`;
+        const msg = `⚠️ Ссылка подключения не найдена или срок её действия истёк.\n\nВы можете легко подключиться по номеру телефона — нажмите кнопку «📱 Поделиться контактом» ниже, отправьте номер сообщением (например, +7 928 000-00-00), либо запросите у диспетчера новую ссылку.`;
         await telegramApi("sendMessage", {
           chat_id: chatId,
           text: msg,
@@ -502,6 +517,7 @@ export async function processTelegramUpdate(payload: any, baseUrl: string = ""):
       driver.telegram_username = username || driver.telegram_username || null;
       driver.telegram_connected_at = new Date().toISOString();
       driver.updated_at = new Date().toISOString();
+      dbStore.save();
 
       const welcome = `👋 Добро пожаловать в SmartRoute, ${driver.name}!\n\n🟢 Вы успешно подключены по номеру телефона (${driver.phone})!\nСюда будут приходить ваши рейсы и путевые листы.`;
       await telegramApi("sendMessage", {
@@ -521,7 +537,8 @@ export async function processTelegramUpdate(payload: any, baseUrl: string = ""):
         }
       }
     } else {
-      const msg = `⚠️ Водитель с номером ${contact.phone_number} не найден в базе SmartRoute.\n\nПожалуйста, убедитесь, что диспетчер указал этот номер в разделе «Настройки → Водители», или перейдите по персональной ссылке от диспетчера.`;
+      const formattedNum = contact.phone_number;
+      const msg = `⚠️ Водитель с номером ${formattedNum} не найден в базе SmartRoute.\n\nПожалуйста, убедитесь, что диспетчер указал этот номер в разделе «Настройки → Водители», или перейдите по персональной ссылке от диспетчера.`;
       await telegramApi("sendMessage", {
         chat_id: chatId,
         text: msg,
@@ -537,13 +554,14 @@ export async function processTelegramUpdate(payload: any, baseUrl: string = ""):
 
   // 3. Handle phone number entered as plain text (e.g. "+7 928 123 45 67" or "89281234567")
   const cleanedDigits = text.replace(/\D/g, "");
-  if (cleanedDigits.length >= 10 && !text.startsWith("/")) {
+  if (cleanedDigits.length >= 7 && !text.startsWith("/")) {
     const driver = findDriverByPhone(cleanedDigits);
     if (driver) {
       driver.telegram_chat_id = chatId;
       driver.telegram_username = username || driver.telegram_username || null;
       driver.telegram_connected_at = new Date().toISOString();
       driver.updated_at = new Date().toISOString();
+      dbStore.save();
 
       const welcome = `👋 Добро пожаловать в SmartRoute, ${driver.name}!\n\n🟢 Вы успешно подключены по номеру телефона (${driver.phone})!\nСюда будут приходить ваши рейсы и путевые листы.`;
       await telegramApi("sendMessage", {
@@ -562,6 +580,18 @@ export async function processTelegramUpdate(payload: any, baseUrl: string = ""):
           await sendAssignmentToDriver(activeAssignment, session, baseUrl);
         }
       }
+      return { ok: true };
+    } else if (cleanedDigits.length >= 10) {
+      const msg = `⚠️ Водитель с номером ${text} не найден в базе SmartRoute.\n\nУбедитесь, что диспетчер внёс вас в список водителей («Настройки → Водители»), либо нажмите кнопку ниже.`;
+      await telegramApi("sendMessage", {
+        chat_id: chatId,
+        text: msg,
+        reply_markup: {
+          keyboard: [[{ text: "📱 Поделиться контактом", request_contact: true }]],
+          resize_keyboard: true,
+          one_time_keyboard: true,
+        },
+      });
       return { ok: true };
     }
   }
