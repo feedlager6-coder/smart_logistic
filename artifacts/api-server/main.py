@@ -2042,6 +2042,7 @@ def init_db():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_username TEXT")
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_chat_id BIGINT")
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_connected_at TIMESTAMP")
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS telegram_connect_token_hash TEXT")
@@ -8240,14 +8241,18 @@ def _handle_telegram_update_internal(payload: dict, request: Optional[Request] =
             return {"ok": True}
 
         contact = message.get("contact") or {}
-        contact_phone = _normalize_driver_phone(contact.get("phone_number") or "")
+        raw_contact_phone = contact.get("phone_number") or ""
+        contact_phone = re.sub(r"\D", "", raw_contact_phone)
         sender_username = (chat.get("username") or "").strip().lstrip("@")
 
-        # Check if text is phone number (e.g. "+7 928 588 65 84" or "89285886584")
+        # Check if text is phone number (e.g. "+7 928 588 65 84", "89285886584", "79285886584")
         text_digits = re.sub(r"\D", "", text)
-        is_phone_text = len(text_digits) >= 10 and not text.startswith("/")
+        is_phone_text = len(text_digits) >= 7 and not text.startswith("/")
 
-        if text == "/start" or text.startswith("/start") or contact_phone or is_phone_text:
+        is_start_cmd = text == "/start" or text.startswith("/start")
+        is_route_cmd = text in {"/route", "/myroute", "🚚 Мой рейс", "Мой рейс", "рейс", "Рейс"}
+
+        if is_start_cmd or contact_phone or is_phone_text:
             raw_token = ""
             if text.startswith("/start"):
                 # Handle /start <token> or /start@BotUsername <token>
@@ -8255,54 +8260,73 @@ def _handle_telegram_update_internal(payload: dict, request: Optional[Request] =
                 raw_token = urllib.parse.unquote(parts) if parts else ""
 
             driver = None
+
+            # 1. Search by connect token
             if raw_token:
                 token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
                 cur.execute(
-                    """UPDATE drivers
-                          SET telegram_chat_id=%s, telegram_username=%s, telegram_connected_at=NOW(), updated_at=NOW()
+                    """SELECT id, name, phone, owner_id FROM drivers
                         WHERE (telegram_connect_token_hash=%s OR telegram_connect_token_hash=%s)
                           AND is_active=TRUE
                           AND (telegram_token_expires_at IS NULL OR telegram_token_expires_at > NOW())
-                    RETURNING id, name, phone""",
-                    (int(chat_id), sender_username or None, token_hash, raw_token),
+                        ORDER BY id DESC LIMIT 1""",
+                    (token_hash, raw_token),
                 )
                 driver = cur.fetchone()
 
+            # 2. Search by phone number (contact button or text message)
             phone_to_match = contact_phone or (text_digits if is_phone_text else "")
             if not driver and phone_to_match:
-                digits10 = phone_to_match[-10:]
-                if len(digits10) >= 7:
-                    cur.execute(
-                        """UPDATE drivers
-                              SET telegram_chat_id=%s, telegram_username=%s, telegram_connected_at=NOW(), updated_at=NOW()
-                            WHERE is_active=TRUE 
-                              AND (
-                                RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = %s
-                                OR REGEXP_REPLACE(phone, '[^0-9]', '', 'g') = %s
-                                OR phone LIKE %s
-                              )
-                        RETURNING id, name, phone""",
-                        (int(chat_id), sender_username or None, digits10, phone_to_match, f"%{digits10}%"),
-                    )
-                    driver = cur.fetchone()
-
-            if not driver and sender_username:
+                digits_clean = re.sub(r"\D", "", phone_to_match)
+                digits10 = digits_clean[-10:] if len(digits_clean) >= 10 else digits_clean
+                digits7 = digits_clean[-7:] if len(digits_clean) >= 7 else digits_clean
                 cur.execute(
-                    """UPDATE drivers
-                          SET telegram_chat_id=%s, telegram_connected_at=NOW(), updated_at=NOW()
-                        WHERE is_active=TRUE AND LOWER(telegram_username) = LOWER(%s)
-                    RETURNING id, name, phone""",
-                    (int(chat_id), sender_username),
+                    """SELECT id, name, phone, owner_id FROM drivers
+                        WHERE is_active=TRUE 
+                          AND (
+                            REGEXP_REPLACE(phone, '[^0-9]', '', 'g') = %s
+                            OR (LENGTH(REGEXP_REPLACE(phone, '[^0-9]', '', 'g')) >= 10 AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = %s)
+                            OR (LENGTH(REGEXP_REPLACE(phone, '[^0-9]', '', 'g')) >= 7 AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 7) = %s)
+                            OR phone LIKE %s
+                          )
+                        ORDER BY id DESC LIMIT 1""",
+                    (digits_clean, digits10, digits7, f"%{digits7}%"),
                 )
                 driver = cur.fetchone()
 
-            if not driver:
-                # Check if this chat_id is already bound
-                cur.execute("SELECT id, name, phone FROM drivers WHERE telegram_chat_id=%s AND is_active=TRUE", (int(chat_id),))
+            # 3. Search by Telegram username
+            if not driver and sender_username:
+                cur.execute(
+                    """SELECT id, name, phone, owner_id FROM drivers
+                        WHERE is_active=TRUE AND telegram_username IS NOT NULL AND LOWER(telegram_username) = LOWER(%s)
+                        ORDER BY id DESC LIMIT 1""",
+                    (sender_username,),
+                )
                 driver = cur.fetchone()
 
-            conn.commit()
+            # 4. Search by already linked chat_id
+            if not driver:
+                cur.execute(
+                    """SELECT id, name, phone, owner_id FROM drivers
+                        WHERE telegram_chat_id=%s AND is_active=TRUE
+                        ORDER BY id DESC LIMIT 1""",
+                    (int(chat_id),),
+                )
+                driver = cur.fetchone()
+
+            # If driver was found, update connection info
             if driver:
+                cur.execute(
+                    """UPDATE drivers
+                          SET telegram_chat_id=%s,
+                              telegram_username=COALESCE(%s, telegram_username),
+                              telegram_connected_at=NOW(),
+                              updated_at=NOW()
+                        WHERE id=%s""",
+                    (int(chat_id), sender_username or None, int(driver["id"])),
+                )
+                conn.commit()
+
                 welcome = f"👋 Здравствуйте, {driver['name']}!\n\n🟢 Вы успешно подключены к SmartRoute как водитель ({driver.get('phone', '')})!\n\nСюда будут поступать ваши рейсы, путевые листы и точки доставок."
                 _telegram_api("sendMessage", {
                     "chat_id": int(chat_id),
@@ -8322,6 +8346,7 @@ def _handle_telegram_update_internal(payload: dict, request: Optional[Request] =
                 except Exception as assign_exc:
                     logger.warning("Error rendering initial assignment: %s", assign_exc)
             else:
+                conn.commit()
                 if raw_token:
                     welcome = "⚠️ Ссылка подключения не найдена или срок её действия истёк.\n\nВы можете быстро подключиться по номеру телефона — нажмите кнопку «📱 Поделиться контактом» ниже, отправьте номер сообщением (например, +7 928 000-00-00), либо запросите у диспетчера новую ссылку."
                 elif phone_to_match:
@@ -8340,14 +8365,21 @@ def _handle_telegram_update_internal(payload: dict, request: Optional[Request] =
                 })
             return {"ok": True}
 
-        if text in {"/route", "/myroute"}:
+        if is_route_cmd:
             driver = _telegram_driver_assignment(cur, int(chat_id))
             if driver:
                 _, driver_url = _issue_assignment_link(cur, int(driver["assignment_id"]), request)
                 conn.commit()
                 _telegram_render_assignment(cur, int(driver["assignment_id"]), int(chat_id), request, driver_url=driver_url)
             else:
-                _telegram_api("sendMessage", {"chat_id": int(chat_id), "text": "ℹ️ Активных рейсов пока нет."})
+                _telegram_api("sendMessage", {
+                    "chat_id": int(chat_id),
+                    "text": "ℹ️ Активных рейсов пока нет. Как только диспетчер назначит вам рейс, он появится здесь.",
+                    "reply_markup": {
+                        "keyboard": [[{"text": "🚚 Мой рейс"}]],
+                        "resize_keyboard": True,
+                    },
+                })
             return {"ok": True}
 
         if text in {"/track", "/stoptrack", "📍 Начать отслеживание", "⏹ Остановить отслеживание"}:
