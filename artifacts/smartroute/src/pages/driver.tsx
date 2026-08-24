@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useMemo } from "react";
 import { useParams } from "wouter";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { generateShiftPdfReport } from "@/lib/pdf-report";
 import {
   CheckCircle2,
@@ -207,12 +207,10 @@ export function getGeofenceInfo(
 
 export function DriverPage() {
   const { token = "" } = useParams<{ token: string }>();
-  const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<"route" | "report">("route");
   const [copiedReport, setCopiedReport] = useState(false);
   const [copiedReconciliation, setCopiedReconciliation] = useState(false);
   const [savingId, setSavingId] = useState<number | null>(null);
-  const [shiftSaving, setShiftSaving] = useState(false);
   const [trackingEnabled, setTrackingEnabled] = useState(false);
   const [locationMessage, setLocationMessage] = useState("");
   const [locationDenied, setLocationDenied] = useState(false);
@@ -247,13 +245,15 @@ export function DriverPage() {
 
   useEffect(() => {
     if (assignment?.driver_shift_closed !== undefined) {
-      setShiftClosed(Boolean(assignment.driver_shift_closed));
-      try {
-        localStorage.setItem(`smartroute_shift_closed_${token}`, assignment.driver_shift_closed ? "true" : "false");
-      } catch {
-        // Ignored
+      if (assignment.driver_shift_closed !== shiftClosed) {
+        setShiftClosed(assignment.driver_shift_closed);
+        try {
+          localStorage.setItem(`smartroute_shift_closed_${token}`, assignment.driver_shift_closed ? "true" : "false");
+        } catch {
+          // Ignored
+        }
       }
-    } else if (assignment?.status === "completed") {
+    } else if (assignment?.status === "completed" && !shiftClosed) {
       setShiftClosed(true);
       try {
         localStorage.setItem(`smartroute_shift_closed_${token}`, "true");
@@ -261,7 +261,7 @@ export function DriverPage() {
         // Ignored
       }
     }
-  }, [assignment?.driver_shift_closed, assignment?.status, token]);
+  }, [assignment?.driver_shift_closed, assignment?.status, shiftClosed, token]);
 
   // Modal / Confirm state for Red Zone remote delivery
   const [pendingConfirmation, setPendingConfirmation] = useState<{
@@ -503,46 +503,22 @@ export function DriverPage() {
     executeSave(execution, explicitStatus);
   };
 
-  const handleToggleShiftClose = async () => {
+  const handleToggleShiftClose = () => {
     const nextState = !shiftClosed;
     setShiftClosed(nextState);
-    setShiftSaving(true);
     try {
       localStorage.setItem(`smartroute_shift_closed_${token}`, nextState ? "true" : "false");
     } catch {
       // Ignored storage error
     }
-    // Optimistically update React Query cache
-    queryClient.setQueryData<DriverData | undefined>(["driver-assignment", token], (old) => {
-      if (!old || !old.assignment) return old;
-      return {
-        ...old,
-        assignment: {
-          ...old.assignment,
-          driver_shift_closed: nextState,
-        },
-      };
-    });
     if (token) {
-      try {
-        const res = await fetch(`/api/driver/${encodeURIComponent(token)}/shift`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ shift_closed: nextState }),
-        });
-        if (res.ok) {
-          const json = await res.json();
-          if (typeof json.driver_shift_closed === "boolean") {
-            setShiftClosed(json.driver_shift_closed);
-          }
-        }
-      } catch (err) {
+      fetch(`/api/driver/${encodeURIComponent(token)}/shift`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ shift_closed: nextState }),
+      }).catch((err) => {
         console.error("Failed to sync shift status to server:", err);
-      } finally {
-        setShiftSaving(false);
-      }
-    } else {
-      setShiftSaving(false);
+      });
     }
   };
 
@@ -858,24 +834,16 @@ export function DriverPage() {
           /* Report & Shift Reconciliation View */
           <div id="driver-shift-report-print" className="space-y-4 print:space-y-3 bg-background p-2 rounded-xl">
             {/* Shift Status Banner */}
-            <Card className={`border shadow-xs ${shiftClosed ? "bg-emerald-50/90 border-emerald-300 ring-1 ring-emerald-300/50" : "bg-card border-border"}`}>
+            <Card className={`border shadow-xs ${shiftClosed ? "bg-emerald-50/80 border-emerald-300" : "bg-card border-border"}`}>
               <CardContent className="p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
                 <div className="flex items-center gap-3">
                   <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${shiftClosed ? "bg-emerald-100 text-emerald-700" : "bg-primary/10 text-primary"}`}>
-                    {shiftClosed ? <CheckCircle2 className="w-5 h-5 text-emerald-600" /> : <Clock className="w-5 h-5 text-primary" />}
+                    {shiftClosed ? <CheckCircle2 className="w-5 h-5" /> : <Clock className="w-5 h-5" />}
                   </div>
                   <div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="font-bold text-sm text-foreground">
-                        {shiftClosed ? "Смена закрыта водителем" : "Смена в процессе выполнения"}
-                      </h3>
-                      {shiftClosed && (
-                        <span className="inline-flex items-center gap-1 text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 px-2 py-0.5 rounded-full">
-                          <Check className="w-3 h-3 text-emerald-600" />
-                          Закрыта
-                        </span>
-                      )}
-                    </div>
+                    <h3 className="font-bold text-sm text-foreground">
+                      {shiftClosed ? "Смена закрыта водителем" : "Смена в процессе выполнения"}
+                    </h3>
                     <p className="text-xs text-muted-foreground mt-0.5">
                       {shiftClosed
                         ? "Ведомость сформирована. Вы можете скачать PDF, распечатать её или отправить в бухгалтерию/диспетчеру."
@@ -888,20 +856,13 @@ export function DriverPage() {
                   <Button
                     size="sm"
                     variant={shiftClosed ? "outline" : "default"}
-                    disabled={shiftSaving}
-                    className={`font-bold text-xs h-9 px-4 transition-all shadow-xs ${
-                      shiftClosed
-                        ? "border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100 hover:text-amber-950"
-                        : "bg-emerald-600 hover:bg-emerald-700 text-white"
-                    }`}
+                    className={`font-bold text-xs h-9 px-4 ${!shiftClosed ? "bg-emerald-600 hover:bg-emerald-700 text-white" : ""}`}
                     onClick={handleToggleShiftClose}
                   >
-                    {shiftSaving ? (
-                      <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
-                    ) : shiftClosed ? (
+                    {shiftClosed ? (
                       <>
-                        <Undo2 className="w-4 h-4 mr-1.5 text-amber-700" />
-                        Смена закрыта · Возобновить
+                        <Undo2 className="w-4 h-4 mr-1.5" />
+                        Возобновить смену
                       </>
                     ) : (
                       <>
@@ -1940,23 +1901,6 @@ export function DriverPage() {
 
               return (
                 <div className="space-y-4">
-                  {shiftClosed && (
-                    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 p-3 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-950 text-xs shadow-2xs">
-                      <div className="flex items-center gap-2">
-                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                        <span className="font-semibold">Смена закрыта водителем. Кассовая ведомость зафиксирована.</span>
-                      </div>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 text-xs text-emerald-800 hover:bg-emerald-100 font-bold px-2 self-end sm:self-auto"
-                        onClick={() => setActiveTab("report")}
-                      >
-                        Перейти в ведомость →
-                      </Button>
-                    </div>
-                  )}
-
                   {/* Section 1: Active & Remaining Points */}
                   {pendingStops.length > 0 ? (
                     <div className="space-y-4">
