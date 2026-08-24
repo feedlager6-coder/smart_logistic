@@ -3201,6 +3201,16 @@ def _telegram_api(method: str, payload: dict) -> dict:
         return result
     except HTTPException:
         raise
+    except urllib.error.HTTPError as exc:
+        desc = str(exc)
+        try:
+            raw = exc.read().decode("utf-8")
+            parsed = json.loads(raw)
+            desc = parsed.get("description") or raw
+        except Exception:
+            pass
+        logger.error("Telegram API HTTPError on %s: %s", method, desc)
+        raise RuntimeError(f"Telegram API: {desc}") from exc
     except Exception as exc:
         raise RuntimeError(str(exc)) from exc
 
@@ -3509,7 +3519,7 @@ def _telegram_render_assignment(cur, assignment_id: int, chat_id: int, request: 
     dispatcher = cur.fetchone() or {}
     text, markup = _telegram_card(data, assignment_id, driver_url, dispatcher)
     payload = {"chat_id": chat_id, "text": text}
-    if markup:
+    if markup and isinstance(markup, dict) and markup.get("inline_keyboard"):
         payload["reply_markup"] = markup
     if message_id:
         edit_payload = dict(payload)
@@ -3521,16 +3531,16 @@ def _telegram_render_assignment(cur, assignment_id: int, chat_id: int, request: 
     try:
         return _telegram_api("sendMessage", payload)
     except Exception as exc:
-        # A malformed legacy navigation URL must not block the driver from
-        # receiving the assignment. Retry with the execution link only.
+        # A malformed navigation URL or button must not block the driver from
+        # receiving the assignment. Retry with a clean execution link button.
         logger.warning("Telegram inline route card rejected, retrying compact card: %s", exc)
-        compact_markup = {"inline_keyboard": [
-            row for row in (markup.get("inline_keyboard", []) if isinstance(markup, dict) else [])
-            if any(button.get("text") == "📦 Исполнение" for button in row)
-        ]}
+        compact_keyboard = []
+        safe_link = _telegram_http_url(driver_url)
+        if safe_link:
+            compact_keyboard.append([{"text": "📦 Исполнение рейса", "url": safe_link}])
         compact_payload = {"chat_id": chat_id, "text": text}
-        if compact_markup.get("inline_keyboard"):
-            compact_payload["reply_markup"] = compact_markup
+        if compact_keyboard:
+            compact_payload["reply_markup"] = {"inline_keyboard": compact_keyboard}
         return _telegram_api("sendMessage", compact_payload)
 
 
@@ -8178,7 +8188,7 @@ def telegram_webhook(request: Request, payload: dict):
 
 def _broadcast_route_to_telegram(cur, session_id: int, uid: int, request: Request) -> dict:
     if not TELEGRAM_BOT_TOKEN:
-        return {"sent": 0, "total": 0, "skipped": 0, "errors": ["Telegram Bot API не настроен"]}
+        return {"sent": 0, "total": 0, "skipped": 0, "errors": ["Telegram Bot API не настроен: укажите TELEGRAM_BOT_TOKEN в переменных окружения"]}
 
     cur.execute("SELECT result_json FROM route_sessions WHERE id=%s AND owner_id=%s", (session_id, uid))
     session = cur.fetchone()
@@ -8208,57 +8218,24 @@ def _broadcast_route_to_telegram(cur, session_id: int, uid: int, request: Reques
     if total_count == 0:
         return {"sent": 0, "total": 0, "skipped": 0, "errors": ["Маршруты не содержат рейсов для отправки"]}
 
-    assigned_indices = {int(a["route_index"]) for a in assignments if a.get("route_index") is not None}
-    for idx, r in enumerate(routes):
-        if idx not in assigned_indices:
-            skipped += 1
-            v_name = r.get("vehicle_name") or f"Рейс #{idx+1}"
-            errors.append(f"{v_name}: водитель не назначен")
-
     for assignment in assignments:
         assignment_id = int(assignment["id"])
+        _ensure_assignment_executions(cur, assignment_id, session_id, int(assignment.get("route_index") or 0), uid)
         driver_name = (assignment.get("directory_driver_name") or assignment.get("driver_name") or "Водитель").strip()
         vehicle_label = (assignment.get("vehicle_name") or "Машина").strip()
 
-        # Step 1: Resolve chat_id directly
         chat_id = assignment.get("telegram_chat_id") or assignment.get("telegram_message_chat_id")
-
-        # Step 2: Fallback lookup in drivers table by phone or name
-        if not chat_id:
-            driver_phone = _normalize_driver_phone(assignment.get("driver_phone") or assignment.get("directory_phone") or "")
-            if driver_phone:
-                cur.execute(
-                    """SELECT telegram_chat_id FROM drivers
-                        WHERE owner_id=%s AND regexp_replace(phone, '[^0-9]', '', 'g') = regexp_replace(%s, '[^0-9]', '', 'g')
-                          AND telegram_chat_id IS NOT NULL LIMIT 1""",
-                    (uid, driver_phone),
-                )
-                d_row = cur.fetchone()
-                if d_row and d_row.get("telegram_chat_id"):
-                    chat_id = d_row["telegram_chat_id"]
-
-            if not chat_id and driver_name and driver_name.lower() != "водитель":
-                cur.execute(
-                    """SELECT telegram_chat_id FROM drivers
-                        WHERE owner_id=%s AND LOWER(TRIM(name)) = LOWER(TRIM(%s))
-                          AND telegram_chat_id IS NOT NULL LIMIT 1""",
-                    (uid, driver_name),
-                )
-                d_row = cur.fetchone()
-                if d_row and d_row.get("telegram_chat_id"):
-                    chat_id = d_row["telegram_chat_id"]
-
+        reason = None
         if not assignment.get("driver_id") and not chat_id:
-            skipped += 1
-            errors.append(f"{driver_name} ({vehicle_label}): водитель не назначен")
-            continue
+            reason = "водитель не назначен"
         elif assignment.get("is_active") is False and not chat_id:
-            skipped += 1
-            errors.append(f"{driver_name} ({vehicle_label}): водитель архивирован")
-            continue
+            reason = "водитель архивирован"
         elif not chat_id:
+            reason = "водитель не подключён к Telegram (нет chat_id)"
+
+        if reason:
             skipped += 1
-            errors.append(f"{driver_name} ({vehicle_label}): нет Telegram chat_id (водитель не подключён к боту)")
+            errors.append(f"{driver_name} ({vehicle_label}): {reason}")
             continue
 
         try:
