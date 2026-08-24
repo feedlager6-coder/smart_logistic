@@ -8198,51 +8198,6 @@ def _broadcast_route_to_telegram(cur, session_id: int, uid: int, request: Reques
     routes = result.get("routes") or []
     total_routes = len(routes)
 
-    if total_routes == 0:
-        return {"sent": 0, "total": 0, "skipped": 0, "errors": ["Маршруты не содержат рейсов для отправки"]}
-
-    cur.execute("SELECT id, name, phone, vehicle_name, telegram_chat_id FROM drivers WHERE owner_id=%s AND is_active=TRUE", (uid,))
-    active_drivers = [dict(row) for row in cur.fetchall()]
-
-    # Ensure all routes have an assignment created and executions populated
-    for idx, r in enumerate(routes):
-        cur.execute(
-            "SELECT id, driver_id FROM route_assignments WHERE session_id=%s AND route_index=%s AND owner_id=%s",
-            (session_id, idx, uid),
-        )
-        existing = cur.fetchone()
-        if not existing:
-            matched_driver = None
-            v_name = (r.get("vehicle_name") or "").strip().lower()
-            if v_name:
-                for d in active_drivers:
-                    d_vname = (d.get("vehicle_name") or "").strip().lower()
-                    d_name = (d.get("name") or "").strip().lower()
-                    if (d_vname and d_vname == v_name) or (d_name and d_name == v_name):
-                        matched_driver = d
-                        break
-            if not matched_driver and len(routes) == 1 and len(active_drivers) == 1:
-                matched_driver = active_drivers[0]
-
-            raw_token = secrets.token_urlsafe(32)
-            token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
-            d_id = matched_driver["id"] if matched_driver else None
-            d_name = matched_driver["name"] if matched_driver else (r.get("driver_name") or "Водитель")
-            d_phone = matched_driver["phone"] if matched_driver else (r.get("driver_phone") or "")
-            v_label = r.get("vehicle_name") or (matched_driver.get("vehicle_name") if matched_driver else "") or f"Рейс #{idx+1}"
-
-            cur.execute(
-                """INSERT INTO route_assignments
-                     (owner_id, session_id, route_index, driver_id, driver_name, driver_phone, vehicle_name,
-                      route_yandex_url, access_token_hash, token_created_at, expires_at)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),NOW() + INTERVAL '48 hours')
-                   RETURNING id""",
-                (uid, session_id, idx, d_id, d_name, d_phone, v_label, r.get("yandex_url") or "", token_hash),
-            )
-            new_assign = cur.fetchone()
-            if new_assign:
-                _ensure_assignment_executions(cur, int(new_assign["id"]), session_id, idx, uid)
-
     cur.execute(
         """SELECT a.id, a.route_index, a.driver_name, a.vehicle_name,
                   a.driver_id, a.driver_phone, a.telegram_message_id, a.telegram_message_chat_id,
@@ -8260,43 +8215,27 @@ def _broadcast_route_to_telegram(cur, session_id: int, uid: int, request: Reques
     skipped = 0
     errors = []
 
+    if total_count == 0:
+        return {"sent": 0, "total": 0, "skipped": 0, "errors": ["Маршруты не содержат рейсов для отправки"]}
+
     for assignment in assignments:
         assignment_id = int(assignment["id"])
         _ensure_assignment_executions(cur, assignment_id, session_id, int(assignment.get("route_index") or 0), uid)
         driver_name = (assignment.get("directory_driver_name") or assignment.get("driver_name") or "Водитель").strip()
         vehicle_label = (assignment.get("vehicle_name") or "Машина").strip()
 
-        # Step 1: Resolve chat_id directly
         chat_id = assignment.get("telegram_chat_id") or assignment.get("telegram_message_chat_id")
+        reason = None
+        if not assignment.get("driver_id") and not chat_id:
+            reason = "водитель не назначен"
+        elif assignment.get("is_active") is False and not chat_id:
+            reason = "водитель архивирован"
+        elif not chat_id:
+            reason = "водитель не подключён к Telegram (нет chat_id)"
 
-        # Step 2: Fallback lookup in drivers table by phone or name
-        if not chat_id:
-            driver_phone = _normalize_driver_phone(assignment.get("driver_phone") or assignment.get("directory_phone") or "")
-            if driver_phone:
-                cur.execute(
-                    """SELECT telegram_chat_id FROM drivers
-                        WHERE owner_id=%s AND regexp_replace(phone, '[^0-9]', '', 'g') = regexp_replace(%s, '[^0-9]', '', 'g')
-                          AND telegram_chat_id IS NOT NULL LIMIT 1""",
-                    (uid, driver_phone),
-                )
-                d_row = cur.fetchone()
-                if d_row and d_row.get("telegram_chat_id"):
-                    chat_id = d_row["telegram_chat_id"]
-
-            if not chat_id and driver_name and driver_name.lower() != "водитель":
-                cur.execute(
-                    """SELECT telegram_chat_id FROM drivers
-                        WHERE owner_id=%s AND LOWER(TRIM(name)) = LOWER(TRIM(%s))
-                          AND telegram_chat_id IS NOT NULL LIMIT 1""",
-                    (uid, driver_name),
-                )
-                d_row = cur.fetchone()
-                if d_row and d_row.get("telegram_chat_id"):
-                    chat_id = d_row["telegram_chat_id"]
-
-        if not chat_id:
+        if reason:
             skipped += 1
-            errors.append(f"{driver_name} ({vehicle_label}): нет Telegram chat_id (водитель не подключён к боту)")
+            errors.append(f"{driver_name} ({vehicle_label}): {reason}")
             continue
 
         try:
