@@ -7,7 +7,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check, AlertTriangle, Printer, Info, Settings, Package, Users, Link2, Loader2, Send, FileText, FileSpreadsheet, PlusCircle, User, Edit3, Lock, UserCheck } from "lucide-react";
+import { MapPin, Navigation, Share2, Download, RefreshCw, Car, Clock, Copy, Check, AlertTriangle, Printer, Info, Settings, Package, Users, Link2, Loader2, Send, FileText, FileSpreadsheet, PlusCircle } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap } from "react-leaflet";
 import 'leaflet/dist/leaflet.css';
@@ -172,7 +172,6 @@ function ExecutionControlPanel({ sessionId, routes, date }: { sessionId: number;
   const { toast } = useToast();
   const [driverNames, setDriverNames] = useState<Record<number, string>>({});
   const [driverIds, setDriverIds] = useState<Record<number, string>>({});
-  const [reassigningRoute, setReassigningRoute] = useState<number | null>(null);
   const [creatingRoute, setCreatingRoute] = useState<number | null>(null);
   const [sharingRoute, setSharingRoute] = useState<number | null>(null);
   const [downloadingPdf, setDownloadingPdf] = useState<number | null>(null);
@@ -367,9 +366,7 @@ function ExecutionControlPanel({ sessionId, routes, date }: { sessionId: number;
           driver_id: driverIds[routeIndex]
             ? Number(driverIds[routeIndex])
             : existingAssignment?.driver_id ?? undefined,
-          driver_name: driverNames[routeIndex] !== undefined
-            ? driverNames[routeIndex]
-            : existingAssignment?.driver_name ?? "",
+          driver_name: driverNames[routeIndex] ?? existingAssignment?.driver_name ?? "",
           vehicle_name: routes[routeIndex].vehicle_name,
         }),
       });
@@ -391,17 +388,8 @@ function ExecutionControlPanel({ sessionId, routes, date }: { sessionId: number;
         }));
       }
       await refetch();
-      setReassigningRoute(null);
-      toast({
-        title: existingAssignment ? "Водитель успешно переназначен" : "Водитель назначен",
-        description: `Для рейса «${routes[routeIndex].vehicle_name}» обновлена ссылка доступа.`,
-      });
     } catch (error) {
-      toast({
-        title: "Ошибка назначения",
-        description: error instanceof Error ? error.message : "Не удалось назначить водителя",
-        variant: "destructive",
-      });
+      window.alert(error instanceof Error ? error.message : "Не удалось создать рейс");
     } finally {
       setCreatingRoute(null);
     }
@@ -575,44 +563,6 @@ function ExecutionControlPanel({ sessionId, routes, date }: { sessionId: number;
                         </span>
                       )}
                     </div>
-                    {assignment && (
-                      <div className="flex items-center gap-2 text-xs text-foreground/90 mt-1 flex-wrap">
-                        <span className="inline-flex items-center gap-1 font-medium bg-muted/60 px-2 py-0.5 rounded text-[12px]">
-                          <User className="w-3.5 h-3.5 text-primary shrink-0" />
-                          <span>Водитель: <strong>{assignment.driver_name || "Не указан"}</strong>{assignment.driver_phone ? ` (${assignment.driver_phone})` : ""}</span>
-                        </span>
-                        {completed === 0 && assignment.status !== "completed" ? (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-6 px-2 text-xs text-indigo-700 hover:bg-indigo-50 font-semibold"
-                            onClick={() => {
-                              if (reassigningRoute === routeIndex) {
-                                setReassigningRoute(null);
-                              } else {
-                                setReassigningRoute(routeIndex);
-                                setDriverIds((prev) => ({
-                                  ...prev,
-                                  [routeIndex]: assignment.driver_id ? String(assignment.driver_id) : "",
-                                }));
-                                setDriverNames((prev) => ({
-                                  ...prev,
-                                  [routeIndex]: assignment.driver_name || "",
-                                }));
-                              }
-                            }}
-                          >
-                            <Edit3 className="w-3 h-3 mr-1 text-indigo-600" />
-                            {reassigningRoute === routeIndex ? "Отмена" : "Сменить водителя"}
-                          </Button>
-                        ) : (
-                          <span className="text-[11px] text-muted-foreground bg-muted/30 px-2 py-0.5 rounded border border-border/50 flex items-center gap-1">
-                            <Lock className="w-3 h-3 text-muted-foreground/70" />
-                            {assignment.status === "completed" ? "Рейс завершён" : `Замена недоступна (выполнено ${completed} зак.)`}
-                          </span>
-                        )}
-                      </div>
-                    )}
                     <div className="flex items-center gap-2 text-xs text-muted-foreground mt-0.5 flex-wrap">
                       <span>{completed} из {total} точек завершено</span>
                       {assignment?.expires_at && (
@@ -749,66 +699,7 @@ function ExecutionControlPanel({ sessionId, routes, date }: { sessionId: number;
                   {assignment.last_location?.captured_at ? ` · последнее обновление ${formatMoscowTime(assignment.last_location.captured_at)}` : " · позиция ещё не получена"}
                 </div>
               )}
-              {assignment && reassigningRoute === routeIndex && (
-                <div className="p-3.5 bg-indigo-50/70 border border-indigo-200 rounded-xl space-y-2.5 shadow-xs">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-indigo-950 flex items-center gap-1.5">
-                      <Users className="w-3.5 h-3.5 text-indigo-600" />
-                      Смена назначенного водителя для «{route.vehicle_name}»:
-                    </span>
-                    <span className="text-[11px] text-indigo-700 font-medium">Точки ещё не доставлялись</span>
-                  </div>
-                  <div className="flex flex-col sm:flex-row gap-2">
-                    <select
-                      className="w-full sm:w-1/2 h-9 rounded-md border border-indigo-200 bg-background px-3 text-xs font-medium text-foreground focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-xs"
-                      value={driverIds[routeIndex] ?? (assignment.driver_id ? String(assignment.driver_id) : "")}
-                      onChange={(event) => {
-                        const selectedId = event.target.value;
-                        setDriverIds((current) => ({ ...current, [routeIndex]: selectedId }));
-                        if (selectedId) {
-                          const found = (driversData?.drivers ?? []).find((d) => String(d.id) === selectedId);
-                          if (found) {
-                            setDriverNames((current) => ({ ...current, [routeIndex]: found.name }));
-                          }
-                        }
-                      }}
-                    >
-                      <option value="">👤 Выберите водителя из справочника</option>
-                      {(driversData?.drivers ?? []).map((driver) => (
-                        <option key={driver.id} value={driver.id}>
-                          {driver.name}{driver.vehicle_name ? ` — ${driver.vehicle_name}` : ""}
-                        </option>
-                      ))}
-                    </select>
-                    <input
-                      className="w-full sm:w-1/2 h-9 rounded-md border border-indigo-200 bg-background px-3 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-xs"
-                      placeholder="Или введите имя водителя"
-                      value={driverNames[routeIndex] ?? assignment.driver_name ?? ""}
-                      onChange={(event) => setDriverNames((current) => ({ ...current, [routeIndex]: event.target.value }))}
-                    />
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <Button
-                        size="sm"
-                        className="h-9 px-3.5 font-bold text-xs bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs"
-                        onClick={() => createAssignment(routeIndex)}
-                        disabled={creatingRoute === routeIndex}
-                      >
-                        {creatingRoute === routeIndex ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Check className="w-3.5 h-3.5 mr-1" />}
-                        Сохранить
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-9 px-3 text-xs"
-                        onClick={() => setReassigningRoute(null)}
-                      >
-                        Отмена
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-              )}
-              {assignment && reassigningRoute !== routeIndex && (
+              {assignment && (
                 <Button size="sm" variant="outline" className="w-full" onClick={() => createAssignment(routeIndex)} disabled={creatingRoute === routeIndex}>
                   {creatingRoute === routeIndex ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <RefreshCw className="w-4 h-4 mr-1" />}
                   Выдать новую ссылку (срок 48 часов)
@@ -819,16 +710,7 @@ function ExecutionControlPanel({ sessionId, routes, date }: { sessionId: number;
                   <select
                     className="w-full sm:w-1/2 h-10 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground focus:outline-none focus:ring-2 focus:ring-primary shadow-xs"
                     value={driverIds[routeIndex] ?? ""}
-                    onChange={(event) => {
-                      const selectedId = event.target.value;
-                      setDriverIds((current) => ({ ...current, [routeIndex]: selectedId }));
-                      if (selectedId) {
-                        const found = (driversData?.drivers ?? []).find((d) => String(d.id) === selectedId);
-                        if (found) {
-                          setDriverNames((current) => ({ ...current, [routeIndex]: found.name }));
-                        }
-                      }
-                    }}
+                    onChange={(event) => setDriverIds((current) => ({ ...current, [routeIndex]: event.target.value }))}
                   >
                     <option value="">👤 Выберите водителя из справочника</option>
                     {(driversData?.drivers ?? []).map((driver) => (
