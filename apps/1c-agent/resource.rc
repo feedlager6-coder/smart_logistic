@@ -1,0 +1,4 @@
+#include <windows.h>
+
+1 24 "manifest.xml"
+IDI_ICON1 ICON "smartroute.ico"

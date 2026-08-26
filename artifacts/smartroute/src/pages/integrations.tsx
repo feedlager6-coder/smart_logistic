@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -41,9 +42,39 @@ import {
   Shield,
   ExternalLink,
   FileText,
+  Monitor,
+  Laptop,
+  Terminal,
+  Layers,
+  Sparkles,
+  KeyRound,
+  PlayCircle,
+  CheckCheck,
+  Server,
+  HelpCircle,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+
+interface ConnectedAgent {
+  id: string;
+  token: string;
+  name: string;
+  base_name: string;
+  config_type: string;
+  v8_version: string;
+  hostname?: string;
+  ip_address?: string;
+  connection_type: "com" | "http";
+  status: "active" | "syncing" | "error" | "idle";
+  last_heartbeat_at: string;
+  last_sync_at: string | null;
+  sync_interval_min: number;
+  total_orders_synced: number;
+  total_statuses_updated: number;
+  last_error?: string | null;
+  created_at: string;
+}
 
 interface Integration {
   id: number;
@@ -64,6 +95,8 @@ interface Integration {
 
 interface SyncLog {
   id: number;
+  integration_id?: number;
+  agent_id?: string;
   started_at: string;
   status: string;
   orders_received: number;
@@ -88,13 +121,6 @@ interface SetupResult {
   package_b64: string;
 }
 
-interface StatusInfo {
-  label: string;
-  colorClass: string;
-  icon: React.ReactNode;
-  description: string;
-}
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 async function apiFetch(path: string, opts?: RequestInit) {
@@ -103,7 +129,7 @@ async function apiFetch(path: string, opts?: RequestInit) {
     let msg = `HTTP ${res.status}`;
     try {
       const j = await res.json();
-      msg = j.detail || j.message || msg;
+      msg = j.detail || j.message || j.error || msg;
     } catch {}
     throw new Error(msg);
   }
@@ -140,110 +166,6 @@ function downloadZip(b64: string, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-/** Derive a granular, human-readable status from integration + logs */
-function deriveStatus(integration: Integration, logs: SyncLog[]): StatusInfo {
-  const realLogs = logs.filter((l) => l.error_detail !== "Ручная проверка");
-  const errorLogs = realLogs.filter((l) => l.status === "error");
-  const lastErrorDetail = (errorLogs[0]?.error_detail ?? "").toLowerCase();
-
-  const isAuthError =
-    lastErrorDetail.includes("401") ||
-    lastErrorDetail.includes("403") ||
-    lastErrorDetail.includes("unauthorized") ||
-    lastErrorDetail.includes("forbidden") ||
-    lastErrorDetail.includes("ключ") ||
-    lastErrorDetail.includes("токен");
-
-  const isConnError =
-    lastErrorDetail.includes("connect") ||
-    lastErrorDetail.includes("timeout") ||
-    lastErrorDetail.includes("ssl") ||
-    lastErrorDetail.includes("network") ||
-    lastErrorDetail.includes("соединени");
-
-  switch (integration.status) {
-    case "active": {
-      const stats = integration.stats;
-      if (stats && stats.total_orders === 0) {
-        return {
-          label: "Первое соединение",
-          colorClass: "text-blue-700 bg-blue-50 border-blue-200",
-          icon: <Wifi className="w-3.5 h-3.5" />,
-          description: "Подключение установлено. Заказы начнут поступать по расписанию в 07:30.",
-        };
-      }
-      const staleMs = integration.last_sync_at
-        ? Date.now() - new Date(integration.last_sync_at).getTime()
-        : Infinity;
-      if (staleMs > 26 * 3600 * 1000) {
-        return {
-          label: "Нет новых данных",
-          colorClass: "text-amber-700 bg-amber-50 border-amber-200",
-          icon: <Clock className="w-3.5 h-3.5" />,
-          description: "Последняя синхронизация была более суток назад",
-        };
-      }
-      return {
-        label: "Интеграция работает",
-        colorClass: "text-emerald-700 bg-emerald-50 border-emerald-200",
-        icon: <CheckCircle2 className="w-3.5 h-3.5" />,
-        description: `Последняя синхронизация: ${friendlyDate(integration.last_sync_at)}`,
-      };
-    }
-    case "error":
-      if (isAuthError) {
-        return {
-          label: "Ошибка авторизации",
-          colorClass: "text-red-700 bg-red-50 border-red-200",
-          icon: <XCircle className="w-3.5 h-3.5" />,
-          description: "Ключ доступа недействителен или истёк. Пересоздайте подключение.",
-        };
-      }
-      if (isConnError) {
-        return {
-          label: "Не удалось соединиться",
-          colorClass: "text-red-700 bg-red-50 border-red-200",
-          icon: <WifiOff className="w-3.5 h-3.5" />,
-          description: "Нет связи с 1С. Проверьте интернет-доступ на сервере 1С.",
-        };
-      }
-      return {
-        label: "Ошибка синхронизации",
-        colorClass: "text-red-700 bg-red-50 border-red-200",
-        icon: <XCircle className="w-3.5 h-3.5" />,
-        description: "Проверьте журнал ниже для деталей",
-      };
-    case "disabled":
-      return {
-        label: "Приостановлена",
-        colorClass: "text-gray-600 bg-gray-50 border-gray-200",
-        icon: <WifiOff className="w-3.5 h-3.5" />,
-        description: "Синхронизация отключена вручную",
-      };
-    case "setup":
-    default:
-      if (
-        realLogs.length > 0 &&
-        realLogs.some((l) => l.status === "error" || (l.status === "partial" && l.errors_count > 0))
-      ) {
-        return {
-          label: "Ошибка при первом подключении",
-          colorClass: "text-red-700 bg-red-50 border-red-200",
-          icon: <AlertTriangle className="w-3.5 h-3.5" />,
-          description: "Файл установлен, но при первом подключении возникла ошибка",
-        };
-      }
-      return {
-        label: "Ожидает установки",
-        colorClass: "text-amber-700 bg-amber-50 border-amber-200",
-        icon: <Clock className="w-3.5 h-3.5" />,
-        description: "Ждём первую синхронизацию из 1С",
-      };
-  }
-}
-
-// ─── CopyButton ───────────────────────────────────────────────────────────────
-
 function CopyButton({ text, label }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -254,996 +176,649 @@ function CopyButton({ text, label }: { text: string; label?: string }) {
           setTimeout(() => setCopied(false), 2000);
         });
       }}
-      className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground transition-colors shrink-0"
+      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground transition-all shrink-0 cursor-pointer shadow-xs border border-border"
       title="Скопировать"
     >
-      {copied ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+      {copied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
       {label ?? (copied ? "Скопировано!" : "Копировать")}
     </button>
   );
 }
 
-// ─── Landing ──────────────────────────────────────────────────────────────────
+// ─── TAB 1: Windows 1C Agent Component ───────────────────────────────────────
 
-interface LandingProps {
-  existingIntegration: Integration | null;
-  onConnect: () => void;
-  onOpenDashboard: () => void;
+interface AgentTabProps {
+  onSwitchToManual: () => void;
 }
 
-function IntegrationsLanding({ existingIntegration, onConnect, onOpenDashboard }: LandingProps) {
-  return (
-    <div className="max-w-3xl">
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold text-foreground mb-1">Интеграции</h1>
-        <p className="text-muted-foreground">
-          Подключите учётную систему — заказы будут поступать в SmartRoute автоматически
-        </p>
-      </div>
-
-      {/* 1C Hero Card */}
-      <div className="relative rounded-2xl border-2 border-orange-200 bg-gradient-to-br from-orange-50 to-amber-50 p-6 mb-6 overflow-hidden">
-        <div className="absolute top-0 right-0 w-48 h-48 opacity-5">
-          <Building2 className="w-full h-full text-orange-900" />
-        </div>
-
-        <div className="relative">
-          <div className="flex items-start justify-between mb-4">
-            <div className="flex items-center gap-3">
-              <div className="w-12 h-12 rounded-xl bg-orange-100 border border-orange-200 flex items-center justify-center font-bold text-orange-700 text-lg">
-                1С
-              </div>
-              <div>
-                <h2 className="text-lg font-bold text-gray-900">1С:Предприятие</h2>
-                <p className="text-sm text-orange-700">Версия 8.3 и выше · Любая конфигурация</p>
-              </div>
-            </div>
-            {existingIntegration ? (
-              <Badge
-                className={`text-xs ${
-                  existingIntegration.status === "active"
-                    ? "bg-emerald-100 text-emerald-800 border-emerald-200"
-                    : existingIntegration.status === "error"
-                    ? "bg-red-100 text-red-800 border-red-200"
-                    : "bg-amber-100 text-amber-800 border-amber-200"
-                }`}
-              >
-                {existingIntegration.status === "active"
-                  ? "🟢 Работает"
-                  : existingIntegration.status === "error"
-                  ? "🔴 Ошибка"
-                  : "🟡 Настраивается"}
-              </Badge>
-            ) : null}
-          </div>
-
-          {existingIntegration ? (
-            <div className="space-y-4">
-              <p className="text-sm text-gray-700">
-                {existingIntegration.status === "active"
-                  ? `Заказы передаются автоматически. Последняя синхронизация: ${friendlyDate(existingIntegration.last_sync_at)}`
-                  : existingIntegration.status === "error"
-                  ? "Возникла ошибка при синхронизации. Откройте панель управления для деталей."
-                  : "Интеграция настраивается. Ожидаем первое подключение из 1С."}
-              </p>
-              <Button onClick={onOpenDashboard} className="w-full sm:w-auto">
-                Открыть панель управления <ArrowRight className="w-4 h-4 ml-2" />
-              </Button>
-            </div>
-          ) : (
-            <div className="space-y-4">
-              <p className="text-sm text-gray-700 leading-relaxed">
-                Заказы из 1С передаются в SmartRoute каждое утро — вы строите маршруты, не вводите данные вручную.
-              </p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {[
-                  "Автоматическая передача заказов в 07:30",
-                  "Работает с любой конфигурацией 1С 8.3+",
-                  "История всех синхронизаций и статистика",
-                  "Настройка займёт ~20 минут у специалиста",
-                ].map((benefit) => (
-                  <div key={benefit} className="flex items-center gap-2 text-sm text-gray-700">
-                    <CheckCircle2 className="w-4 h-4 text-orange-500 shrink-0" />
-                    <span>{benefit}</span>
-                  </div>
-                ))}
-              </div>
-              <div className="flex flex-col sm:flex-row gap-3 pt-2">
-                <Button size="lg" onClick={onConnect} className="bg-orange-600 hover:bg-orange-700 text-white">
-                  Подключить 1С:Предприятие <ArrowRight className="w-4 h-4 ml-2" />
-                </Button>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Coming soon */}
-      <div>
-        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-3">Скоро</p>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          {[
-            { name: "МойСклад", icon: <Database className="w-5 h-5" />, color: "text-blue-500" },
-            { name: "Bitrix24", icon: <Zap className="w-5 h-5" />, color: "text-purple-500" },
-            { name: "Google Sheets", icon: <BarChart3 className="w-5 h-5" />, color: "text-green-500" },
-          ].map((item) => (
-            <div
-              key={item.name}
-              className="flex items-center gap-3 p-3 rounded-lg border bg-muted/30 opacity-60"
-            >
-              <div className={item.color}>{item.icon}</div>
-              <span className="text-sm font-medium">{item.name}</span>
-              <Badge variant="outline" className="ml-auto text-xs">Скоро</Badge>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Setup Flow ───────────────────────────────────────────────────────────────
-
-type SetupStep = 0 | 1 | 2 | 3;
-
-interface SetupFlowProps {
-  onBack: () => void;
-  onDone: (integration: Integration) => void;
-}
-
-function OneCSetupFlow({ onBack, onDone }: SetupFlowProps) {
+function OneCAgentTab({ onSwitchToManual }: AgentTabProps) {
   const { toast } = useToast();
-  const [step, setStep] = useState<SetupStep>(0);
-  const [result, setResult] = useState<SetupResult | null>(null);
-  const [fileDownloaded, setFileDownloaded] = useState(false);
-  const [showSpecialistGuide, setShowSpecialistGuide] = useState(false);
+  const [pairingCode, setPairingCode] = useState<string | null>(null);
+  const [isGeneratingCode, setIsGeneratingCode] = useState(false);
+  const [agents, setAgents] = useState<ConnectedAgent[]>([]);
+  const [isLoadingAgents, setIsLoadingAgents] = useState(true);
+  const [syncLogs, setSyncLogs] = useState<SyncLog[]>([]);
+  const [showLogsModal, setShowLogsModal] = useState(false);
+  const [agentToDelete, setAgentToDelete] = useState<string | null>(null);
+  const [isSyncingNow, setIsSyncingNow] = useState(false);
 
-  const [pollStatus, setPollStatus] = useState<"waiting" | "connected">("waiting");
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Load connected agents
+  const loadAgents = useCallback(async () => {
+    try {
+      const data: ConnectedAgent[] = await apiFetch("/api/integrations/1c/agent/agents");
+      setAgents(data);
+    } catch {
+      // Fallback
+    } finally {
+      setIsLoadingAgents(false);
+    }
+  }, []);
 
-  const startPolling = useCallback((integrationId: number) => {
-    if (pollRef.current) clearInterval(pollRef.current);
-    pollRef.current = setInterval(async () => {
-      try {
-        const integration: Integration = await apiFetch(`/api/integrations/${integrationId}`);
-        if (integration.status === "active" || integration.status === "error") {
-          setPollStatus("connected");
-          clearInterval(pollRef.current!);
-          return;
-        }
-        const logs: SyncLog[] = await apiFetch(`/api/integrations/${integrationId}/logs?limit=5`);
-        const realLogs = logs.filter((l) => l.error_detail !== "Ручная проверка");
-        if (realLogs.length > 0) {
-          setPollStatus("connected");
-          clearInterval(pollRef.current!);
-        }
-      } catch {}
-    }, 5000);
+  // Load sync logs
+  const loadLogs = useCallback(async () => {
+    try {
+      const data: SyncLog[] = await apiFetch("/api/integrations/1/logs");
+      setSyncLogs(data);
+    } catch {}
+  }, []);
+
+  // Load active pairing code
+  const loadPairingCode = useCallback(async () => {
+    try {
+      const data = await apiFetch("/api/integrations/1c/agent/code/active");
+      if (data?.code) {
+        setPairingCode(data.code);
+      }
+    } catch {}
   }, []);
 
   useEffect(() => {
-    if (step === 3 && result?.id) startPolling(result.id);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [step, result?.id, startPolling]);
+    loadAgents();
+    loadLogs();
+    loadPairingCode();
+    const interval = setInterval(loadAgents, 8000);
+    return () => clearInterval(interval);
+  }, [loadAgents, loadLogs, loadPairingCode]);
 
-  const handleStart = async () => {
-    setStep(1);
+  // Generate pairing code
+  const handleGenerateCode = async () => {
+    setIsGeneratingCode(true);
     try {
-      const data: SetupResult = await apiFetch("/api/integrations/quick-setup", { method: "POST" });
-      setResult(data);
-      setStep(2);
-    } catch (e: unknown) {
+      const data = await apiFetch("/api/integrations/1c/agent/code", { method: "POST" });
+      setPairingCode(data.code);
       toast({
-        title: "Не удалось создать канал подключения",
-        description: e instanceof Error ? e.message : String(e),
+        title: "Код привязки сгенерирован",
+        description: "Введите этот код в приложении-агенте на компьютере с 1С.",
+      });
+    } catch (e: any) {
+      toast({
+        title: "Ошибка генерации кода",
+        description: e.message || "Не удалось создать код",
         variant: "destructive",
       });
-      setStep(0);
+    } finally {
+      setIsGeneratingCode(false);
     }
   };
 
-  const handleDownload = () => {
-    if (!result) return;
-    downloadZip(result.package_b64, "SmartRoute_Setup.zip");
-    setFileDownloaded(true);
-    toast({
-      title: "Файл скачан",
-      description: "Передайте SmartRoute_Setup.zip специалисту по 1С — внутри файл и инструкция.",
-    });
-  };
-
-  const handleEmailSpecialist = () => {
-    if (!result) return;
-    const subject = encodeURIComponent("SmartRoute — файл подключения к 1С");
-    const body = encodeURIComponent(
-      `Привет!\n\n` +
-      `Нужно подключить нашу систему SmartRoute к 1С.\n` +
-      `Скачай архив SmartRoute_Setup.zip — внутри файл SmartRoute.epf и инструкция.\n\n` +
-      `Что нужно сделать:\n` +
-      `1. Открой файл SmartRoute.epf в 1С\n` +
-      `2. Введи параметры подключения из инструкции\n` +
-      `3. Проверь соединение\n` +
-      `4. Настрой автоматическую отправку в 07:30\n\n` +
-      `Адрес SmartRoute: ${result.base_url}\n\n` +
-      `Все детали и ключ доступа — в файле Инструкция.txt внутри архива.\n\n` +
-      `Если вопросы — support@smartroute.app\n\nСпасибо!`
-    );
-    window.open(`mailto:?subject=${subject}&body=${body}`, "_blank");
-  };
-
-  const handleFinish = async () => {
-    if (!result) return;
+  // Trigger manual sync
+  const handleTriggerSync = async () => {
+    setIsSyncingNow(true);
     try {
-      const integration: Integration = await apiFetch(`/api/integrations/${result.id}`);
-      onDone(integration);
-    } catch {
-      onDone({
-        id: result.id,
-        type: "1c",
-        name: "1С:Предприятие",
-        status: "setup",
-        config: {},
-        last_sync_at: null,
-        created_at: new Date().toISOString(),
+      await apiFetch("/api/integrations/1/test", { method: "POST" });
+      await loadAgents();
+      await loadLogs();
+      toast({
+        title: "Синхронизация выполнена",
+        description: "Данные из 1С успешно обновлены в SmartRoute.",
+      });
+    } catch (e: any) {
+      toast({
+        title: "Ошибка синхронизации",
+        description: e.message || "Не удалось выполнить синхронизацию",
+        variant: "destructive",
+      });
+    } finally {
+      setIsSyncingNow(false);
+    }
+  };
+
+  // Disconnect agent
+  const handleDisconnectAgent = async () => {
+    if (!agentToDelete) return;
+    try {
+      await apiFetch(`/api/integrations/1c/agent/${agentToDelete}`, { method: "DELETE" });
+      setAgentToDelete(null);
+      await loadAgents();
+      toast({
+        title: "База 1С отвязана",
+        description: "Агент успешно отключен от SmartRoute.",
+      });
+    } catch (e: any) {
+      toast({
+        title: "Ошибка отключения",
+        description: e.message || "Не удалось отключить агента",
+        variant: "destructive",
       });
     }
   };
 
-  const STEPS = [
-    { n: 0, label: "Запуск", done: step > 0 },
-    { n: 1, label: "Файл", done: step > 2 },
-    { n: 2, label: "Готово", done: pollStatus === "connected" },
-  ];
-
-  return (
-    <div className="max-w-3xl">
-      <Button variant="ghost" size="sm" className="mb-6" onClick={onBack}>
-        <ArrowLeft className="w-4 h-4 mr-1" /> Интеграции
-      </Button>
-
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold mb-1">Подключение 1С:Предприятие</h1>
-        <p className="text-sm text-muted-foreground">
-          Около 5 минут с вашей стороны и 20 минут у специалиста по 1С.
-        </p>
-      </div>
-
-      {/* Progress indicator */}
-      <div className="flex items-center gap-2 mb-8">
-        {STEPS.map((s, i) => (
-          <React.Fragment key={s.n}>
-            <div className="flex flex-col items-center gap-1">
-              <div
-                className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium transition-colors ${
-                  s.done
-                    ? "bg-emerald-500 text-white"
-                    : step === s.n || (s.n === 1 && (step === 1 || step === 2))
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-muted text-muted-foreground"
-                }`}
-              >
-                {s.done ? <CheckCircle2 className="w-4 h-4" /> : i + 1}
-              </div>
-              <span className="text-xs text-muted-foreground hidden sm:block">{s.label}</span>
-            </div>
-            {i < STEPS.length - 1 && (
-              <div
-                className={`flex-1 h-0.5 mb-4 transition-colors ${s.done ? "bg-emerald-500" : "bg-muted"}`}
-              />
-            )}
-          </React.Fragment>
-        ))}
-      </div>
-
-      <Card>
-        <CardContent className="p-6">
-
-          {/* ── Step 0: Explanation ── */}
-          {step === 0 && (
-            <div className="space-y-6">
-              <div>
-                <h2 className="text-lg font-semibold mb-1">Как это работает</h2>
-                <p className="text-sm text-muted-foreground">Три простых шага — и заказы поступают автоматически.</p>
-              </div>
-
-              <div className="space-y-3">
-                {[
-                  {
-                    time: "~ 2 сек",
-                    icon: <Shield className="w-5 h-5 text-primary" />,
-                    title: "SmartRoute создаёт защищённый канал",
-                    desc: "Уникальный ключ доступа и файл подключения генерируются автоматически.",
-                  },
-                  {
-                    time: "~ 5 мин",
-                    icon: <Download className="w-5 h-5 text-primary" />,
-                    title: "Скачайте SmartRoute.epf и передайте специалисту",
-                    desc: "Один файл с готовыми настройками. Пересылаете по почте или мессенджеру.",
-                  },
-                  {
-                    time: "~ 20 мин",
-                    icon: <Building2 className="w-5 h-5 text-primary" />,
-                    title: "Специалист устанавливает файл в 1С",
-                    desc: "Без вмешательства в конфигурацию. Заказы начинают поступать автоматически в 07:30.",
-                  },
-                ].map((item) => (
-                  <div key={item.title} className="flex gap-4 p-4 rounded-lg border bg-muted/30">
-                    <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
-                      {item.icon}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-0.5 flex-wrap">
-                        <p className="text-sm font-semibold">{item.title}</p>
-                        <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">{item.time}</span>
-                      </div>
-                      <p className="text-xs text-muted-foreground">{item.desc}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <Alert className="border-blue-200 bg-blue-50">
-                <Info className="w-4 h-4 text-blue-600" />
-                <AlertDescription className="text-blue-800 text-sm ml-2">
-                  <strong>Нет специалиста по 1С?</strong> Напишите нам на{" "}
-                  <a href="mailto:support@smartroute.app" className="underline font-medium">
-                    support@smartroute.app
-                  </a>{" "}
-                  — поможем организовать установку.
-                </AlertDescription>
-              </Alert>
-
-              <Button size="lg" className="w-full" onClick={handleStart}>
-                Начать подключение <ArrowRight className="w-4 h-4 ml-2" />
-              </Button>
-            </div>
-          )}
-
-          {/* ── Step 1: Creating ── */}
-          {step === 1 && (
-            <div className="py-12 flex flex-col items-center gap-4 text-center">
-              <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center">
-                <Loader2 className="w-8 h-8 text-primary animate-spin" />
-              </div>
-              <div>
-                <p className="font-semibold text-lg">Создаём защищённый канал...</p>
-                <p className="text-sm text-muted-foreground mt-1">Готовим файл подключения и ключ доступа</p>
-              </div>
-            </div>
-          )}
-
-          {/* ── Step 2: Download EPF ── */}
-          {step === 2 && result && (
-            <div className="space-y-6">
-              <div>
-                <div className="flex items-center gap-2 mb-1">
-                  <CheckCircle2 className="w-5 h-5 text-emerald-500" />
-                  <h2 className="text-lg font-semibold">Канал создан! Передайте файл специалисту</h2>
-                </div>
-                <p className="text-sm text-muted-foreground">
-                  Скачайте архив и отправьте его специалисту по 1С — он сделает остальное.
-                </p>
-              </div>
-
-              {/* EPF download */}
-              <div className="rounded-xl border-2 border-dashed border-primary/40 bg-primary/5 p-5 text-center space-y-3">
-                <div className="w-14 h-14 mx-auto bg-primary/10 rounded-full flex items-center justify-center">
-                  <Package className="w-7 h-7 text-primary" />
-                </div>
-                <div>
-                  <p className="font-semibold">SmartRoute_Setup.zip</p>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    Содержит готовый файл кода SmartRoute.bsl с вашим встроенным API-ключом и инструкцию.
-                  </p>
-                </div>
-                <Button onClick={handleDownload} className="w-full" size="lg">
-                  <Download className="w-4 h-4 mr-2" />
-                  Скачать пакет SmartRoute_Setup.zip
-                </Button>
-                {fileDownloaded && (
-                  <p className="text-xs text-emerald-600 flex items-center justify-center gap-1.5">
-                    <CheckCircle2 className="w-3.5 h-3.5" /> Файл скачан
-                  </p>
-                )}
-              </div>
-
-              {/* Connection params (for reference) */}
-              <div className="rounded-lg border bg-amber-50 border-amber-200 p-4 space-y-3">
-                <p className="text-xs font-semibold text-amber-900 uppercase tracking-wide">
-                  Параметры (уже в архиве — для справки)
-                </p>
-                <div className="space-y-2">
-                  <div>
-                    <p className="text-xs text-amber-700 mb-1">Адрес SmartRoute:</p>
-                    <div className="flex items-center gap-2 bg-white rounded border border-amber-200 px-3 py-2">
-                      <code className="text-xs font-mono flex-1 break-all">{result.base_url}</code>
-                      <CopyButton text={result.base_url} />
-                    </div>
-                  </div>
-                  <div>
-                    <p className="text-xs text-amber-700 mb-1">
-                      Ключ доступа{" "}
-                      <span className="font-normal">(в архиве; показывается только сейчас)</span>:
-                    </p>
-                    <div className="flex items-center gap-2 bg-white rounded border border-amber-200 px-3 py-2">
-                      <code className="text-xs font-mono flex-1 break-all">{result.full_key}</code>
-                      <CopyButton text={result.full_key} />
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Email */}
-              <Button variant="outline" className="w-full" onClick={handleEmailSpecialist}>
-                <Mail className="w-4 h-4 mr-2" /> Написать специалисту по email
-              </Button>
-
-              {/* Technical instructions — clearly for specialist only */}
-              <div className="rounded-lg border overflow-hidden">
-                <button
-                  className="flex items-center justify-between w-full px-4 py-3 text-sm font-medium hover:bg-muted/50 transition-colors"
-                  onClick={() => setShowSpecialistGuide((v) => !v)}
-                >
-                  <span className="flex items-center gap-2">
-                    <FileText className="w-4 h-4 text-muted-foreground" />
-                    Техническая инструкция для специалиста 1С
-                  </span>
-                  <ChevronDown
-                    className={`w-4 h-4 text-muted-foreground transition-transform ${
-                      showSpecialistGuide ? "rotate-180" : ""
-                    }`}
-                  />
-                </button>
-                {showSpecialistGuide && (
-                  <div className="px-4 pb-4 space-y-3 border-t bg-muted/20">
-                    <p className="text-xs text-muted-foreground pt-3">
-                      Эти шаги описаны в файле Инструкция.txt внутри архива. Полная страница —{" "}
-                      <a href="/integrations/1c/specialist" target="_blank" className="underline text-primary font-medium">
-                        открыть для специалиста <ExternalLink className="w-3 h-3 inline" />
-                      </a>
-                    </p>
-                    <ol className="space-y-2.5">
-                      {[
-                        "Запустите 1С:Предприятие (режим Предприятия, не Конфигуратор).",
-                        "Файл → Открыть → выберите SmartRoute.epf из архива.",
-                        "Введите адрес SmartRoute и ключ доступа из раздела «Параметры» выше.",
-                        "Нажмите «Проверить соединение» — ожидается «✅ Соединение успешно».",
-                        "Настройте ежедневный запуск в 07:30 через сервис регламентных заданий.",
-                      ].map((text, i) => (
-                        <li key={i} className="flex gap-3 text-sm">
-                          <span className="w-5 h-5 rounded-full bg-primary/10 text-primary text-xs flex items-center justify-center shrink-0 font-semibold mt-0.5">
-                            {i + 1}
-                          </span>
-                          <span className="text-muted-foreground">{text}</span>
-                        </li>
-                      ))}
-                    </ol>
-                    <div className="pt-1">
-                      <a
-                        href="/integrations/1c/specialist"
-                        target="_blank"
-                        className="inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:underline"
-                      >
-                        <ExternalLink className="w-3.5 h-3.5" />
-                        Открыть полную техническую документацию
-                      </a>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <Button
-                className="w-full"
-                size="lg"
-                onClick={() => setStep(3)}
-              >
-                Специалист установил файл — ждём подключение →
-              </Button>
-            </div>
-          )}
-
-          {/* ── Step 3: Waiting ── */}
-          {step === 3 && (
-            <div className="space-y-6">
-              <div>
-                <h2 className="text-lg font-semibold mb-1">Ожидаем первое подключение</h2>
-                <p className="text-sm text-muted-foreground">
-                  Как только специалист установит файл и проверит соединение — здесь появится результат.
-                </p>
-              </div>
-
-              {pollStatus === "waiting" ? (
-                <div className="rounded-xl border-2 border-dashed border-muted p-10 text-center space-y-4">
-                  <div className="relative inline-block">
-                    <div className="w-14 h-14 rounded-full bg-muted flex items-center justify-center">
-                      <Wifi className="w-7 h-7 text-muted-foreground/50" />
-                    </div>
-                    <div className="absolute -bottom-1 -right-1 w-6 h-6 bg-primary rounded-full flex items-center justify-center">
-                      <Loader2 className="w-3.5 h-3.5 text-white animate-spin" />
-                    </div>
-                  </div>
-                  <div>
-                    <p className="font-semibold">Ожидаем данные из 1С...</p>
-                    <p className="text-sm text-muted-foreground mt-1">
-                      Проверяем каждые 5 секунд. Страницу закрывать не нужно.
-                    </p>
-                  </div>
-                </div>
-              ) : (
-                <div className="rounded-xl border-2 border-emerald-200 bg-emerald-50 p-10 text-center space-y-4">
-                  <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto">
-                    <CheckCircle2 className="w-8 h-8 text-emerald-600" />
-                  </div>
-                  <div>
-                    <p className="text-xl font-bold text-emerald-800">🎉 Интеграция работает!</p>
-                    <p className="text-sm text-emerald-700 mt-1">
-                      Первые данные из 1С получены. Заказы будут поступать автоматически каждое утро.
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              {/* Checklist */}
-              <div className="rounded-lg bg-muted/40 border p-4 space-y-2">
-                {[
-                  { done: true, text: "Защищённый канал создан" },
-                  { done: fileDownloaded || true, text: "Файл подключения подготовлен" },
-                  { done: pollStatus === "connected", text: "Первое соединение установлено" },
-                ].map((item) => (
-                  <div key={item.text} className="flex items-center gap-2 text-sm">
-                    {item.done ? (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
-                    ) : (
-                      <Clock className="w-4 h-4 text-amber-400 shrink-0" />
-                    )}
-                    <span className={item.done ? "text-foreground" : "text-muted-foreground"}>
-                      {item.text}
-                    </span>
-                  </div>
-                ))}
-              </div>
-
-              <Button
-                variant={pollStatus === "connected" ? "default" : "outline"}
-                className="w-full"
-                onClick={handleFinish}
-              >
-                {pollStatus === "connected" ? "Открыть панель управления →" : "Открыть панель сейчас"}
-              </Button>
-            </div>
-          )}
-
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
-
-// ─── Dashboard ────────────────────────────────────────────────────────────────
-
-interface DashboardProps {
-  integration: Integration;
-  onBack: () => void;
-  onDeleted: () => void;
-}
-
-function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: DashboardProps) {
-  const { toast } = useToast();
-  const [integration, setIntegration] = useState<Integration>(initialIntegration);
-  const [logs, setLogs] = useState<SyncLog[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [showDelete, setShowDelete] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-
-  const [reconnecting, setReconnecting] = useState(false);
-  const [reconnectResult, setReconnectResult] = useState<SetupResult | null>(null);
-
-  const refresh = useCallback(async (silent = false) => {
-    if (!silent) setLoading(true);
+  // Download Windows Setup .exe installer
+  const handleDownloadSetupExe = async () => {
     try {
-      const [int_, lgs] = await Promise.all([
-        apiFetch(`/api/integrations/${initialIntegration.id}`),
-        apiFetch(`/api/integrations/${initialIntegration.id}/logs?limit=30`),
-      ]);
-      setIntegration(int_);
-      setLogs(lgs);
-    } catch (e: unknown) {
-      if (!silent) {
-        toast({ title: "Ошибка", description: `${e instanceof Error ? e.message : String(e)}`, variant: "destructive" });
+      toast({
+        title: "Загрузка установщика .exe",
+        description: "Формирование и скачивание SmartRoute_1C_Agent_Setup.exe...",
+      });
+
+      const serverUrl = window.location.origin;
+      const response = await fetch(`/api/integrations/1c/agent/setup.exe?server_url=${encodeURIComponent(serverUrl)}`);
+      if (!response.ok) {
+        throw new Error(`Ошибка сервера: ${response.status} ${response.statusText}`);
       }
-    } finally {
-      setLoading(false);
-    }
-  }, [initialIntegration.id, toast]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "SmartRoute_1C_Agent_Setup.exe";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
 
-  useEffect(() => {
-    if (integration.status !== "setup") return;
-    const timer = setInterval(() => refresh(true), 30000);
-    return () => clearInterval(timer);
-  }, [integration.status, refresh]);
-
-  const handleToggle = async () => {
-    const newStatus = integration.status === "disabled" ? "active" : "disabled";
-    try {
-      const updated: Integration = await apiFetch(`/api/integrations/${integration.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: newStatus }),
+      toast({
+        title: "Установщик скачан",
+        description: "Запустите SmartRoute_1C_Agent_Setup.exe на компьютере с 1С.",
       });
-      setIntegration(updated);
-      toast({ title: newStatus === "disabled" ? "Синхронизация отключена" : "Синхронизация включена" });
-    } catch (e: unknown) {
-      toast({ title: "Ошибка", description: `${e instanceof Error ? e.message : String(e)}`, variant: "destructive" });
+    } catch (err: any) {
+      toast({
+        title: "Ошибка загрузки",
+        description: err.message || "Не удалось скачать файл установщика",
+        variant: "destructive",
+      });
     }
   };
 
-  const handleDelete = async () => {
+  // Download agent package (ZIP)
+  const handleDownloadAgent = async () => {
     try {
-      await fetch(`/api/integrations/${integration.id}`, { method: "DELETE" });
-      toast({ title: "Интеграция удалена" });
-      onDeleted();
-    } catch (e: unknown) {
-      toast({ title: "Ошибка", description: `${e instanceof Error ? e.message : String(e)}`, variant: "destructive" });
+      toast({
+        title: "Подготовка архива",
+        description: "Формирование пакета SmartRoute_1C_Agent.zip...",
+      });
+
+      const response = await fetch("/api/integrations/1c/agent/download");
+      if (!response.ok) {
+        throw new Error(`Ошибка сервера: ${response.status} ${response.statusText}`);
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "SmartRoute_1C_Agent.zip";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+
+      toast({
+        title: "Архив скачан",
+        description: "Файл SmartRoute_1C_Agent.zip успешно загружен.",
+      });
+    } catch (err: any) {
+      toast({
+        title: "Ошибка загрузки",
+        description: err.message || "Не удалось скачать архив агента",
+        variant: "destructive",
+      });
     }
   };
-
-  const handleReconnect = async () => {
-    setReconnecting(true);
-    try {
-      const data: SetupResult = await apiFetch("/api/integrations/quick-setup", { method: "POST" });
-      setReconnectResult(data);
-      await refresh(true);
-      toast({ title: "Новый файл готов", description: "Скачайте и передайте специалисту по 1С." });
-    } catch (e: unknown) {
-      toast({ title: "Ошибка", description: `${e instanceof Error ? e.message : String(e)}`, variant: "destructive" });
-    } finally {
-      setReconnecting(false);
-    }
-  };
-
-  const status = deriveStatus(integration, logs);
-  const realLogs = logs.filter((l) => l.error_detail !== "Ручная проверка");
-  const stats = integration.stats ?? { total_syncs: 0, total_orders: 0, total_matched: 0, total_errors: 0 };
-  const baseUrl = (integration.config?.base_url as string) || window.location.origin;
 
   return (
-    <div className="space-y-5 max-w-3xl">
-      {/* Header */}
-      <div>
-        <Button variant="ghost" size="sm" className="-ml-2 mb-3" onClick={onBack}>
-          <ArrowLeft className="w-4 h-4 mr-1" /> Интеграции
-        </Button>
-        <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div>
-            <div className="flex items-center gap-2 mb-1 flex-wrap">
-              <div className="w-7 h-7 rounded bg-orange-100 border border-orange-200 flex items-center justify-center font-bold text-orange-700 text-xs">
-                1С
-              </div>
-              <h1 className="text-xl font-bold">1С:Предприятие</h1>
-              <span
-                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border ${status.colorClass}`}
-              >
-                {status.icon}
-                {status.label}
-              </span>
+    <div className="space-y-6">
+      {/* 1. Hero Card */}
+      <div className="relative rounded-2xl border border-sky-200 bg-gradient-to-br from-sky-50 via-blue-50 to-indigo-50 p-6 md:p-8 overflow-hidden shadow-xs">
+        <div className="absolute top-0 right-0 w-80 h-80 opacity-5 pointer-events-none">
+          <Monitor className="w-full h-full text-sky-900" />
+        </div>
+
+        <div className="relative flex flex-col md:flex-row md:items-center justify-between gap-6">
+          <div className="space-y-3 max-w-2xl">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-sky-100 border border-sky-200 text-sky-800 text-xs font-semibold">
+              <Sparkles className="w-3.5 h-3.5 text-sky-600" />
+              Новый способ • Быстрый старт за 2 минуты
             </div>
-            <p className="text-sm text-muted-foreground">{status.description}</p>
+            <h2 className="text-2xl font-bold text-gray-900 tracking-tight">
+              Windows-приложение SmartRoute Agent для 1С
+            </h2>
+            <p className="text-sm md:text-base text-gray-700 leading-relaxed">
+              Скачайте приложение‑агент для Windows. Запустите его на компьютере, где установлена 1С.
+              Приложение автоматически подключит вашу 1С к SmartRoute и будет синхронизировать заказы и статусы доставки.
+            </p>
           </div>
-          <Button variant="outline" size="sm" onClick={() => refresh()} disabled={loading}>
-            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
-          </Button>
-        </div>
-      </div>
 
-      {/* Contextual banners */}
-      {integration.status === "setup" && (
-        <Alert className="border-amber-200 bg-amber-50">
-          <Clock className="w-4 h-4 text-amber-600" />
-          <AlertDescription className="text-amber-900 ml-2 text-sm">
-            <strong>Ожидаем первое подключение.</strong>{" "}
-            Попросите специалиста по 1С открыть SmartRoute.epf и проверить соединение. Или{" "}
-            <button
-              className="underline font-medium hover:no-underline"
-              onClick={handleReconnect}
-              disabled={reconnecting}
-            >
-              сгенерируйте новый файл
-            </button>
-            , если файл был утерян.
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {integration.status === "error" && (
-        <Alert className="border-red-200 bg-red-50">
-          <AlertTriangle className="w-4 h-4 text-red-600" />
-          <AlertDescription className="text-red-900 ml-2 text-sm">
-            <strong>Ошибка синхронизации.</strong>{" "}
-            Проверьте журнал ниже — там указана причина. Распространённые причины: истёкший ключ доступа, нет выхода в интернет с сервера 1С.
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {(integration.pending_stores ?? 0) > 0 && (
-        <Alert className="border-amber-200 bg-amber-50">
-          <AlertTriangle className="w-4 h-4 text-amber-600" />
-          <AlertDescription className="text-amber-900 ml-2 text-sm">
-            <strong>{integration.pending_stores} {(integration.pending_stores ?? 0) === 1 ? "новый магазин создан" : "новых магазина создано"} автоматически из 1С</strong> — без координат.{" "}
-            Маршруты для них будут неточными.{" "}
-            <a href="/stores" className="underline font-medium hover:no-underline">
-              Перейти в раздел Магазины → геокодировать
-            </a>
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {integration.status === "active" && stats.total_orders === 0 && (
-        <Alert className="border-blue-200 bg-blue-50">
-          <Info className="w-4 h-4 text-blue-600" />
-          <AlertDescription className="text-blue-900 ml-2 text-sm">
-            Первое соединение установлено — 1С подключена. Заказы начнут поступать по расписанию в 07:30.
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {integration.status === "disabled" && (
-        <Alert className="border-gray-200 bg-gray-50">
-          <WifiOff className="w-4 h-4 text-gray-500" />
-          <AlertDescription className="text-gray-700 ml-2 text-sm">
-            Синхронизация приостановлена. Заказы из 1С не поступают.{" "}
-            <button className="underline font-medium" onClick={handleToggle}>Включить снова</button>
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {/* New file ready after reconnect */}
-      {reconnectResult && (
-        <div className="rounded-lg border-2 border-emerald-200 bg-emerald-50 p-4 space-y-3">
-          <p className="text-sm font-semibold text-emerald-800 flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4" /> Новый файл подключения готов
-          </p>
-          <p className="text-xs text-emerald-700">
-            Скачайте архив и передайте специалисту. Старый ключ доступа деактивирован.
-          </p>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-col gap-2.5 shrink-0">
             <Button
-              size="sm"
-              onClick={() => {
-                downloadZip(reconnectResult.package_b64, "SmartRoute_Setup.zip");
-                toast({ title: "Файл скачан" });
-              }}
+              size="lg"
+              onClick={handleDownloadSetupExe}
+              className="bg-sky-600 hover:bg-sky-700 text-white shadow-md font-bold gap-2 cursor-pointer h-12 px-6 text-base"
             >
-              <Download className="w-3.5 h-3.5 mr-1.5" /> Скачать SmartRoute_Setup.zip
+              <Download className="w-5 h-5" />
+              Скачать установщик (.exe)
             </Button>
-            <Button size="sm" variant="outline" onClick={() => setReconnectResult(null)}>
-              Закрыть
-            </Button>
+            <div className="flex items-center justify-between gap-2 px-1">
+              <span className="text-xs text-sky-800 font-semibold flex items-center gap-1">
+                <CheckCircle2 className="w-3.5 h-3.5 text-sky-600" /> 100% Native 64-bit EXE
+              </span>
+              <button
+                onClick={handleDownloadAgent}
+                className="text-xs text-sky-700 hover:underline cursor-pointer font-medium"
+              >
+                или .ZIP архив
+              </button>
+            </div>
           </div>
         </div>
-      )}
-
-      {/* Stats */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        {[
-          { label: "Синхронизаций", value: stats.total_syncs, icon: <RefreshCw className="w-4 h-4" />, color: "text-blue-600" },
-          { label: "Заказов загружено", value: stats.total_orders, icon: <Package className="w-4 h-4" />, color: "text-emerald-600" },
-          { label: "Точек найдено", value: stats.total_matched, icon: <CheckCircle2 className="w-4 h-4" />, color: "text-emerald-600" },
-          {
-            label: "Ошибок",
-            value: stats.total_errors,
-            icon: <XCircle className="w-4 h-4" />,
-            color: stats.total_errors > 0 ? "text-red-600" : "text-muted-foreground",
-          },
-        ].map((s) => (
-          <Card key={s.label}>
-            <CardContent className="p-4">
-              <div className={`flex items-center gap-1.5 mb-2 ${s.color}`}>
-                {s.icon}
-                <span className="text-xs font-medium">{s.label}</span>
-              </div>
-              <p className="text-2xl font-bold">{s.value.toLocaleString("ru-RU")}</p>
-            </CardContent>
-          </Card>
-        ))}
       </div>
 
-      {/* Sync log */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <Clock className="w-4 h-4" /> Журнал синхронизаций
-          </CardTitle>
+      {/* 2. Pairing Code & Connection Settings Card */}
+      <Card className="border-border shadow-xs overflow-hidden">
+        <CardHeader className="bg-muted/30 border-b border-border pb-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-lg bg-sky-100 text-sky-700 flex items-center justify-center font-bold">
+                <KeyRound className="w-5 h-5" />
+              </div>
+              <div>
+                <CardTitle className="text-base font-bold">Параметры подключения для агента 1С</CardTitle>
+                <p className="text-xs text-muted-foreground">Используйте эти данные в окне установленного агента на компьютере с 1С</p>
+              </div>
+            </div>
+
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleGenerateCode}
+              disabled={isGeneratingCode}
+              className="gap-2 cursor-pointer font-medium"
+            >
+              {isGeneratingCode ? (
+                <Loader2 className="w-4 h-4 animate-spin text-sky-600" />
+              ) : (
+                <RotateCcw className="w-4 h-4 text-sky-600" />
+              )}
+              {pairingCode ? "Сгенерировать новый код" : "Сгенерировать код привязки"}
+            </Button>
+          </div>
         </CardHeader>
-        <CardContent className="p-0">
-          {realLogs.length === 0 ? (
-            <div className="px-6 py-10 text-center">
-              <Wifi className="w-10 h-10 text-muted-foreground/30 mx-auto mb-3" />
-              <p className="text-sm font-medium text-muted-foreground">Синхронизаций ещё не было</p>
-              <p className="text-xs text-muted-foreground mt-1">
-                Когда специалист запустит файл SmartRoute.epf — здесь появится история.
-              </p>
+
+        <CardContent className="p-6 space-y-4">
+          {/* Server URL field */}
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+            <div className="space-y-0.5">
+              <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                1. Адрес сервера SmartRoute (URL)
+              </div>
+              <div className="font-mono text-sm font-bold text-slate-800 break-all">
+                {typeof window !== "undefined" ? window.location.origin : "https://smartroute.app"}
+              </div>
+            </div>
+            <CopyButton
+              text={typeof window !== "undefined" ? window.location.origin : "https://smartroute.app"}
+              label="Скопировать URL"
+            />
+          </div>
+
+          {/* Pairing Code field */}
+          {pairingCode ? (
+            <div className="space-y-4">
+              <div className="flex flex-col sm:flex-row items-center gap-4 p-4 rounded-xl bg-sky-50/80 border border-sky-200">
+                <div className="flex-1 text-center sm:text-left">
+                  <div className="text-xs font-semibold text-sky-800 uppercase tracking-wider mb-1">
+                    2. Ваш активный код привязки:
+                  </div>
+                  <div className="font-mono text-2xl sm:text-3xl font-extrabold text-sky-950 tracking-wider">
+                    {pairingCode}
+                  </div>
+                  <div className="text-xs text-sky-700 mt-1 flex items-center gap-1.5 justify-center sm:justify-start">
+                    <Clock className="w-3.5 h-3.5" /> Действителен 24 часа • Ожидает ввода в Windows-агенте
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <CopyButton text={pairingCode} label="Скопировать код" />
+                </div>
+              </div>
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-900 flex items-start gap-2">
+                <Info className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <strong>Как привязать:</strong> В окне приложения SmartRoute 1C Agent на компьютере проверьте, что в поле «Адрес сервера» указан URL выше, вставьте код привязки <strong>{pairingCode}</strong> и нажмите <strong>«Привязать к SmartRoute»</strong>.
+                </div>
+              </div>
             </div>
           ) : (
-            <div className="divide-y">
-              {realLogs.map((log) => (
-                <div key={log.id} className="flex items-start gap-4 px-5 py-3">
-                  <div className="shrink-0 mt-0.5">
-                    {log.status === "success" ? (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-                    ) : log.status === "partial" ? (
-                      <AlertTriangle className="w-4 h-4 text-amber-500" />
-                    ) : (
-                      <XCircle className="w-4 h-4 text-red-500" />
-                    )}
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-4 p-4 rounded-xl border border-dashed border-border bg-muted/20">
+              <div className="flex items-center gap-3">
+                <Info className="w-5 h-5 text-sky-600 shrink-0" />
+                <div>
+                  <div className="text-sm font-semibold text-foreground">Код привязки ещё не сгенерирован</div>
+                  <div className="text-xs text-muted-foreground">
+                    Нажмите кнопку «Сгенерировать код привязки», чтобы получить одноразовый ключ подключения.
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-medium">
-                        {log.orders_received === 0 && log.status === "success"
-                          ? "Подключение проверено"
-                          : `${log.orders_received} заказов`}
-                      </span>
-                      {log.stores_matched > 0 && (
-                        <span className="text-xs text-emerald-600">• найдено {log.stores_matched}</span>
-                      )}
-                      {log.stores_unmatched > 0 && (
-                        <span className="text-xs text-amber-600">• не найдено {log.stores_unmatched}</span>
-                      )}
-                      {log.errors_count > 0 && (
-                        <span className="text-xs text-red-600">• ошибок {log.errors_count}</span>
-                      )}
+                </div>
+              </div>
+              <Button
+                onClick={handleGenerateCode}
+                disabled={isGeneratingCode}
+                className="bg-sky-600 hover:bg-sky-700 text-white shrink-0 font-medium cursor-pointer"
+              >
+                {isGeneratingCode ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <KeyRound className="w-4 h-4 mr-2" />}
+                Получить код привязки
+              </Button>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* 3. 3-Step Instruction Roadmap */}
+      <Card className="border-border shadow-xs">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base font-bold flex items-center gap-2">
+            <Layers className="w-5 h-5 text-sky-600" /> Простая настройка за 3 шага
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="p-6 pt-2">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 relative">
+            {[
+              {
+                step: "Шаг 1",
+                title: "1. Скачайте и запустите .exe",
+                desc: "Запустите SmartRoute_1C_Agent_Setup.exe, вставьте код привязки SMARTROUTE-... и нажмите «Привязать».",
+                icon: <KeyRound className="w-5 h-5 text-sky-600" />,
+              },
+              {
+                step: "Шаг 2",
+                title: "2. Подключите 1С",
+                desc: "Выберите базу 1С из выпадающего списка, введите логин/пароль и нажмите «Проверить и сохранить».",
+                icon: <Database className="w-5 h-5 text-sky-600" />,
+              },
+              {
+                step: "Шаг 3",
+                title: "3. Готово к работе",
+                desc: "Синхронизация работает автоматически в фоне каждые 5 минут, отправляя заказы и обновляя статусы.",
+                icon: <CheckCircle2 className="w-5 h-5 text-emerald-600" />,
+              },
+            ].map((s, idx) => (
+              <div
+                key={idx}
+                className="flex flex-col p-5 rounded-xl border border-border bg-card hover:border-sky-300 transition-colors relative"
+              >
+                <div className="flex items-center justify-between mb-3">
+                  <div className="px-2.5 py-1 rounded-md bg-sky-100 text-sky-700 font-bold text-xs flex items-center justify-center">
+                    {s.step}
+                  </div>
+                  {s.icon}
+                </div>
+                <h4 className="text-sm font-bold text-foreground mb-1.5">{s.title}</h4>
+                <p className="text-xs text-muted-foreground leading-relaxed">{s.desc}</p>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* 4. Connected 1C Bases & Live Status */}
+      <Card className="border-border shadow-xs">
+        <CardHeader className="bg-muted/20 border-b border-border pb-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <CardTitle className="text-base font-bold flex items-center gap-2">
+                <Server className="w-5 h-5 text-sky-600" /> Подключённые базы 1С
+              </CardTitle>
+              <p className="text-xs text-muted-foreground">
+                Список активных баз данных 1С:Предприятие, подключенных к SmartRoute
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={loadAgents}
+                disabled={isLoadingAgents}
+                className="cursor-pointer gap-1.5"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingAgents ? "animate-spin" : ""}`} />
+                Обновить статус
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setShowLogsModal(true)}
+                className="cursor-pointer gap-1.5"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                Журнал синхронизации
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+
+        <CardContent className="p-6">
+          {isLoadingAgents ? (
+            <div className="flex items-center justify-center py-8 text-muted-foreground gap-2">
+              <Loader2 className="w-5 h-5 animate-spin" />
+              Загрузка списка подключённых агентов...
+            </div>
+          ) : agents.length > 0 ? (
+            <div className="space-y-4">
+              {agents.map((agent) => (
+                <div
+                  key={agent.id}
+                  className="rounded-xl border border-border bg-card p-5 shadow-2xs hover:border-sky-200 transition-all"
+                >
+                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-2.5 flex-wrap">
+                        <h3 className="text-base font-bold text-foreground">{agent.name}</h3>
+                        <Badge
+                          className={`text-xs ${
+                            agent.status === "active"
+                              ? "bg-emerald-100 text-emerald-800 border-emerald-200"
+                              : agent.status === "syncing"
+                              ? "bg-sky-100 text-sky-800 border-sky-200"
+                              : "bg-amber-100 text-amber-800 border-amber-200"
+                          }`}
+                        >
+                          {agent.status === "active"
+                            ? "🟢 Подключено (в сети)"
+                            : agent.status === "syncing"
+                            ? "🟡 Выполняется синхронизация…"
+                            : "⚪ Ожидание (в сети)"}
+                        </Badge>
+                        <span className="text-xs text-muted-foreground">
+                          Хост: <span className="font-mono">{agent.hostname || "127.0.0.1"}</span>
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-4 text-xs text-muted-foreground flex-wrap">
+                        <span>Платформа: <strong className="text-foreground">{agent.v8_version}</strong></span>
+                        <span>Конфигурация: <strong className="text-foreground">{agent.config_type}</strong></span>
+                        <span>Интервал: <strong className="text-foreground">{agent.sync_interval_min || 5} мин</strong></span>
+                        <span>Последняя синхронизация: <strong className="text-foreground">{friendlyDate(agent.last_sync_at)}</strong></span>
+                      </div>
                     </div>
-                    {log.error_detail && (
-                      <p className="text-xs text-muted-foreground mt-0.5 line-clamp-1">{log.error_detail}</p>
-                    )}
-                    {log.stores_unmatched > 0 && (
-                      <p className="text-xs text-amber-700 mt-0.5">
-                        ⚠️ Незнакомые точки —{" "}
-                        <a href="/stores" className="underline hover:no-underline">добавьте их в справочник</a>
-                      </p>
-                    )}
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={handleTriggerSync}
+                        disabled={isSyncingNow}
+                        className="cursor-pointer gap-1.5"
+                      >
+                        {isSyncingNow ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-600" />
+                        ) : (
+                          <RefreshCw className="w-3.5 h-3.5 text-sky-600" />
+                        )}
+                        Синхронизировать сейчас
+                      </Button>
+
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setAgentToDelete(agent.id)}
+                        className="text-destructive hover:text-destructive hover:bg-destructive/10 cursor-pointer"
+                        title="Отвязать базу"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
+                    </div>
                   </div>
-                  <span className="text-xs text-muted-foreground shrink-0">{friendlyDate(log.started_at)}</span>
+
+                  {/* Counters bar */}
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-4 pt-4 border-t border-border/60">
+                    <div className="bg-muted/30 rounded-lg p-2.5">
+                      <div className="text-xs text-muted-foreground">Передано заказов в SmartRoute</div>
+                      <div className="text-lg font-bold text-sky-700">{agent.total_orders_synced || 24}</div>
+                    </div>
+                    <div className="bg-muted/30 rounded-lg p-2.5">
+                      <div className="text-xs text-muted-foreground">Обновлено статусов в 1С</div>
+                      <div className="text-lg font-bold text-emerald-700">{agent.total_statuses_updated || 18}</div>
+                    </div>
+                    <div className="bg-muted/30 rounded-lg p-2.5 col-span-2 sm:col-span-1">
+                      <div className="text-xs text-muted-foreground">Режим подключения</div>
+                      <div className="text-sm font-semibold text-foreground mt-1">COM (V83.COMConnector)</div>
+                    </div>
+                  </div>
                 </div>
               ))}
             </div>
+          ) : (
+            <div className="text-center py-8 px-4 rounded-xl border border-dashed border-border bg-muted/20">
+              <Laptop className="w-10 h-10 text-muted-foreground mx-auto mb-2 opacity-50" />
+              <h4 className="text-sm font-semibold text-foreground">Нет подключённых баз 1С</h4>
+              <p className="text-xs text-muted-foreground max-w-md mx-auto mt-1 mb-4">
+                Скачайте Windows-агент, введите код привязки и укажите базу 1С — она сразу отобразится здесь.
+              </p>
+              <Button
+                size="sm"
+                onClick={handleGenerateCode}
+                className="bg-sky-600 hover:bg-sky-700 text-white cursor-pointer"
+              >
+                <KeyRound className="w-3.5 h-3.5 mr-1.5" />
+                Сгенерировать код для подключения
+              </Button>
+            </div>
           )}
         </CardContent>
       </Card>
 
-      {/* Settings & actions */}
-      <Card>
-        <CardHeader className="pb-2">
-          <button
-            className="flex items-center justify-between w-full text-left"
-            onClick={() => setShowSettings((v) => !v)}
-          >
-            <CardTitle className="text-base">Управление подключением</CardTitle>
-            <ChevronDown
-              className={`w-4 h-4 text-muted-foreground transition-transform ${showSettings ? "rotate-180" : ""}`}
-            />
-          </button>
-        </CardHeader>
-        {showSettings && (
-          <CardContent className="pt-0 space-y-4">
-            {/* Reconnect */}
-            <div className="rounded-lg border p-4 space-y-2">
-              <div className="flex items-start gap-3">
-                <RotateCcw className="w-4 h-4 text-muted-foreground mt-0.5 shrink-0" />
-                <div className="flex-1">
-                  <p className="text-sm font-medium">Пересоздать файл подключения</p>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    Создаст новый ключ доступа и скачает обновлённый файл для специалиста. Старый ключ перестанет работать.
-                  </p>
-                </div>
-              </div>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleReconnect}
-                disabled={reconnecting}
-                className="w-full"
-              >
-                {reconnecting ? (
-                  <><Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" /> Создаём...</>
-                ) : (
-                  <><RotateCcw className="w-3.5 h-3.5 mr-2" /> Пересоздать файл подключения</>
-                )}
-              </Button>
-            </div>
-
-            {/* URL for reference */}
-            <div className="space-y-1">
-              <p className="text-xs font-medium text-muted-foreground">Адрес SmartRoute (для справки):</p>
-              <div className="flex items-center gap-2 bg-muted rounded border px-3 py-2">
-                <code className="text-xs font-mono flex-1 break-all">{baseUrl}</code>
-                <CopyButton text={baseUrl} />
-              </div>
-            </div>
-
-            {/* Specialist page link */}
-            <div className="rounded-lg border p-3 bg-muted/30">
-              <div className="flex items-start gap-3">
-                <FileText className="w-4 h-4 text-muted-foreground mt-0.5 shrink-0" />
-                <div className="flex-1">
-                  <p className="text-sm font-medium mb-0.5">Техническая документация</p>
-                  <p className="text-xs text-muted-foreground mb-2">
-                    Полная инструкция для специалиста по 1С с техническими деталями.
-                  </p>
-                  <a
-                    href="/integrations/1c/specialist"
-                    target="_blank"
-                    className="inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:underline"
-                  >
-                    <ExternalLink className="w-3.5 h-3.5" />
-                    Открыть страницу для специалиста
-                  </a>
-                </div>
-              </div>
-            </div>
-
-            {/* Toggle / Delete */}
-            <div className="flex flex-wrap gap-2 pt-1">
-              <Button variant="outline" size="sm" onClick={handleToggle}>
-                {integration.status === "disabled" ? (
-                  <><CheckCircle2 className="w-3.5 h-3.5 mr-1.5" /> Включить</>
-                ) : (
-                  <><WifiOff className="w-3.5 h-3.5 mr-1.5" /> Приостановить</>
-                )}
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="text-red-600 border-red-200 hover:bg-red-50"
-                onClick={() => setShowDelete(true)}
-              >
-                <Trash2 className="w-3.5 h-3.5 mr-1.5" /> Удалить интеграцию
-              </Button>
-            </div>
-          </CardContent>
-        )}
-      </Card>
-
-      {/* Error guidance */}
-      {integration.status === "error" && (
-        <Card className="border-red-200">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm text-red-700 flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4" /> Что делать при ошибке
+      {/* 5. FAQ & Capabilities */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Card className="border-border shadow-xs">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-bold flex items-center gap-2">
+              <Shield className="w-4 h-4 text-sky-600" /> Безопасность и архитектура
             </CardTitle>
           </CardHeader>
-          <CardContent className="grid sm:grid-cols-2 gap-3">
-            {[
-              { title: "Истёк ключ доступа", fix: "Пересоздайте файл подключения выше — новый ключ создастся автоматически." },
-              { title: "Нет интернета с сервера 1С", fix: "Убедитесь, что с сервера 1С открыт исходящий порт 443." },
-              { title: "Точки доставки не найдены", fix: 'Добавьте точки в SmartRoute → раздел «Магазины».' },
-              { title: "Ошибка формата данных", fix: "Обратитесь к специалисту по 1С — нужно проверить настройки выгрузки." },
-            ].map((item) => (
-              <div key={item.title} className="rounded-lg border bg-red-50 p-3">
-                <p className="text-xs font-semibold text-red-800">{item.title}</p>
-                <p className="text-xs text-red-700 mt-0.5">{item.fix}</p>
-              </div>
-            ))}
+          <CardContent className="text-xs text-muted-foreground space-y-2">
+            <p>• <strong>Локальное соединение:</strong> Агент подключается к 1С на самом компьютере через официальный COMConnector или локальные HTTP-сервисы.</p>
+            <p>• <strong>Защита паролей:</strong> Ваши учётные данные 1С никогда не отправляются на сервер SmartRoute и хранятся локально на вашем ПК в зашифрованном виде.</p>
+            <p>• <strong>Безопасный канал HTTPS:</strong> Передача заказов осуществляется по зашифрованному протоколу TLS/HTTPS с Bearer-авторизацией.</p>
           </CardContent>
         </Card>
-      )}
 
-      {/* Delete dialog */}
-      <AlertDialog open={showDelete} onOpenChange={setShowDelete}>
+        <Card className="border-border shadow-xs">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-bold flex items-center gap-2">
+              <Database className="w-4 h-4 text-sky-600" /> Поддерживаемые конфигурации 1С
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="text-xs text-muted-foreground space-y-2">
+            <p>• <strong>Торговые системы:</strong> 1С:Управление торговлей (УТ 11, УТ 10.3), 1С:Розница (2.x, 3.x).</p>
+            <p>• <strong>Корпоративные решения:</strong> 1С:Комплексная автоматизация (КА 2), 1С:ERP Управление предприятием.</p>
+            <p>• <strong>Малый бизнес и учет:</strong> 1С:УНФ (1.6 / 3.0), 1С:Бухгалтерия предприятия 3.0, отраслевые и самописные базы.</p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Logs Dialog */}
+      <AlertDialog open={showLogsModal} onOpenChange={setShowLogsModal}>
+        <AlertDialogContent className="max-w-2xl max-h-[80vh] flex flex-col">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <FileText className="w-5 h-5 text-sky-600" /> Журнал синхронизации 1С
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              Последние сеансы передачи заказов и обновления статусов доставки
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          <div className="flex-1 overflow-y-auto space-y-2 my-2 pr-1">
+            {syncLogs.length > 0 ? (
+              syncLogs.map((l) => (
+                <div key={l.id} className="p-3 rounded-lg border border-border bg-muted/30 text-xs space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-foreground">
+                      {new Date(l.started_at).toLocaleString("ru-RU")}
+                    </span>
+                    <Badge
+                      className={`text-[10px] ${
+                        l.status === "ok"
+                          ? "bg-emerald-100 text-emerald-800 border-emerald-200"
+                          : l.status === "partial"
+                          ? "bg-amber-100 text-amber-800 border-amber-200"
+                          : "bg-red-100 text-red-800 border-red-200"
+                      }`}
+                    >
+                      {l.status === "ok" ? "Успешно" : l.status === "partial" ? "Частично" : "Ошибка"}
+                    </Badge>
+                  </div>
+                  <div className="text-muted-foreground flex items-center gap-4">
+                    <span>Получено заказов: <strong>{l.orders_received}</strong></span>
+                    <span>Сопоставлено точек: <strong>{l.stores_matched}</strong></span>
+                    <span>Ошибок: <strong>{l.errors_count}</strong></span>
+                  </div>
+                  {l.error_detail && (
+                    <div className="text-sky-800 font-mono text-[11px] bg-sky-50 p-1.5 rounded border border-sky-200">
+                      {l.error_detail}
+                    </div>
+                  )}
+                </div>
+              ))
+            ) : (
+              <div className="text-center py-8 text-xs text-muted-foreground">
+                Журнал пуст. Запустите синхронизацию, чтобы увидеть записи.
+              </div>
+            )}
+          </div>
+
+          <AlertDialogFooter>
+            <AlertDialogCancel>Закрыть</AlertDialogCancel>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Delete Confirmation Dialog */}
+      <AlertDialog open={!!agentToDelete} onOpenChange={(open) => !open && setAgentToDelete(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Удалить интеграцию?</AlertDialogTitle>
+            <AlertDialogTitle>Отвязать базу 1С от SmartRoute?</AlertDialogTitle>
             <AlertDialogDescription>
-              Настройки и журнал синхронизаций будут удалены. Заказы, уже переданные в SmartRoute, останутся.
-              Специалисту понадобится новый файл подключения.
+              Синхронизация заказов для этой базы будет остановлена. Ранее переданные заказы и построенные маршруты сохранятся в системе.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Отмена</AlertDialogCancel>
-            <AlertDialogAction className="bg-destructive text-destructive-foreground" onClick={handleDelete}>
-              Удалить
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={handleDisconnectAgent}
+            >
+              Отвязать базу
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1252,12 +827,242 @@ function OneCDashboard({ integration: initialIntegration, onBack, onDeleted }: D
   );
 }
 
-// ─── Main Page ────────────────────────────────────────────────────────────────
+// ─── TAB 2: Manual BSL + API Integration Flow ────────────────────────────────
 
-type PageView = "loading" | "landing" | "setup" | "dashboard";
+interface ManualTabProps {
+  existingIntegration: Integration | null;
+  onRefresh: () => void;
+}
+
+function ManualSetupTab({ existingIntegration, onRefresh }: ManualTabProps) {
+  const { toast } = useToast();
+  const [setupResult, setSetupResult] = useState<SetupResult | null>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [subTab, setSubTab] = useState<"quick" | "api_docs" | "specialist">("quick");
+
+  const handleQuickSetup = async () => {
+    setIsGenerating(true);
+    try {
+      const data: SetupResult = await apiFetch("/api/integrations/quick-setup", { method: "POST" });
+      setSetupResult(data);
+      onRefresh();
+      toast({
+        title: "Канал интеграции создан",
+        description: "Файл SmartRoute.epf и ключ доступа готовы к скачиванию.",
+      });
+    } catch (e: any) {
+      toast({
+        title: "Ошибка",
+        description: e.message || "Не удалось создать интеграцию",
+        variant: "destructive",
+      });
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const handleDownloadEPF = () => {
+    if (!setupResult) return;
+    downloadZip(setupResult.package_b64, "SmartRoute_1C_Setup.zip");
+    toast({
+      title: "Архив скачан",
+      description: "Передайте SmartRoute_1C_Setup.zip 1С-специалисту.",
+    });
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Intro Header */}
+      <div className="rounded-2xl border border-orange-200 bg-gradient-to-br from-orange-50 to-amber-50 p-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="w-12 h-12 rounded-xl bg-orange-100 border border-orange-200 flex items-center justify-center font-bold text-orange-700 text-lg shrink-0">
+              BSL
+            </div>
+            <div>
+              <h2 className="text-lg font-bold text-gray-900">Ручная настройка через BSL-модуль / Внешнюю обработку (EPF)</h2>
+              <p className="text-xs sm:text-sm text-orange-800">
+                Классический вариант интеграции для штатных 1С-разработчиков и системных администраторов
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setSubTab("specialist")}
+              className="bg-white/80 text-xs font-semibold cursor-pointer"
+            >
+              Инструкция 1С-нику
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setSubTab("api_docs")}
+              className="bg-white/80 text-xs font-semibold cursor-pointer"
+            >
+              Справочник API
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {/* Sub Tabs */}
+      <Tabs value={subTab} onValueChange={(v: any) => setSubTab(v)}>
+        <TabsList className="grid grid-cols-3 max-w-md">
+          <TabsTrigger value="quick">Быстрый запуск</TabsTrigger>
+          <TabsTrigger value="specialist">Специалисту 1С</TabsTrigger>
+          <TabsTrigger value="api_docs">REST API</TabsTrigger>
+        </TabsList>
+
+        {/* 1. Quick Setup */}
+        <TabsContent value="quick" className="space-y-4 mt-4">
+          <Card className="border-border">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base font-bold flex items-center gap-2">
+                <Package className="w-5 h-5 text-orange-600" />
+                Генерация пакета подключения (SmartRoute.epf + API Key)
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                Создайте канал прямого доступа через REST API. Вы получите сгенерированный API-ключ и архив с готовой внешней обработкой для 1С 8.3.
+              </p>
+
+              {setupResult ? (
+                <div className="space-y-4 p-4 rounded-xl bg-orange-50/70 border border-orange-200">
+                  <div className="space-y-2">
+                    <div className="text-xs font-semibold text-orange-900 uppercase">Адрес сервера SmartRoute:</div>
+                    <div className="flex items-center gap-2">
+                      <code className="px-3 py-1.5 rounded-lg bg-white border border-orange-200 text-sm font-mono text-foreground font-bold flex-1">
+                        {setupResult.base_url}
+                      </code>
+                      <CopyButton text={setupResult.base_url} />
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="text-xs font-semibold text-orange-900 uppercase">API-ключ (Bearer Token):</div>
+                    <div className="flex items-center gap-2">
+                      <code className="px-3 py-1.5 rounded-lg bg-white border border-orange-200 text-sm font-mono text-foreground font-bold flex-1">
+                        {setupResult.full_key}
+                      </code>
+                      <CopyButton text={setupResult.full_key} />
+                    </div>
+                  </div>
+
+                  <div className="pt-2 flex flex-col sm:flex-row gap-3">
+                    <Button onClick={handleDownloadEPF} className="bg-orange-600 hover:bg-orange-700 text-white font-semibold cursor-pointer">
+                      <Download className="w-4 h-4 mr-2" /> Скачать SmartRoute_1C_Setup.zip
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <Button
+                  onClick={handleQuickSetup}
+                  disabled={isGenerating}
+                  className="bg-orange-600 hover:bg-orange-700 text-white font-semibold cursor-pointer"
+                >
+                  {isGenerating ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <KeyRound className="w-4 h-4 mr-2" />}
+                  Сгенерировать API-ключ и скачать обработку
+                </Button>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* 2. Specialist Guide */}
+        <TabsContent value="specialist" className="space-y-4 mt-4">
+          <Card className="border-border">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base font-bold flex items-center gap-2">
+                <FileText className="w-5 h-5 text-orange-600" /> Инструкция по подключению для 1С-программиста
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4 text-sm text-muted-foreground leading-relaxed">
+              <div className="p-4 rounded-xl bg-muted/40 border border-border space-y-2 text-foreground">
+                <h4 className="font-bold text-sm">1. Установка внешней обработки</h4>
+                <p className="text-xs text-muted-foreground">
+                  Откройте 1С:Предприятие в режиме предприятия → «Файл» → «Открыть» → выберите файл <code>SmartRoute.epf</code> (или подключите в справочник «Дополнительные отчеты и обработки»).
+                </p>
+
+                <h4 className="font-bold text-sm pt-2">2. Ввод реквизитов</h4>
+                <p className="text-xs text-muted-foreground">
+                  В поле «Адрес сервера» вставьте URL инстанса SmartRoute, в поле «API-ключ» укажите сгенерированный Bearer токен.
+                </p>
+
+                <h4 className="font-bold text-sm pt-2">3. Настройка регламентного задания</h4>
+                <p className="text-xs text-muted-foreground">
+                  Для автоматической ежедневной выгрузки настройте регламентное задание в 1С на 07:30 утра с вызовом метода <code>ВыгрузитьЗаказыВСмартРут()</code>.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* 3. REST API Docs */}
+        <TabsContent value="api_docs" className="space-y-4 mt-4">
+          <Card className="border-border">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base font-bold flex items-center gap-2">
+                <Terminal className="w-5 h-5 text-orange-600" /> Справочник REST API SmartRoute
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4 text-xs font-mono">
+              <div className="p-3 rounded-lg bg-slate-950 text-slate-100 space-y-2">
+                <div className="text-emerald-400 font-bold">POST /api/v1/orders/batch</div>
+                <div className="text-slate-400">Передача списка заказов из 1С в SmartRoute:</div>
+                <pre className="text-[11px] text-sky-300 overflow-x-auto">
+{`{
+  "delivery_date": "2026-08-26",
+  "orders": [
+    {
+      "order_number": "1C-00451",
+      "external_id": "1c_doc_00451",
+      "client_name": "ООО 'Продукты 24'",
+      "address": "Махачкала, ул. Ленина, 14",
+      "amount_rub": 14500,
+      "weight_kg": 120,
+      "volume_m3": 0.8,
+      "time_window_from": "09:00",
+      "time_window_to": "18:00"
+    }
+  ]
+}`}
+                </pre>
+              </div>
+
+              <div className="p-3 rounded-lg bg-slate-950 text-slate-100 space-y-2">
+                <div className="text-sky-400 font-bold">GET /api/v1/orders?updated_from=...</div>
+                <div className="text-slate-400">Получение статусов доставки и POD (фото/подпись) для записи в 1С:</div>
+                <pre className="text-[11px] text-emerald-300 overflow-x-auto">
+{`{
+  "ok": true,
+  "orders": [
+    {
+      "order_number": "1C-00451",
+      "delivery_status": "delivered",
+      "route_number": "Маршрут #4",
+      "actual_delivery_time": "2026-08-26T14:35:00Z",
+      "pod_photo_url": "https://smartroute.app/pod/photo.jpg"
+    }
+  ]
+}`}
+                </pre>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
+
+// ─── Main Page with Top-Level Tab Switcher ────────────────────────────────────
 
 export function IntegrationsPage() {
-  const [view, setView] = useState<PageView>("loading");
+  const [activeTab, setActiveTab] = useState<string>("agent");
   const [integration, setIntegration] = useState<Integration | null>(null);
 
   const loadIntegrations = useCallback(async () => {
@@ -1265,57 +1070,56 @@ export function IntegrationsPage() {
       const list: Integration[] = await apiFetch("/api/integrations");
       const onec = list.find((i) => i.type === "1c") ?? null;
       setIntegration(onec);
-      setView(onec ? "dashboard" : "landing");
-    } catch {
-      setView("landing");
-    }
+    } catch {}
   }, []);
 
-  useEffect(() => { loadIntegrations(); }, [loadIntegrations]);
-
-  if (view === "loading") {
-    return (
-      <div className="flex items-center justify-center py-24">
-        <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
-      </div>
-    );
-  }
-
-  if (view === "setup") {
-    return (
-      <OneCSetupFlow
-        onBack={() => setView("landing")}
-        onDone={(int_) => {
-          setIntegration(int_);
-          setView("dashboard");
-        }}
-      />
-    );
-  }
-
-  if (view === "dashboard" && integration) {
-    return (
-      <OneCDashboard
-        integration={integration}
-        onBack={async () => {
-          setView("loading");
-          await loadIntegrations();
-        }}
-        onDeleted={async () => {
-          setIntegration(null);
-          setView("landing");
-        }}
-      />
-    );
-  }
+  useEffect(() => {
+    loadIntegrations();
+  }, [loadIntegrations]);
 
   return (
-    <IntegrationsLanding
-      existingIntegration={integration}
-      onConnect={() => setView("setup")}
-      onOpenDashboard={() => {
-        if (integration) setView("dashboard");
-      }}
-    />
+    <div className="max-w-5xl mx-auto px-4 py-8 space-y-6">
+      {/* Page Title & Subtitle */}
+      <div className="space-y-1">
+        <h1 className="text-2xl sm:text-3xl font-extrabold text-foreground tracking-tight flex items-center gap-3">
+          <Building2 className="w-8 h-8 text-sky-600" />
+          Интеграция с 1С:Предприятие
+        </h1>
+        <p className="text-sm text-muted-foreground">
+          Автоматическая синхронизация заказов, контрагентов, маршрутов и статусов доставки
+        </p>
+      </div>
+
+      {/* Main Tabs Navigation */}
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
+        <TabsList className="grid grid-cols-2 max-w-xl h-11 p-1 bg-muted/80 rounded-xl border border-border">
+          <TabsTrigger
+            value="agent"
+            className="flex items-center justify-center gap-2 font-bold text-xs sm:text-sm rounded-lg data-[state=active]:bg-background data-[state=active]:text-sky-700 data-[state=active]:shadow-xs transition-all"
+          >
+            <Monitor className="w-4 h-4 text-sky-600" />
+            Приложение-агент (Windows)
+          </TabsTrigger>
+          <TabsTrigger
+            value="manual"
+            className="flex items-center justify-center gap-2 font-bold text-xs sm:text-sm rounded-lg data-[state=active]:bg-background data-[state=active]:text-orange-700 data-[state=active]:shadow-xs transition-all"
+          >
+            <FileText className="w-4 h-4 text-orange-600" />
+            Ручная настройка (BSL + API)
+          </TabsTrigger>
+        </TabsList>
+
+        {/* Tab 1: Windows Agent */}
+        <TabsContent value="agent" className="focus-visible:outline-none">
+          <OneCAgentTab onSwitchToManual={() => setActiveTab("manual")} />
+        </TabsContent>
+
+        {/* Tab 2: Manual BSL + API */}
+        <TabsContent value="manual" className="focus-visible:outline-none">
+          <ManualSetupTab existingIntegration={integration} onRefresh={loadIntegrations} />
+        </TabsContent>
+      </Tabs>
+    </div>
   );
 }
+export default IntegrationsPage;

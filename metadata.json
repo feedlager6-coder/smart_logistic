@@ -1,6 +1,6 @@
 {
   "name": "SmartRoute",
-  "description": "B2B SaaS delivery route optimization platform with Google OR-Tools VRP solver and 2GIS maps",
+  "description": "B2B SaaS delivery route optimization platform with Google OR-Tools VRP solver, 2GIS maps, and bidirectional 1C:Enterprise Windows Agent & BSL integrations",
   "requestFramePermissions": ["geolocation"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

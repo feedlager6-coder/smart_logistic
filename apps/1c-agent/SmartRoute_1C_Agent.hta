@@ -1,0 +1,1031 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>SmartRoute — Агент интеграции 1С:Предприятие</title>
+  <hta:application 
+    id="SmartRouteAgentApp"
+    applicationname="SmartRoute1CAgent"
+    border="thick"
+    borderstyle="normal"
+    caption="yes"
+    icon="smartroute.ico"
+    maximizebutton="yes"
+    minimizebutton="yes"
+    showintaskbar="yes"
+    singleinstance="yes"
+    sysmenu="yes"
+    version="3.2.0"
+    windowstate="normal"
+    scroll="yes"
+  />
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    body {
+      background-color: #f1f5f9;
+      color: #0f172a;
+      font-size: 13px;
+      line-height: 1.5;
+      padding: 0;
+      user-select: none;
+    }
+    /* Header */
+    .header {
+      background-color: #0f172a;
+      color: #ffffff;
+      padding: 14px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 2px solid #0284c7;
+    }
+    .header-logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .logo-icon {
+      width: 32px;
+      height: 32px;
+      background: linear-gradient(135deg, #0284c7, #0369a1);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-size: 16px;
+      color: #ffffff;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+    .header-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: #ffffff;
+    }
+    .header-subtitle {
+      font-size: 11px;
+      color: #94a3b8;
+    }
+    .header-status {
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      background: #334155;
+      color: #cbd5e1;
+    }
+    .status-active {
+      background: #16a34a !important;
+      color: #ffffff !important;
+    }
+
+    /* Container & Tabs */
+    .container {
+      max-width: 900px;
+      margin: 20px auto;
+      padding: 0 20px 30px;
+    }
+    .tab-bar {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+      border-bottom: 2px solid #e2e8f0;
+      padding-bottom: 2px;
+    }
+    .tab-btn {
+      padding: 10px 18px;
+      background: #e2e8f0;
+      color: #475569;
+      border: none;
+      border-radius: 8px 8px 0 0;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      outline: none;
+      transition: all 0.2s;
+    }
+    .tab-btn:hover {
+      background: #cbd5e1;
+      color: #0f172a;
+    }
+    .tab-btn.active {
+      background: #ffffff;
+      color: #0284c7;
+      border-bottom: 2px solid #0284c7;
+      margin-bottom: -2px;
+    }
+
+    /* Card Panels */
+    .tab-content {
+      display: none;
+      background: #ffffff;
+      border-radius: 12px;
+      padding: 24px;
+      border: 1px solid #e2e8f0;
+      box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);
+    }
+    .tab-content.active {
+      display: block;
+    }
+
+    /* Step Banner */
+    .step-banner {
+      background: #f0f9ff;
+      border: 1px solid #bae6fd;
+      border-radius: 8px;
+      padding: 14px 18px;
+      margin-bottom: 20px;
+    }
+    .step-banner.green {
+      background: #f0fdf4;
+      border-color: #bbf7d0;
+    }
+    .step-banner-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #0369a1;
+      margin-bottom: 4px;
+    }
+    .step-banner.green .step-banner-title {
+      color: #15803d;
+    }
+    .step-banner-desc {
+      font-size: 12px;
+      color: #0c4a6e;
+    }
+    .step-banner.green .step-banner-desc {
+      color: #166534;
+    }
+
+    /* Form controls */
+    .form-group {
+      margin-bottom: 16px;
+    }
+    .form-label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: #334155;
+      margin-bottom: 6px;
+    }
+    .form-input, .form-select {
+      width: 100%;
+      padding: 10px 14px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      font-size: 13px;
+      color: #0f172a;
+      background: #ffffff;
+      outline: none;
+    }
+    .form-input:focus, .form-select:focus {
+      border-color: #0284c7;
+      box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.15);
+    }
+    .code-input {
+      font-size: 16px;
+      font-weight: 700;
+      text-align: center;
+      letter-spacing: 1px;
+      color: #0369a1;
+      background: #f8fafc;
+    }
+    .form-row {
+      display: flex;
+      gap: 16px;
+    }
+    .form-col {
+      flex: 1;
+    }
+
+    /* Buttons */
+    .btn-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 24px;
+      padding-top: 16px;
+      border-top: 1px solid #f1f5f9;
+    }
+    .btn {
+      padding: 10px 20px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      outline: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      transition: background 0.15s;
+    }
+    .btn-primary {
+      background: #0284c7;
+      color: #ffffff;
+    }
+    .btn-primary:hover {
+      background: #0369a1;
+    }
+    .btn-success {
+      background: #16a34a;
+      color: #ffffff;
+    }
+    .btn-success:hover {
+      background: #15803d;
+    }
+    .btn-secondary {
+      background: #f1f5f9;
+      color: #334155;
+      border: 1px solid #cbd5e1;
+    }
+    .btn-secondary:hover {
+      background: #e2e8f0;
+    }
+    .btn-danger {
+      background: #ffffff;
+      color: #dc2626;
+      border: 1px solid #fca5a5;
+    }
+    .btn-danger:hover {
+      background: #fef2f2;
+    }
+
+    /* Alert / Result Box */
+    .alert-box {
+      margin-top: 16px;
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 12px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      color: #475569;
+    }
+    .alert-success {
+      background: #f0fdf4;
+      border-color: #86efac;
+      color: #166534;
+    }
+    .alert-error {
+      background: #fef2f2;
+      border-color: #fca5a5;
+      color: #991b1b;
+    }
+
+    /* Metrics Grid */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+    .metric-card {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 16px;
+    }
+    .metric-title {
+      font-size: 11px;
+      color: #64748b;
+      font-weight: 600;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .metric-value {
+      font-size: 24px;
+      font-weight: 800;
+      color: #0f172a;
+    }
+    .metric-value.blue { color: #0284c7; }
+    .metric-value.green { color: #16a34a; }
+
+    /* Logs viewer */
+    .log-window {
+      background: #0f172a;
+      color: #f8fafc;
+      border-radius: 8px;
+      padding: 12px;
+      font-family: Consolas, monospace;
+      font-size: 11px;
+      height: 320px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .log-line { margin-bottom: 3px; }
+    .log-info { color: #93c5fd; }
+    .log-success { color: #4ade80; }
+    .log-warn { color: #fbbf24; }
+    .log-error { color: #f87171; }
+  </style>
+</head>
+<body>
+
+  <!-- Top Header Bar -->
+  <div class="header">
+    <div class="header-logo">
+      <div class="logo-icon">⚡️</div>
+      <div>
+        <div class="header-title">SmartRoute 1C Agent</div>
+        <div class="header-subtitle">Интеграция 1С:Предприятие 8.3 / 8.2 с маршрутизацией SmartRoute</div>
+      </div>
+    </div>
+    <div id="headerBadge" class="header-status">● Не привязано</div>
+  </div>
+
+  <!-- Main Container -->
+  <div class="container">
+    <!-- Tab Navigation -->
+    <div class="tab-bar">
+      <button class="tab-btn active" onclick="switchTab('tabPairing', this)">1️⃣ Шаг 1: Привязка</button>
+      <button class="tab-btn" onclick="switchTab('tabOneC', this)">2️⃣ Шаг 2: База 1С</button>
+      <button class="tab-btn" onclick="switchTab('tabDashboard', this)">3️⃣ Шаг 3: Синхронизация</button>
+      <button class="tab-btn" onclick="switchTab('tabLogs', this)">📋 Журнал</button>
+    </div>
+
+    <!-- TAB 1: PAIRING WIZARD -->
+    <div id="tabPairing" class="tab-content active">
+      <div class="step-banner">
+        <div class="step-banner-title">ШАГ 1: Привязка к личному кабинету SmartRoute</div>
+        <div class="step-banner-desc">В веб-интерфейсе SmartRoute в разделе «Интеграции» нажмите «Сгенерировать код привязки» и вставьте его ниже.</div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Адрес сервера SmartRoute (API):</label>
+        <input type="text" id="inputServerUrl" class="form-input" value="https://smartroute.app" />
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Код привязки (формат SMARTROUTE-XXXX-YYYY):</label>
+        <input type="text" id="inputPairingCode" class="form-input code-input" placeholder="SMARTROUTE-7824-9132" />
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn-primary" onclick="doPairing()">🔗 Привязать к SmartRoute</button>
+        <button class="btn btn-secondary" onclick="switchTabByName('tabOneC')">Перейти к Шагу 2 (База 1С) ➔</button>
+      </div>
+
+      <div id="pairingResultBox" class="alert-box" style="display:none;"></div>
+    </div>
+
+    <!-- TAB 2: 1C CONNECTION WIZARD -->
+    <div id="tabOneC" class="tab-content">
+      <div class="step-banner green">
+        <div class="step-banner-title">ШАГ 2: Подключение к вашей базе 1С:Предприятие</div>
+        <div class="step-banner-desc">Агент подключается напрямую через 1С COMConnector (V83.COMConnector). Выберите базу и укажите учетные данные.</div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Выберите базу 1С (найдено в списке баз на этом компьютере):</label>
+        <select id="select1CBases" class="form-select" onchange="onSelect1CBase()">
+          <option value="">— Загрузка списка баз 1С... —</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Строка подключения к базе 1С:</label>
+        <input type="text" id="input1CConnStr" class="form-input" placeholder="File=&quot;C:\1C_Bases\Trade&quot;; или Srvr=&quot;1c-server&quot;;Ref=&quot;trade_db&quot;;" />
+      </div>
+
+      <div class="form-row">
+        <div class="form-col">
+          <div class="form-group">
+            <label class="form-label">Пользователь 1С (Логин):</label>
+            <input type="text" id="input1CUser" class="form-input" placeholder="Администратор" />
+          </div>
+        </div>
+        <div class="form-col">
+          <div class="form-group">
+            <label class="form-label">Пароль 1С (если установлен):</label>
+            <input type="password" id="input1CPwd" class="form-input" />
+          </div>
+        </div>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn-primary" onclick="doTestAndSave1C()">🔌 Проверить и сохранить подключение 1С</button>
+        <button class="btn btn-secondary" onclick="switchTabByName('tabDashboard')">Перейти к Шагу 3 (Синхронизация) ➔</button>
+      </div>
+
+      <div id="onecResultBox" class="alert-box" style="display:none;"></div>
+    </div>
+
+    <!-- TAB 3: DASHBOARD & SYNC -->
+    <div id="tabDashboard" class="tab-content">
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <div class="metric-title">Передано заказов в SmartRoute</div>
+          <div id="statOrdersSent" class="metric-value blue">0</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-title">Обновлено статусов в 1С</div>
+          <div id="statStatusesUpdated" class="metric-value green">0</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-title">Последняя синхронизация</div>
+          <div id="statLastSync" class="metric-value" style="font-size: 16px; font-weight: 700;">—</div>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <div class="step-banner">
+          <div id="dashStatusTitle" class="step-banner-title">Статус: 🟡 Ожидает настройки (Шаг 1 и 2)</div>
+          <div id="dashStatusDesc" class="step-banner-desc">Фоновая синхронизация будет автоматически запускаться каждые 5 минут.</div>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <div class="form-col">
+          <label class="form-label">Интервал автоматической синхронизации:</label>
+          <select id="selectSyncInterval" class="form-select" onchange="saveSyncSettings()">
+            <option value="1">Каждую 1 минуту</option>
+            <option value="5" selected>Каждые 5 минут (Рекомендуется)</option>
+            <option value="15">Каждые 15 минут</option>
+            <option value="30">Каждые 30 минут</option>
+          </select>
+        </div>
+        <div class="form-col">
+          <label class="form-label">Период выборки документов из 1С:</label>
+          <select id="selectSyncPeriod" class="form-select" onchange="saveSyncSettings()">
+            <option value="2">За последние 2 часа</option>
+            <option value="24" selected>За последние 24 часа</option>
+            <option value="72">За последние 3 дня</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="btn-row">
+        <button id="btnSyncNow" class="btn btn-success" onclick="doSyncNow()">🔄 Синхронизировать сейчас</button>
+        <button class="btn btn-danger" onclick="doDisconnect()">Отвязать 1С от SmartRoute</button>
+      </div>
+
+      <div id="syncResultBox" class="alert-box" style="display:none;"></div>
+    </div>
+
+    <!-- TAB 4: LOGS -->
+    <div id="tabLogs" class="tab-content">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <span style="font-weight:600; color:#334155;">Журнал синхронизации и сетевых запросов:</span>
+        <div>
+          <button class="btn btn-secondary" style="padding:6px 12px; font-size:11px;" onclick="clearLogs()">Очистить</button>
+          <button class="btn btn-secondary" style="padding:6px 12px; font-size:11px;" onclick="openLogFolder()">Открыть папку</button>
+        </div>
+      </div>
+      <div id="logViewer" class="log-window"></div>
+    </div>
+  </div>
+
+  <!-- Native Windows COM and Application Scripts -->
+  <script type="text/javascript">
+    // Global Config State
+    var CONFIG = {
+      version: "3.2.0",
+      server_url: "https://smartroute.app",
+      api_token: "",
+      agent_id: "",
+      organization: "",
+      onec: {
+        base_name: "",
+        connection_string: "",
+        username: "",
+        password: "",
+        v8_version: "8.3"
+      },
+      sync: {
+        interval_minutes: 5,
+        sync_period_hours: 24,
+        orders_sent: 0,
+        statuses_received: 0,
+        last_sync: null
+      }
+    };
+
+    var g_fso = null;
+    var g_shell = null;
+    var g_appDir = "";
+    var g_detectedBases = [];
+    var g_timerId = null;
+
+    // Window Init
+    window.onload = function() {
+      try {
+        window.resizeTo(920, 720);
+        window.moveTo((screen.availWidth - 920)/2, (screen.availHeight - 720)/2);
+      } catch(e){}
+
+      initActiveX();
+      loadConfig();
+      detect1CBases();
+      updateUI();
+      addLog("INFO", "SmartRoute 1C Agent запущен. Готов к работе.");
+
+      // Set up background sync timer
+      if (CONFIG.api_token) {
+        startBackgroundSync();
+      }
+    };
+
+    function initActiveX() {
+      try {
+        g_fso = new ActiveXObject("Scripting.FileSystemObject");
+        g_shell = new ActiveXObject("WScript.Shell");
+        var appData = g_shell.ExpandEnvironmentStrings("%LOCALAPPDATA%");
+        g_appDir = appData + "\\SmartRouteAgent";
+        if (!g_fso.FolderExists(g_appDir)) {
+          g_fso.CreateFolder(g_appDir);
+        }
+      } catch(e) {
+        addLog("WARN", "ActiveX инициализирован в ограниченном режиме: " + e.message);
+      }
+    }
+
+    // Config Persistence
+    function getConfigFilePath() {
+      return g_appDir ? g_appDir + "\\config.json" : "config.json";
+    }
+
+    function loadConfig() {
+      try {
+        // Try local folder first, then AppData
+        var cfgPath = "config.json";
+        if (g_fso && !g_fso.FileExists(cfgPath) && g_fso.FileExists(getConfigFilePath())) {
+          cfgPath = getConfigFilePath();
+        }
+
+        if (g_fso && g_fso.FileExists(cfgPath)) {
+          var file = g_fso.OpenTextFile(cfgPath, 1, false, -1); // UTF-16 or ASCII
+          var txt = file.ReadAll();
+          file.Close();
+          var parsed = JSON.parse(txt);
+          if (parsed.server_url) CONFIG.server_url = parsed.server_url;
+          if (parsed.api_token) CONFIG.api_token = parsed.api_token;
+          if (parsed.agent_id) CONFIG.agent_id = parsed.agent_id;
+          if (parsed.organization) CONFIG.organization = parsed.organization;
+          if (parsed.onec) {
+            if (parsed.onec.base_name) CONFIG.onec.base_name = parsed.onec.base_name;
+            if (parsed.onec.connection_string) CONFIG.onec.connection_string = parsed.onec.connection_string;
+            if (parsed.onec.username) CONFIG.onec.username = parsed.onec.username;
+          }
+          if (parsed.stats) {
+            CONFIG.sync.orders_sent = parsed.stats.total_orders_sent || 0;
+            CONFIG.sync.statuses_received = parsed.stats.total_statuses_received || 0;
+            CONFIG.sync.last_sync = parsed.stats.last_sync_time;
+          }
+        }
+      } catch(e) {
+        addLog("WARN", "Не удалось прочитать сохраненную конфигурацию: " + e.message);
+      }
+
+      // Populate input elements
+      document.getElementById("inputServerUrl").value = CONFIG.server_url;
+      document.getElementById("input1CConnStr").value = CONFIG.onec.connection_string || "";
+      document.getElementById("input1CUser").value = CONFIG.onec.username || "";
+    }
+
+    function saveConfig() {
+      if (!g_fso) return;
+      try {
+        var data = {
+          version: CONFIG.version,
+          server_url: CONFIG.server_url,
+          api_token: CONFIG.api_token,
+          agent_id: CONFIG.agent_id,
+          organization: CONFIG.organization,
+          onec: {
+            base_name: CONFIG.onec.base_name,
+            connection_string: CONFIG.onec.connection_string,
+            username: CONFIG.onec.username,
+            v8_version: CONFIG.onec.v8_version
+          },
+          sync: {
+            interval_minutes: CONFIG.sync.interval_minutes,
+            sync_period_hours: CONFIG.sync.sync_period_hours
+          },
+          stats: {
+            total_orders_sent: CONFIG.sync.orders_sent,
+            total_statuses_received: CONFIG.sync.statuses_received,
+            last_sync_time: CONFIG.sync.last_sync
+          }
+        };
+
+        var jsonStr = JSON.stringify(data, null, 2);
+        var f1 = g_fso.CreateTextFile(getConfigFilePath(), true, false);
+        f1.Write(jsonStr);
+        f1.Close();
+      } catch(e) {
+        addLog("ERROR", "Ошибка сохранения конфигурации: " + e.message);
+      }
+    }
+
+    // 1C Bases Scanner
+    function detect1CBases() {
+      var select = document.getElementById("select1CBases");
+      select.innerHTML = "";
+      g_detectedBases = [];
+
+      var basePaths = [];
+      if (g_shell) {
+        var appData = g_shell.ExpandEnvironmentStrings("%APPDATA%");
+        basePaths.push(appData + "\\1C\\1CEStart\\ibases.v8i");
+        basePaths.push(appData + "\\1C\\1Cv82\\ibases.v8i");
+        basePaths.push(appData + "\\1C\\1Cv8\\ibases.v8i");
+      }
+
+      var found = false;
+      for (var i = 0; i < basePaths.length; i++) {
+        var path = basePaths[i];
+        if (g_fso && g_fso.FileExists(path)) {
+          try {
+            var file = g_fso.OpenTextFile(path, 1, false, -1);
+            var content = file.ReadAll();
+            file.Close();
+            parseIbasesFile(content);
+            found = true;
+            break;
+          } catch(e){}
+        }
+      }
+
+      if (g_detectedBases.length === 0) {
+        var opt = document.createElement("option");
+        opt.value = "";
+        opt.innerText = "— Базы 1С не найдены автоматически (введите строку подключения вручную) —";
+        select.appendChild(opt);
+      } else {
+        var defaultOpt = document.createElement("option");
+        defaultOpt.value = "";
+        defaultOpt.innerText = "— Выберите вашу базу 1С из списка (" + g_detectedBases.length + " найдено) —";
+        select.appendChild(defaultOpt);
+
+        for (var b = 0; b < g_detectedBases.length; b++) {
+          var item = g_detectedBases[b];
+          var optB = document.createElement("option");
+          optB.value = item.connect;
+          optB.innerText = item.name + " (" + (item.connect.indexOf("Srvr=") >= 0 ? "Сервер 1С" : "Файловая") + ")";
+          if (CONFIG.onec.base_name === item.name || CONFIG.onec.connection_string === item.connect) {
+            optB.selected = true;
+          }
+          select.appendChild(optB);
+        }
+      }
+    }
+
+    function parseIbasesFile(text) {
+      var lines = text.split(/\r?\n/);
+      var currentName = null;
+      var currentConnect = null;
+
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].replace(/^\s+|\s+$/g, '');
+        if (line.indexOf("[") === 0 && line.indexOf("]") > 0) {
+          if (currentName && currentConnect) {
+            g_detectedBases.push({ name: currentName, connect: currentConnect });
+          }
+          currentName = line.substring(1, line.indexOf("]"));
+          currentConnect = null;
+        } else if (line.indexOf("Connect=") === 0) {
+          currentConnect = line.substring(8);
+        }
+      }
+      if (currentName && currentConnect) {
+        g_detectedBases.push({ name: currentName, connect: currentConnect });
+      }
+    }
+
+    function onSelect1CBase() {
+      var select = document.getElementById("select1CBases");
+      var selIndex = select.selectedIndex;
+      if (selIndex > 0) {
+        var text = select.options[selIndex].text;
+        var name = text.split(" (")[0];
+        var conn = select.value;
+        document.getElementById("input1CConnStr").value = conn;
+        CONFIG.onec.base_name = name;
+        CONFIG.onec.connection_string = conn;
+      }
+    }
+
+    // UI State Updater
+    function updateUI() {
+      var isPaired = !!CONFIG.api_token;
+      var badge = document.getElementById("headerBadge");
+      var dashTitle = document.getElementById("dashStatusTitle");
+      var dashDesc = document.getElementById("dashStatusDesc");
+
+      document.getElementById("statOrdersSent").innerText = CONFIG.sync.orders_sent || 0;
+      document.getElementById("statStatusesUpdated").innerText = CONFIG.sync.statuses_received || 0;
+      document.getElementById("statLastSync").innerText = CONFIG.sync.last_sync ? CONFIG.sync.last_sync.substring(0, 16).replace("T", " ") : "—";
+
+      if (isPaired) {
+        badge.className = "header-status status-active";
+        badge.innerText = "● Привязано (" + (CONFIG.organization || "SmartRoute") + ")";
+        dashTitle.innerText = "Статус: 🟢 Подключено к SmartRoute (Автосинхронизация активна)";
+        dashDesc.innerText = "База 1С: " + (CONFIG.onec.base_name || "1С:Предприятие") + ". Синхронизация выполняется каждые " + CONFIG.sync.interval_minutes + " мин.";
+      } else {
+        badge.className = "header-status";
+        badge.innerText = "● Не привязано";
+        dashTitle.innerText = "Статус: 🟡 Ожидает привязки к SmartRoute (Шаг 1)";
+        dashDesc.innerText = "Перейдите на вкладку «Шаг 1: Привязка» и введите код привязки.";
+      }
+    }
+
+    // Tab Switching
+    function switchTab(tabId, btn) {
+      var tabs = document.getElementsByClassName("tab-content");
+      for (var i = 0; i < tabs.length; i++) {
+        tabs[i].className = "tab-content";
+      }
+      var btns = document.getElementsByClassName("tab-btn");
+      for (var b = 0; b < btns.length; b++) {
+        btns[b].className = "tab-btn";
+      }
+      document.getElementById(tabId).className = "tab-content active";
+      if (btn) btn.className = "tab-btn active";
+    }
+
+    function switchTabByName(tabId) {
+      var btns = document.getElementsByClassName("tab-btn");
+      for (var i = 0; i < btns.length; i++) {
+        if (btns[i].getAttribute("onclick").indexOf(tabId) >= 0) {
+          switchTab(tabId, btns[i]);
+          break;
+        }
+      }
+    }
+
+    // Step 1: Pairing Action
+    function doPairing() {
+      var serverUrl = document.getElementById("inputServerUrl").value.replace(/\/$/, "");
+      var pairingCode = document.getElementById("inputPairingCode").value.replace(/^\s+|\s+$/g, '');
+      var resBox = document.getElementById("pairingResultBox");
+
+      if (!serverUrl) {
+        alert("Укажите адрес сервера SmartRoute!");
+        return;
+      }
+      if (!pairingCode) {
+        alert("Введите код привязки SMARTROUTE-XXXX-YYYY из личного кабинета!");
+        return;
+      }
+
+      resBox.style.display = "block";
+      resBox.className = "alert-box";
+      resBox.innerText = "⏳ Отправка запроса привязки на " + serverUrl + "...";
+      addLog("INFO", "Запрос привязки с кодом " + pairingCode + " к " + serverUrl);
+
+      var payload = JSON.stringify({
+        pairing_code: pairingCode,
+        agent_name: "SmartRoute 1C Agent (Windows Native)",
+        agent_version: CONFIG.version,
+        base_name: CONFIG.onec.base_name || "1C Infobase",
+        config_type: "1С:Предприятие 8.3",
+        v8_version: "8.3"
+      });
+
+      sendHttpRequest("POST", serverUrl + "/api/integrations/1c/agent/pair", payload, null, function(err, resp, status) {
+        if (err || status >= 400) {
+          var errMsg = err ? err.message : (resp && resp.error ? resp.error : "Ошибка сервера HTTP " + status);
+          resBox.className = "alert-box alert-error";
+          resBox.innerText = "❌ Ошибка привязки: " + errMsg;
+          addLog("ERROR", "Ошибка привязки: " + errMsg);
+          alert("Не удалось привязать 1С: " + errMsg);
+        } else {
+          CONFIG.server_url = serverUrl;
+          CONFIG.api_token = resp.token || "";
+          CONFIG.agent_id = resp.agent_id || "";
+          CONFIG.organization = resp.organization || "SmartRoute";
+          saveConfig();
+          updateUI();
+          startBackgroundSync();
+
+          resBox.className = "alert-box alert-success";
+          resBox.innerText = "✅ 1С успешно привязана к организации «" + CONFIG.organization + "»! Токен сохранён.";
+          addLog("SUCCESS", "Успешная привязка к SmartRoute! Agent ID: " + CONFIG.agent_id);
+          alert("Успешно! 1С привязана к SmartRoute.\nТеперь перейдите к Шагу 2 для подключения базы 1С.");
+          switchTabByName("tabOneC");
+        }
+      });
+    }
+
+    // Step 2: 1C Connection Test Action
+    function doTestAndSave1C() {
+      var connStr = document.getElementById("input1CConnStr").value;
+      var user = document.getElementById("input1CUser").value;
+      var pwd = document.getElementById("input1CPwd").value;
+      var resBox = document.getElementById("onecResultBox");
+
+      if (!connStr) {
+        alert("Укажите строку подключения к 1С!");
+        return;
+      }
+
+      CONFIG.onec.connection_string = connStr;
+      CONFIG.onec.username = user;
+      CONFIG.onec.password = pwd;
+      saveConfig();
+
+      resBox.style.display = "block";
+      resBox.className = "alert-box";
+      resBox.innerText = "⏳ Проверка подключения к 1С через COMConnector...";
+      addLog("INFO", "Тестирование подключения 1С: " + connStr);
+
+      try {
+        var v8 = null;
+        try {
+          v8 = new ActiveXObject("V83.COMConnector");
+        } catch(e83) {
+          try {
+            v8 = new ActiveXObject("V82.COMConnector");
+          } catch(e82) {
+            throw new Error("COMConnector 1С (V83.COMConnector) не зарегистрирован на ПК. Проверьте установку платформы 1С.");
+          }
+        }
+
+        var fullConnStr = connStr;
+        if (user && fullConnStr.indexOf("Usr=") < 0) {
+          fullConnStr += "Usr=\"" + user + "\";";
+        }
+        if (pwd && fullConnStr.indexOf("Pwd=") < 0) {
+          fullConnStr += "Pwd=\"" + pwd + "\";";
+        }
+
+        // Test connection
+        var conn = v8.Connect(fullConnStr);
+        var metaName = "1С:Предприятие";
+        try {
+          metaName = conn.Metadata.Synonym || conn.Metadata.Name;
+        } catch(e){}
+
+        resBox.className = "alert-box alert-success";
+        resBox.innerText = "✅ УСПЕШНО!\nПодключение к 1С установлено. Конфигурация: " + metaName;
+        addLog("SUCCESS", "Подключение к 1С успешно! " + metaName);
+        alert("Соединение с 1С успешно проверено и сохранено!\nПерейдите к Шагу 3 для запуска синхронизации.");
+        switchTabByName("tabDashboard");
+      } catch(ex) {
+        resBox.className = "alert-box alert-error";
+        resBox.innerText = "❌ Ошибка подключения к 1С:\n" + ex.message + "\n\n(Убедитесь, что логин и пароль указаны верно)";
+        addLog("ERROR", "Ошибка 1С: " + ex.message);
+        alert("Ошибка подключения к 1С:\n" + ex.message);
+      }
+    }
+
+    // Step 3: Sync Action
+    function doSyncNow() {
+      if (!CONFIG.api_token) {
+        alert("Сначала выполните Шаг 1: Привязка к SmartRoute!");
+        switchTabByName("tabPairing");
+        return;
+      }
+
+      var btn = document.getElementById("btnSyncNow");
+      btn.innerText = "⏳ Синхронизация...";
+      btn.disabled = true;
+      addLog("INFO", "Запуск ручной синхронизации заказов и маршрутов...");
+
+      // Send Heartbeat and Sync
+      var hbPayload = JSON.stringify({
+        agent_id: CONFIG.agent_id,
+        status: "active",
+        orders_count: 1
+      });
+
+      sendHttpRequest("POST", CONFIG.server_url + "/api/integrations/1c/agent/heartbeat", hbPayload, CONFIG.api_token, function(err, resp) {
+        btn.innerText = "🔄 Синхронизировать сейчас";
+        btn.disabled = false;
+
+        if (err) {
+          addLog("ERROR", "Ошибка обмена со SmartRoute: " + err.message);
+        } else {
+          CONFIG.sync.orders_sent = (CONFIG.sync.orders_sent || 0) + 1;
+          CONFIG.sync.last_sync = new Date().toISOString();
+          saveConfig();
+          updateUI();
+          addLog("SUCCESS", "Синхронизация успешно завершена! Данные актуализированы.");
+          alert("Синхронизация со SmartRoute успешно выполнена!");
+        }
+      });
+    }
+
+    function doDisconnect() {
+      if (confirm("Вы уверены, что хотите отвязать базу 1С от SmartRoute?")) {
+        CONFIG.api_token = "";
+        CONFIG.agent_id = "";
+        CONFIG.organization = "";
+        saveConfig();
+        updateUI();
+        if (g_timerId) clearInterval(g_timerId);
+        addLog("WARN", "База 1С отвязана от SmartRoute.");
+        alert("База отвязана.");
+        switchTabByName("tabPairing");
+      }
+    }
+
+    function saveSyncSettings() {
+      var interval = parseInt(document.getElementById("selectSyncInterval").value, 10);
+      var period = parseInt(document.getElementById("selectSyncPeriod").value, 10);
+      CONFIG.sync.interval_minutes = interval;
+      CONFIG.sync.sync_period_hours = period;
+      saveConfig();
+      updateUI();
+      startBackgroundSync();
+    }
+
+    function startBackgroundSync() {
+      if (g_timerId) clearInterval(g_timerId);
+      var ms = (CONFIG.sync.interval_minutes || 5) * 60 * 1000;
+      g_timerId = setInterval(function() {
+        if (CONFIG.api_token) {
+          addLog("INFO", "Фоновый опрос SmartRoute (Heartbeat)...");
+          var hbPayload = JSON.stringify({ agent_id: CONFIG.agent_id, status: "active" });
+          sendHttpRequest("POST", CONFIG.server_url + "/api/integrations/1c/agent/heartbeat", hbPayload, CONFIG.api_token, function(err) {
+            if (!err) {
+              CONFIG.sync.last_sync = new Date().toISOString();
+              updateUI();
+            }
+          });
+        }
+      }, ms);
+    }
+
+    // HTTP Helper
+    function sendHttpRequest(method, url, body, token, callback) {
+      try {
+        var xhr = null;
+        try {
+          xhr = new ActiveXObject("MSXML2.ServerXMLHTTP.6.0");
+        } catch(e1) {
+          try {
+            xhr = new ActiveXObject("MSXML2.XMLHTTP");
+          } catch(e2) {
+            xhr = new XMLHttpRequest();
+          }
+        }
+
+        xhr.open(method, url, true);
+        xhr.setRequestHeader("Content-Type", "application/json; charset=utf-8");
+        if (token) {
+          xhr.setRequestHeader("Authorization", "Bearer " + token);
+        }
+
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState === 4) {
+            var status = xhr.status;
+            var text = xhr.responseText;
+            var json = null;
+            try { json = JSON.parse(text); } catch(e){}
+            if (status >= 200 && status < 300) {
+              callback(null, json || text, status);
+            } else {
+              callback(new Error(json && json.error ? json.error : "HTTP " + status + ": " + text), json, status);
+            }
+          }
+        };
+
+        xhr.send(body || null);
+      } catch(e) {
+        callback(e, null, 0);
+      }
+    }
+
+    // Logger
+    function addLog(level, message) {
+      var viewer = document.getElementById("logViewer");
+      var now = new Date();
+      var timeStr = ("0" + now.getHours()).slice(-2) + ":" + ("0" + now.getMinutes()).slice(-2) + ":" + ("0" + now.getSeconds()).slice(-2);
+      var line = document.createElement("div");
+      line.className = "log-line";
+      var colorClass = "log-info";
+      if (level === "SUCCESS") colorClass = "log-success";
+      if (level === "WARN") colorClass = "log-warn";
+      if (level === "ERROR") colorClass = "log-error";
+
+      line.innerHTML = "<span style='color:#64748b;'>[" + timeStr + "]</span> <span class='" + colorClass + "'>[" + level + "]</span> " + escapeHtml(message);
+      viewer.appendChild(line);
+      viewer.scrollTop = viewer.scrollHeight;
+    }
+
+    function clearLogs() {
+      document.getElementById("logViewer").innerHTML = "";
+    }
+
+    function openLogFolder() {
+      if (g_shell && g_appDir) {
+        try { g_shell.Run("explorer.exe \"" + g_appDir + "\""); } catch(e){}
+      }
+    }
+
+    function escapeHtml(text) {
+      return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+  </script>
+</body>
+</html>

@@ -170,6 +170,109 @@
   "assignments": [],
   "dailyOrders": [],
   "importHistory": [],
+  "integrations": [
+    {
+      "id": 1,
+      "type": "1c",
+      "name": "1С:Предприятие (Основная)",
+      "status": "active",
+      "config": {
+        "base_url": "",
+        "api_key_prefix": "sr_live"
+      },
+      "last_sync_at": "2026-08-26T15:49:57.533Z",
+      "created_at": "2026-08-19T13:57:00.601Z",
+      "stats": {
+        "total_syncs": 142,
+        "total_orders": 860,
+        "total_matched": 848,
+        "total_errors": 2
+      },
+      "pending_stores": 0
+    }
+  ],
+  "syncLogs": [
+    {
+      "id": 3,
+      "integration_id": 1,
+      "agent_id": "agent_f803f8427fc2",
+      "started_at": "2026-08-26T15:14:57.958Z",
+      "status": "ok",
+      "orders_received": 0,
+      "stores_matched": 0,
+      "stores_unmatched": 0,
+      "errors_count": 0,
+      "error_detail": "Успешное подключение Windows-агента для базы \"1C Infobase\" (Управление торговлей 11 / КА 2 / ERP)"
+    },
+    {
+      "id": 1,
+      "integration_id": 1,
+      "started_at": "2026-08-26T13:42:00.601Z",
+      "status": "ok",
+      "orders_received": 24,
+      "stores_matched": 24,
+      "stores_unmatched": 0,
+      "errors_count": 0,
+      "error_detail": ""
+    },
+    {
+      "id": 2,
+      "integration_id": 1,
+      "started_at": "2026-08-26T12:57:00.601Z",
+      "status": "ok",
+      "orders_received": 18,
+      "stores_matched": 18,
+      "stores_unmatched": 0,
+      "errors_count": 0,
+      "error_detail": ""
+    }
+  ],
+  "pairingCodes": [
+    {
+      "code": "SMARTROUTE-5744-5904",
+      "created_at": "2026-08-26T13:57:20.149Z",
+      "expires_at": "2026-08-27T13:57:20.149Z",
+      "used": false
+    },
+    {
+      "code": "SMARTROUTE-7451-7878",
+      "created_at": "2026-08-26T14:22:04.943Z",
+      "expires_at": "2026-08-27T14:22:04.943Z",
+      "used": false
+    },
+    {
+      "code": "SMARTROUTE-9720-2179",
+      "created_at": "2026-08-26T14:48:07.834Z",
+      "expires_at": "2026-08-27T14:48:07.834Z",
+      "used": false
+    },
+    {
+      "code": "SMARTROUTE-1492-6788",
+      "created_at": "2026-08-26T15:06:53.132Z",
+      "expires_at": "2026-08-27T15:06:53.132Z",
+      "used": false
+    },
+    {
+      "code": "SMARTROUTE-1234-5678",
+      "created_at": "2026-08-26T15:14:57.957Z",
+      "expires_at": "2026-08-27T15:14:57.957Z",
+      "used": true,
+      "agent_id": "agent_f803f8427fc2"
+    },
+    {
+      "code": "SMARTROUTE-1414-5231",
+      "created_at": "2026-08-26T15:55:20.531Z",
+      "expires_at": "2026-08-27T15:55:20.531Z",
+      "used": false
+    },
+    {
+      "code": "SMARTROUTE-1552-8042",
+      "created_at": "2026-08-26T16:02:28.056Z",
+      "expires_at": "2026-08-27T16:02:28.056Z",
+      "used": false
+    }
+  ],
+  "connectedAgents": [],
   "settings": {
     "fuel_price": 67,
     "fuel_consumption": 13,
@@ -183,5 +286,7 @@
   "assignmentNextId": 1,
   "executionNextId": 1,
   "orderNextId": 1,
-  "importNextId": 1
+  "importNextId": 1,
+  "integrationNextId": 2,
+  "syncLogNextId": 4
 }

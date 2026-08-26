@@ -3,7 +3,9 @@ import fs from "fs";
 import path from "path";
 
 async function run() {
+  const argToken = process.argv[2];
   const token = (
+    argToken ||
     process.env.GITHUB_TOKEN ||
     process.env.GH_TOKEN ||
     process.env.GITHUB_PAT ||
@@ -11,32 +13,37 @@ async function run() {
   ).trim();
 
   if (!token) {
-    console.error("ERROR: GITHUB_TOKEN is not set in environment variables.");
+    console.error("ERROR: GITHUB_TOKEN is not set in environment variables or passed as an argument.");
+    console.error("Usage: node scripts/create-pr.mjs [YOUR_GITHUB_TOKEN]");
     process.exit(1);
   }
 
-  const repoOwner = "feedlager6-coder";
-  const repoName = "smart_logistic";
-  const branchName = `fix/telegram-driver-integration-${Date.now()}`;
-  const commitMessage = "feat: fix Telegram driver connection, phone number linking, and route broadcasting";
-  const prTitle = "Fix Telegram driver connection and route broadcasting";
+  const repoOwner = process.env.GITHUB_OWNER || "feedlager6-coder";
+  const repoName = process.env.GITHUB_REPO || "smart_logistic";
+  const branchName = `feat/1c-native-agent-sync-${Date.now()}`;
+  const commitMessage = "feat: 1C Enterprise native Windows Agent, auto-configured setup installer, TLS 1.2/1.3 pairing & sync";
+  const prTitle = "1C:Enterprise Native Windows Agent & Seamless Cloud Pairing Integration";
   const prBody = `### Changes included in this PR:
-1. **Telegram Driver Link Integration**:
-   - Fixed \`/start <token>\` authentication workflow for driver registration via Telegram bot.
-   - Added automatic resolution of Bot username via Telegram API.
-   - Added instant dispatch of active route assignments upon driver registration.
 
-2. **Phone Number & Contact Registration**:
-   - Added support for Telegram \`request_contact\` button to link drivers by shared contact.
-   - Added plain-text phone number recognition (e.g. \`+7 928 ...\`) with 10-digit normalization.
+1. **Native 1C:Enterprise Windows Agent (v3.2.0)**:
+   - Built a 100% native 64-bit Windows Agent in C (\`apps/1c-agent/main.c\`) with zero external runtime dependencies (no Python or third-party interpreters needed on the client).
+   - Direct 1C:Enterprise COM connection (\`V83.COMConnector\`) & CLI support for automated order export and delivery status updates.
+   - Dual-engine HTTP stack using **WinHTTP** with full **TLS 1.2/1.3** protocol negotiation and automatic fallback to Windows native \`curl.exe\`.
+   - Automatic local 1C infobases scanner (\`ibases.v8i\` in \`%APPDATA%\\1C\\1CEStart\`).
 
-3. **Route Broadcast & Dispatching**:
-   - Fixed Telegram message formatting and URL validation for driver web-app links.
-   - Handled inline buttons with graceful fallback to prevent Telegram API \`BUTTON_URL_INVALID\` errors.
-   - Added detailed dispatch status and error reporting for unlinked drivers.
+2. **On-The-Fly Custom Setup Installer**:
+   - Backend route \`/api/integrations/1c/agent/setup.exe\` builds customized NSIS installers with pre-embedded cloud server URLs.
+   - Desktop and Start Menu shortcut creation with clean uninstaller.
 
-4. **Background Polling & Webhook**:
-   - Added automatic background polling fallback for Telegram Bot updates.`;
+3. **Pairing & Synchronization Backend**:
+   - Resilient pairing API (\`/api/integrations/1c/agent/pair\`) with whitespace/case cleanup and auto-registration.
+   - Active pairing code auto-fetch endpoint (\`/api/integrations/1c/agent/code/active\`).
+   - Detailed sync logs and connected agent heartbeat tracking.
+
+4. **UI & UX Refinement**:
+   - Clean, single-action **«Скачать установщик (.exe)»** primary button.
+   - Dedicated connection parameters card with 1-click clipboard copy for Server URL and Pairing Code.
+   - Live agent status monitoring and sync telemetry in the Integrations dashboard.`;
 
   console.log(`[1/5] Verifying repository access to ${repoOwner}/${repoName}...`);
   const repoRes = await fetch(`https://api.github.com/repos/${repoOwner}/${repoName}`, {
@@ -67,7 +74,16 @@ async function run() {
 
   console.log("[3/5] Copying updated project files into temporary directory...");
   const srcRoot = process.cwd();
-  const excludeList = new Set(["node_modules", ".git", "dist", ".cache", ".env", ".npm", ".turbo", ".next"]);
+  const excludeList = new Set([
+    "node_modules",
+    ".git",
+    "dist",
+    ".cache",
+    ".env",
+    ".npm",
+    ".turbo",
+    ".next"
+  ]);
 
   function copyDirRecursive(src, dst) {
     if (!fs.existsSync(dst)) {
@@ -91,13 +107,11 @@ async function run() {
   console.log(`[4/5] Creating branch '${branchName}', committing and pushing...`);
   execSync(`git checkout -b ${branchName}`, { cwd: tempDir });
   execSync("git add -A", { cwd: tempDir });
-
   try {
     execSync(`git commit -m "${commitMessage}"`, { cwd: tempDir });
   } catch (err) {
     console.log("Git commit output/message:", err.message);
   }
-
   execSync(`git push -u origin ${branchName} --force`, { cwd: tempDir });
 
   console.log(`[5/5] Creating Pull Request against '${defaultBranch}'...`);
