@@ -143,6 +143,64 @@ export interface RouteSessionData {
   created_at: string;
 }
 
+export interface IntegrationData {
+  id: number;
+  type: string;
+  name: string;
+  status: "active" | "setup" | "error" | "disabled";
+  config: Record<string, unknown>;
+  last_sync_at: string | null;
+  created_at: string;
+  stats?: {
+    total_syncs: number;
+    total_orders: number;
+    total_matched: number;
+    total_errors: number;
+  };
+  pending_stores?: number;
+}
+
+export interface SyncLogData {
+  id: number;
+  integration_id?: number;
+  agent_id?: string;
+  started_at: string;
+  status: "ok" | "partial" | "error";
+  orders_received: number;
+  stores_matched: number;
+  stores_unmatched: number;
+  errors_count: number;
+  error_detail: string;
+}
+
+export interface AgentPairingCode {
+  code: string;
+  created_at: string;
+  expires_at: string;
+  used: boolean;
+  agent_id?: string;
+}
+
+export interface ConnectedAgent {
+  id: string;
+  token: string;
+  name: string;
+  base_name: string;
+  config_type: string;
+  v8_version: string;
+  hostname?: string;
+  ip_address?: string;
+  connection_type: "com" | "http";
+  status: "active" | "syncing" | "error" | "idle";
+  last_heartbeat_at: string;
+  last_sync_at: string | null;
+  sync_interval_min: number;
+  total_orders_synced: number;
+  total_statuses_updated: number;
+  last_error?: string | null;
+  created_at: string;
+}
+
 export interface DailyOrderData {
   id: number;
   delivery_date: string;
@@ -161,6 +219,19 @@ export interface DailyOrderData {
   products?: string;
   order_number?: string;
   quantity?: number;
+  external_id?: string;
+  customer_name?: string;
+  customer_phone?: string;
+  customer_email?: string;
+  delivery_status?: "planned" | "in_transit" | "delivered" | "failed" | "canceled";
+  route_number?: string | number;
+  driver_name?: string;
+  actual_delivery_time?: string | null;
+  pod_signature_url?: string | null;
+  pod_photo_url?: string | null;
+  pod_notes?: string | null;
+  items?: Array<{ name: string; quantity: number; price: number; amount: number }>;
+  updated_at?: string;
 }
 
 export interface ImportHistoryRecord {
@@ -355,6 +426,53 @@ class MemoryStore {
   assignments: RouteAssignmentData[] = [];
   dailyOrders: DailyOrderData[] = [];
   importHistory: ImportHistoryRecord[] = [];
+  integrations: IntegrationData[] = [
+    {
+      id: 1,
+      type: "1c",
+      name: "1С:Предприятие (Основная)",
+      status: "active",
+      config: {
+        base_url: "",
+        api_key_prefix: "sr_live",
+      },
+      last_sync_at: new Date(Date.now() - 15 * 60 * 1000).toISOString(),
+      created_at: new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString(),
+      stats: {
+        total_syncs: 142,
+        total_orders: 860,
+        total_matched: 848,
+        total_errors: 2,
+      },
+      pending_stores: 0,
+    },
+  ];
+  syncLogs: SyncLogData[] = [
+    {
+      id: 1,
+      integration_id: 1,
+      started_at: new Date(Date.now() - 15 * 60 * 1000).toISOString(),
+      status: "ok",
+      orders_received: 24,
+      stores_matched: 24,
+      stores_unmatched: 0,
+      errors_count: 0,
+      error_detail: "",
+    },
+    {
+      id: 2,
+      integration_id: 1,
+      started_at: new Date(Date.now() - 1 * 3600 * 1000).toISOString(),
+      status: "ok",
+      orders_received: 18,
+      stores_matched: 18,
+      stores_unmatched: 0,
+      errors_count: 0,
+      error_detail: "",
+    },
+  ];
+  pairingCodes: AgentPairingCode[] = [];
+  connectedAgents: ConnectedAgent[] = [];
   settings: SettingsData = {
     fuel_price: 67,
     fuel_consumption: 13,
@@ -369,6 +487,8 @@ class MemoryStore {
   executionNextId = 1;
   orderNextId = 1;
   importNextId = 1;
+  integrationNextId = 2;
+  syncLogNextId = 3;
   bulkJobs: Map<string, {
     id: string;
     total: number;
@@ -393,6 +513,10 @@ class MemoryStore {
         if (Array.isArray(data.assignments)) this.assignments = data.assignments;
         if (Array.isArray(data.dailyOrders)) this.dailyOrders = data.dailyOrders;
         if (Array.isArray(data.importHistory)) this.importHistory = data.importHistory;
+        if (Array.isArray(data.integrations)) this.integrations = data.integrations;
+        if (Array.isArray(data.syncLogs)) this.syncLogs = data.syncLogs;
+        if (Array.isArray(data.pairingCodes)) this.pairingCodes = data.pairingCodes;
+        if (Array.isArray(data.connectedAgents)) this.connectedAgents = data.connectedAgents;
         if (data.settings && typeof data.settings === "object") this.settings = { ...this.settings, ...data.settings };
         if (data.storeNextId) this.storeNextId = data.storeNextId;
         if (data.driverNextId) this.driverNextId = data.driverNextId;
@@ -401,6 +525,8 @@ class MemoryStore {
         if (data.executionNextId) this.executionNextId = data.executionNextId;
         if (data.orderNextId) this.orderNextId = data.orderNextId;
         if (data.importNextId) this.importNextId = data.importNextId;
+        if (data.integrationNextId) this.integrationNextId = data.integrationNextId;
+        if (data.syncLogNextId) this.syncLogNextId = data.syncLogNextId;
       }
     } catch (err) {
       console.warn("[MemoryStore] Failed to load data from disk, using defaults:", err);
@@ -419,6 +545,10 @@ class MemoryStore {
         assignments: this.assignments,
         dailyOrders: this.dailyOrders,
         importHistory: this.importHistory,
+        integrations: this.integrations,
+        syncLogs: this.syncLogs,
+        pairingCodes: this.pairingCodes,
+        connectedAgents: this.connectedAgents,
         settings: this.settings,
         storeNextId: this.storeNextId,
         driverNextId: this.driverNextId,
@@ -427,6 +557,8 @@ class MemoryStore {
         executionNextId: this.executionNextId,
         orderNextId: this.orderNextId,
         importNextId: this.importNextId,
+        integrationNextId: this.integrationNextId,
+        syncLogNextId: this.syncLogNextId,
       };
       fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), "utf-8");
     } catch (err) {

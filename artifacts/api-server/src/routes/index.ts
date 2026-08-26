@@ -10,6 +10,8 @@ import geocodeRouter from "./geocode";
 import driverRouter from "./driver";
 import driversRouter from "./drivers";
 import telegramRouter from "./telegram";
+import integrationsRouter from "./integrations";
+import v1Router from "./v1";
 
 const router: IRouter = Router();
 
@@ -24,5 +26,7 @@ router.use(geocodeRouter);
 router.use(driverRouter);
 router.use(driversRouter);
 router.use(telegramRouter);
+router.use(integrationsRouter);
+router.use(v1Router);
 
 export default router;
