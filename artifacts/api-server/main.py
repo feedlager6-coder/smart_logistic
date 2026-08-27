@@ -47,6 +47,11 @@ logger = logging.getLogger(__name__)
 # ── EPF integration file paths ─────────────────────────────────────────────────
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", ".."))
+# In the local monorepo main.py lives under artifacts/api-server, while the
+# production image copies it directly to /app. Resolve the root from the
+# actual agent asset location so authenticated downloads work in both layouts.
+if not os.path.isdir(os.path.join(_PROJECT_ROOT, "apps", "1c-agent")):
+    _PROJECT_ROOT = _THIS_DIR
 _EPF_PATH = os.path.join(_PROJECT_ROOT, "artifacts", "integrations", "1c", "SmartRoute.epf")
 _EPF_VERSION_PATH = os.path.join(_PROJECT_ROOT, "artifacts", "integrations", "1c", "version.json")
 _EPF_IS_PLACEHOLDER: bool = True  # updated at startup after reading version.json
