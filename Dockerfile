@@ -53,6 +53,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy FastAPI application
 COPY artifacts/api-server/main.py ./
 
+# Copy the Windows 1C agent artifacts used by the authenticated download
+# endpoints. Without this, the routes exist in Railway but return 404 because
+# the installer and ZIP contents are absent from the runtime image.
+COPY apps/1c-agent ./apps/1c-agent
+
+# Copy the 1C external processing package served by the integration endpoints.
+COPY artifacts/integrations/1c ./artifacts/integrations/1c
+
 # Copy built frontend — FastAPI serves it from ./static/
 COPY --from=frontend /workspace/artifacts/smartroute/dist/public ./static/
 
