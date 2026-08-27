@@ -11,7 +11,8 @@
 - 🛡️ **Надежность и отказоустойчивость**: повторные попытки (exponential backoff), локальное шифрование, подробное логирование.
 
 ## Быстрый запуск
-1. Запустите `start_agent.bat` или `python smartroute_agent_gui.py`
-2. Для запуска в режиме консольного демона: `python smartroute_agent_cli.py --daemon`
-3. Подробная инструкция: см. [CLIENT_GUIDE.md](CLIENT_GUIDE.md)
-4. Техническая архитектура: см. [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md)
+1. Для клиента скачайте `SmartRoute_1C_Agent_Setup.exe` из раздела «Интеграции» и запустите установщик.
+2. Для portable-запуска используйте `SmartRoute_Agent.exe` из ZIP-архива.
+3. Для разработки GUI запускайте `python smartroute_agent_gui.py`; для фонового режима: `python smartroute_agent_cli.py --daemon`.
+4. Подробная инструкция для клиента: см. [CLIENT_GUIDE.md](CLIENT_GUIDE.md).
+5. Техническая архитектура и сборка Windows-артефактов: см. [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md).

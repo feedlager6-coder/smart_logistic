@@ -9,7 +9,7 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 - `pnpm --filter @workspace/api-spec run codegen` — пересобрать API hooks + Zod schemas из OpenAPI spec (запускать после изменения `lib/api-spec/openapi.yaml`). **Внимание**: codegen очищает `generated/` папку перед генерацией. Если orval падает с "Failed to resolve input", восстанавливать из git: `git show HEAD:lib/api-client-react/src/generated/api.ts > lib/api-client-react/src/generated/api.ts` (аналогично для api.schemas.ts и lib/api-zod). Для новых DELETE-эндпоинтов проще использовать прямой `fetch()` в компоненте, не ждать codegen.
 - `pnpm run typecheck` — проверить типы по всему монорепо
 - Workflow `Start API Server` — FastAPI бэкенд на порту 8080 (`cd artifacts/api-server && python3 main.py`)
-- Workflow `Start Frontend` — Vite dev server, порт 24853, BASE_PATH=/
+- Workflow `Start Frontend` — Vite dev server, порт 5000, BASE_PATH=/
 
 ## Railway Deployment
 
@@ -255,7 +255,7 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 
 ## Gotchas
 
-- `Start API Server` и `artifacts/smartroute: web` workflows — всегда FAILED (конфликт портов с уже запущенными `artifacts/api-server: API Server` и `Start Frontend`) — ожидаемо, не чинить
+- Для запуска в Replit используйте канонический workflow `Project`, который запускает `Start API Server` и `Start Frontend`. Не запускайте параллельно одноимённые дублирующие artifact-workflows: они могут занять те же порты.
 - **Codegen orval падает с "Failed to resolve input"** в Replit-окружении (orval v8.9.1 не может разрезолвить `./openapi.yaml` из TypeScript конфига). Workaround: восстанавливать сгенерированные файлы из git-истории (см. Run & Operate выше). Для новых DELETE/PUT/PATCH эндпоинтов в компонентах — использовать прямой `fetch()` вместо сгенерированного хука.
 - После изменения `openapi.yaml` всегда запускать codegen, затем typecheck
 - `YANDEX_GEOCODER_API_KEY` не установлен → Nominatim (1 req/sec, медленный импорт больших файлов); нужен ключ для быстрого геокодинга
@@ -264,3 +264,10 @@ B2B SaaS для оптимизации маршрутов доставки. Ди
 - Демо-данные (магазины Махачкалы) загружаются автоматически при первом запуске если БД пустая
 - Обновление `body.address` через PUT `/api/stores/{id}` автоматически запускает `geocode_address()` → меняет lat/lon. При прямом патче координат использовать только SQL UPDATE напрямую или передавать `lat`+`lon` явно
 - 2ГИС тайлы: загружаются браузером как img-теги, не подпадают под CORS ограничения. При недоступности 2ГИС — Leaflet покажет серые клетки (graceful degradation)
+
+## 1C Windows Agent
+
+- `Project` запускает API на `8080` и Vite preview на `5000`; API-запросы из браузера идут через Vite proxy.
+- Страница `Интеграции → Приложение-агент` скачивает `SmartRoute_1C_Agent_Setup.exe` или ZIP-пакет, а затем выдаёт 24-часовой код привязки.
+- Полная двусторонняя синхронизация требует Windows и доступной базы 1С с COMConnector. Для 1С на Linux используйте ручную интеграцию BSL + API.
+- Windows EXE нельзя пересобрать или подписать из Linux workflow; сборка и подпись выполняются на Windows по инструкции в `apps/1c-agent/DEVELOPER_GUIDE.md`.

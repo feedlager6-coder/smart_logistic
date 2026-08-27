@@ -11432,7 +11432,10 @@ def _agent_download_config(server_url: str) -> dict:
             "base_name": "",
             "connection_string": "",
             "username": "",
-            "password_encrypted": "",
+            # Keep the same key name used by ConfigManager. The value is
+            # intentionally empty; the 1C password is entered and encrypted
+            # locally on the Windows machine.
+            "password_enc": "",
             "v8_version": "8.3",
             "timeout_seconds": 45,
         },

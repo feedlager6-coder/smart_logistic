@@ -168,9 +168,16 @@ class SmartRouteAPIClient:
             err = resp.get("error", "Не удалось привязать 1С к SmartRoute") if isinstance(resp, dict) else str(resp)
             return False, err, {}
 
-        self.api_token = resp.get("token", "")
-        self.agent_id = resp.get("agent_id", "")
-        return True, "1С успешно привязана к SmartRoute!", resp
+        # Pairing responses from older deployments are unwrapped, while newer
+        # API responses may use the standard {data: ...} envelope.
+        result = self._api_data(resp)
+        if not isinstance(result, dict) or not result.get("token"):
+            logger.error("Pairing response did not contain an agent token")
+            return False, "Сервер не вернул токен агента. Повторите привязку.", {}
+
+        self.api_token = result["token"]
+        self.agent_id = result.get("agent_id", "")
+        return True, "1С успешно привязана к SmartRoute!", result
 
     def heartbeat(
         self,
