@@ -311,9 +311,18 @@ function OneCAgentTab({ onSwitchToManual }: AgentTabProps) {
       });
 
       const serverUrl = window.location.origin;
-      const response = await fetch(`/api/integrations/1c/agent/setup.exe?server_url=${encodeURIComponent(serverUrl)}`);
+      // Use the extensionless endpoint because some production proxies treat
+      // .exe paths as static files before forwarding them to the API.
+      const response = await fetch(`/api/integrations/1c/agent/setup?server_url=${encodeURIComponent(serverUrl)}`);
       if (!response.ok) {
-        throw new Error(`Ошибка сервера: ${response.status} ${response.statusText}`);
+        let detail = "";
+        try {
+          const body = await response.json();
+          detail = typeof body?.detail === "string" ? `: ${body.detail}` : "";
+        } catch {
+          // Keep the HTTP status when the proxy returns a non-JSON error page.
+        }
+        throw new Error(`Ошибка сервера: ${response.status} ${response.statusText}${detail}`);
       }
 
       const blob = await response.blob();
@@ -349,7 +358,14 @@ function OneCAgentTab({ onSwitchToManual }: AgentTabProps) {
 
       const response = await fetch("/api/integrations/1c/agent/download");
       if (!response.ok) {
-        throw new Error(`Ошибка сервера: ${response.status} ${response.statusText}`);
+        let detail = "";
+        try {
+          const body = await response.json();
+          detail = typeof body?.detail === "string" ? `: ${body.detail}` : "";
+        } catch {
+          // Keep the HTTP status when the proxy returns a non-JSON error page.
+        }
+        throw new Error(`Ошибка сервера: ${response.status} ${response.statusText}${detail}`);
       }
 
       const blob = await response.blob();

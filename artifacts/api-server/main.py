@@ -11455,9 +11455,10 @@ def _agent_download_config(server_url: str) -> dict:
     }
 
 
+@app.get("/api/integrations/1c/agent/setup")
 @app.get("/api/integrations/1c/agent/setup.exe")
 def download_one_c_setup(request: Request):
-    """Serve the checked-in Windows installer; the agent lets users edit its URL."""
+    """Serve the Windows installer from an extensionless and legacy URL."""
     uid = _require_dashboard_user(request)
     path = os.path.join(_PROJECT_ROOT, "apps", "1c-agent", "SmartRoute_1C_Agent_Setup.exe")
     if not os.path.isfile(path):
