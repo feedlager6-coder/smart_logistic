@@ -58,7 +58,6 @@ import {
 
 interface ConnectedAgent {
   id: string;
-  token: string;
   name: string;
   base_name: string;
   config_type: string;
@@ -217,7 +216,7 @@ function OneCAgentTab({ onSwitchToManual }: AgentTabProps) {
   // Load sync logs
   const loadLogs = useCallback(async () => {
     try {
-      const data: SyncLog[] = await apiFetch("/api/integrations/1/logs");
+      const data: SyncLog[] = await apiFetch("/api/integrations/1c/agent/logs");
       setSyncLogs(data);
     } catch {}
   }, []);
@@ -265,7 +264,7 @@ function OneCAgentTab({ onSwitchToManual }: AgentTabProps) {
   const handleTriggerSync = async () => {
     setIsSyncingNow(true);
     try {
-      await apiFetch("/api/integrations/1/test", { method: "POST" });
+      await apiFetch("/api/integrations/1c/agent/sync", { method: "POST" });
       await loadAgents();
       await loadLogs();
       toast({
@@ -683,11 +682,11 @@ function OneCAgentTab({ onSwitchToManual }: AgentTabProps) {
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-4 pt-4 border-t border-border/60">
                     <div className="bg-muted/30 rounded-lg p-2.5">
                       <div className="text-xs text-muted-foreground">Передано заказов в SmartRoute</div>
-                      <div className="text-lg font-bold text-sky-700">{agent.total_orders_synced || 24}</div>
+                      <div className="text-lg font-bold text-sky-700">{agent.total_orders_synced}</div>
                     </div>
                     <div className="bg-muted/30 rounded-lg p-2.5">
                       <div className="text-xs text-muted-foreground">Обновлено статусов в 1С</div>
-                      <div className="text-lg font-bold text-emerald-700">{agent.total_statuses_updated || 18}</div>
+                      <div className="text-lg font-bold text-emerald-700">{agent.total_statuses_updated}</div>
                     </div>
                     <div className="bg-muted/30 rounded-lg p-2.5 col-span-2 sm:col-span-1">
                       <div className="text-xs text-muted-foreground">Режим подключения</div>
@@ -768,14 +767,14 @@ function OneCAgentTab({ onSwitchToManual }: AgentTabProps) {
                     </span>
                     <Badge
                       className={`text-[10px] ${
-                        l.status === "ok"
+                        l.status === "ok" || l.status === "success"
                           ? "bg-emerald-100 text-emerald-800 border-emerald-200"
                           : l.status === "partial"
                           ? "bg-amber-100 text-amber-800 border-amber-200"
                           : "bg-red-100 text-red-800 border-red-200"
                       }`}
                     >
-                      {l.status === "ok" ? "Успешно" : l.status === "partial" ? "Частично" : "Ошибка"}
+                      {l.status === "ok" || l.status === "success" ? "Успешно" : l.status === "partial" ? "Частично" : "Ошибка"}
                     </Badge>
                   </div>
                   <div className="text-muted-foreground flex items-center gap-4">

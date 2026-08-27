@@ -327,16 +327,8 @@ BOOL SendHttpRequest(const wchar_t *fullUrl, const char *method, const char *jso
 
             HINTERNET hRequest = WinHttpOpenRequest(hConnect, wMethod, urlPath, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
             if (hRequest) {
-                if (flags & WINHTTP_FLAG_SECURE) {
-                    DWORD secFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
-                                     SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                                     SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
-                                     SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE |
-                                     0x00002000;
-                    WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &secFlags, sizeof(secFlags));
-                }
-
-                DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+                // Follow redirects, but never downgrade an HTTPS request to HTTP.
+                DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
                 WinHttpSetOption(hRequest, WINHTTP_OPTION_REDIRECT_POLICY, &redirectPolicy, sizeof(redirectPolicy));
 
                 wchar_t headers[1024] = L"Content-Type: application/json; charset=utf-8\r\nAccept: application/json\r\n";
@@ -411,18 +403,18 @@ BOOL SendHttpRequest(const wchar_t *fullUrl, const char *method, const char *jso
     wchar_t curlCmd[4096];
     if (token && token[0]) {
         if (jsonBody && jsonBody[0]) {
-            swprintf(curlCmd, 4096, L"curl.exe -s -k -w \"%%{http_code}\" -X %hs -H \"Content-Type: application/json\" -H \"Authorization: Bearer %s\" --data-binary \"@%s\" \"%s\" -o \"%s\"",
+            swprintf(curlCmd, 4096, L"curl.exe -s -w \"%%{http_code}\" -X %hs -H \"Content-Type: application/json\" -H \"Authorization: Bearer %s\" --data-binary \"@%s\" \"%s\" -o \"%s\"",
                 method, token, inTempFile, fullUrl, outTempFile);
         } else {
-            swprintf(curlCmd, 4096, L"curl.exe -s -k -w \"%%{http_code}\" -X %hs -H \"Accept: application/json\" -H \"Authorization: Bearer %s\" \"%s\" -o \"%s\"",
+            swprintf(curlCmd, 4096, L"curl.exe -s -w \"%%{http_code}\" -X %hs -H \"Accept: application/json\" -H \"Authorization: Bearer %s\" \"%s\" -o \"%s\"",
                 method, token, fullUrl, outTempFile);
         }
     } else {
         if (jsonBody && jsonBody[0]) {
-            swprintf(curlCmd, 4096, L"curl.exe -s -k -w \"%%{http_code}\" -X %hs -H \"Content-Type: application/json\" --data-binary \"@%s\" \"%s\" -o \"%s\"",
+            swprintf(curlCmd, 4096, L"curl.exe -s -w \"%%{http_code}\" -X %hs -H \"Content-Type: application/json\" --data-binary \"@%s\" \"%s\" -o \"%s\"",
                 method, inTempFile, fullUrl, outTempFile);
         } else {
-            swprintf(curlCmd, 4096, L"curl.exe -s -k -w \"%%{http_code}\" -X %hs -H \"Accept: application/json\" \"%s\" -o \"%s\"",
+            swprintf(curlCmd, 4096, L"curl.exe -s -w \"%%{http_code}\" -X %hs -H \"Accept: application/json\" \"%s\" -o \"%s\"",
                 method, fullUrl, outTempFile);
         }
     }

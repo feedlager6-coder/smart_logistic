@@ -17,6 +17,20 @@ from typing import Dict, Any, List, Optional, Tuple
 logger = logging.getLogger("SmartRouteAgent.API")
 
 
+class _HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Do not allow an HTTPS request to follow a redirect down to HTTP."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if (
+            redirected
+            and req.full_url.lower().startswith("https://")
+            and redirected.full_url.lower().startswith("http://")
+        ):
+            raise urllib.error.URLError("Отказано: HTTPS перенаправлен на небезопасный HTTP")
+        return redirected
+
+
 class SmartRouteAPIClient:
     """Client for interacting with SmartRoute REST API."""
 
@@ -25,10 +39,13 @@ class SmartRouteAPIClient:
         self.api_token = api_token
         self.agent_id = ""
         self.timeout = 20  # seconds
-        self._ssl_context = ssl.create_default_context()
-        # Allow connecting in environments with enterprise proxy inspection if needed
-        self._ssl_context.check_hostname = False
-        self._ssl_context.verify_mode = ssl.CERT_NONE if self.base_url.startswith("http://") else ssl.CERT_REQUIRED
+        # HTTPS always uses the OS trust store and hostname verification.
+        # Plain HTTP is allowed only when explicitly configured by the user.
+        self._ssl_context = None if self.base_url.startswith("http://") else ssl.create_default_context()
+        handlers = [_HttpsOnlyRedirectHandler()]
+        if self._ssl_context is not None:
+            handlers.append(urllib.request.HTTPSHandler(context=self._ssl_context))
+        self._opener = urllib.request.build_opener(*handlers)
 
     def _make_request(
         self,
@@ -62,14 +79,10 @@ class SmartRouteAPIClient:
             try:
                 req = urllib.request.Request(url, data=encoded_data, headers=headers, method=method)
                 
-                # Use standard SSL or permissive if TLS negotiation fails
-                try:
-                    ctx = ssl.create_default_context()
-                    resp_handle = urllib.request.urlopen(req, timeout=self.timeout, context=ctx)
-                except ssl.SSLError:
-                    # Fallback for self-signed or enterprise corporate certs
-                    ctx = ssl._create_unverified_context()
-                    resp_handle = urllib.request.urlopen(req, timeout=self.timeout, context=ctx)
+                resp_handle = self._opener.open(
+                    req,
+                    timeout=self.timeout,
+                )
 
                 with resp_handle as resp:
                     resp_body = resp.read().decode("utf-8")
@@ -115,6 +128,13 @@ class SmartRouteAPIClient:
                 delay *= 2
 
         return False, 0, {"error": last_error or "Превышено время ожидания ответа сервера."}
+
+    @staticmethod
+    def _api_data(response: Any) -> Any:
+        """Unwrap the v1 response envelope while keeping legacy endpoints compatible."""
+        if isinstance(response, dict) and "data" in response:
+            return response["data"]
+        return response
 
     def pair(
         self,
@@ -215,10 +235,11 @@ class SmartRouteAPIClient:
                     "updated": total_updated,
                 }
 
-            if isinstance(resp, dict):
-                total_created += resp.get("created", len(chunk))
-                total_updated += resp.get("updated", 0)
-                total_matched += resp.get("stores_matched", 0)
+            result = self._api_data(resp)
+            if isinstance(result, dict):
+                total_created += result.get("created", len(chunk))
+                total_updated += result.get("updated", 0)
+                total_matched += result.get("stores_matched", 0)
 
         return True, f"Успешно передано {len(orders)} заказов в SmartRoute ({total_created} новых, {total_updated} обновлено)", {
             "total_received": len(orders),
@@ -239,7 +260,8 @@ class SmartRouteAPIClient:
         if not success or not isinstance(resp, dict):
             return False, []
 
-        return True, resp.get("orders", [])
+        result = self._api_data(resp)
+        return True, result.get("orders", []) if isinstance(result, dict) else []
 
     def log_sync_result(
         self,
@@ -249,6 +271,7 @@ class SmartRouteAPIClient:
         stores_matched: int,
         errors_count: int,
         error_detail: str,
+        statuses_updated: int = 0,
     ):
         """Sends sync log record to server."""
         payload = {
@@ -257,6 +280,7 @@ class SmartRouteAPIClient:
             "orders_received": orders_received,
             "stores_matched": stores_matched,
             "stores_unmatched": 0,
+            "statuses_updated": statuses_updated,
             "errors_count": errors_count,
             "error_detail": error_detail,
         }

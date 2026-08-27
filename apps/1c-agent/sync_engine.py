@@ -231,6 +231,7 @@ class SyncEngine:
                 stores_matched=sync_result["orders_sent"],
                 errors_count=sync_result["errors_count"],
                 error_detail=sync_result["error_detail"] or "Синхронизация завершена успешно",
+                statuses_updated=sync_result["statuses_updated"],
             )
             # Send heartbeat
             self.client.heartbeat(

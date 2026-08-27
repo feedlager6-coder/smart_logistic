@@ -225,6 +225,8 @@ _AUTH_PUBLIC_PATHS = {
     "/api/v1/openapi.json", "/api/v1/docs",
     "/api/telegram/webhook", "/api/telegram/webhook/",
     "/api/telegram/status", "/api/telegram/restart-polling",
+    # The native Windows agent has no browser session during first pairing.
+    "/api/integrations/1c/agent/pair",
 }
 # Webhook ingest paths use token-in-URL auth (checked inside the handler)
 _AUTH_WEBHOOK_PREFIX = "/api/v1/webhooks/ingest/"
@@ -2300,6 +2302,47 @@ def init_db():
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_sync_logs_integration ON integration_sync_logs(integration_id, started_at DESC)")
+    # ── 1C Windows agent pairing ─────────────────────────────────────────────
+    # Pairing codes are scoped to the browser user and expire after 24 hours.
+    # Agent bearer tokens are stored as hashes; the raw token is returned only
+    # once from the pairing response and is never exposed in dashboard queries.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS onec_pairing_codes (
+            id SERIAL PRIMARY KEY,
+            owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            code TEXT NOT NULL UNIQUE,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL,
+            used_at TIMESTAMP,
+            agent_id TEXT
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_onec_pairing_owner ON onec_pairing_codes(owner_id, created_at DESC)")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS onec_agents (
+            id TEXT PRIMARY KEY,
+            owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            token_hash TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL DEFAULT 'SmartRoute 1C Agent',
+            base_name TEXT NOT NULL DEFAULT '1C Infobase',
+            config_type TEXT NOT NULL DEFAULT '1С:Предприятие 8.3',
+            v8_version TEXT NOT NULL DEFAULT '8.3',
+            hostname TEXT NOT NULL DEFAULT '',
+            ip_address TEXT NOT NULL DEFAULT '',
+            connection_type TEXT NOT NULL DEFAULT 'com',
+            status TEXT NOT NULL DEFAULT 'active',
+            last_heartbeat_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_sync_at TIMESTAMP,
+            sync_interval_min INTEGER NOT NULL DEFAULT 5,
+            total_orders_synced INTEGER NOT NULL DEFAULT 0,
+            total_statuses_updated INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_onec_agents_owner ON onec_agents(owner_id, status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_onec_agents_token ON onec_agents(token_hash)")
     conn.commit()
     cur.close()
     conn.close()
@@ -3798,6 +3841,36 @@ class CompanySettingsInput(BaseModel):
     dispatcher_phone: str = ""
 
 
+class OneCAgentPairRequest(BaseModel):
+    pairing_code: str
+    agent_id: Optional[str] = None
+    agent_name: str = "SmartRoute 1C Windows Agent"
+    base_name: str = "1C Infobase"
+    config_type: str = "1С:Предприятие 8.3"
+    v8_version: str = "8.3"
+    hostname: str = ""
+    connection_type: str = "com"
+
+
+class OneCAgentHeartbeat(BaseModel):
+    agent_id: str
+    status: str = "active"
+    last_error: Optional[str] = None
+    orders_count: int = 0
+    statuses_count: int = 0
+
+
+class OneCAgentSyncLog(BaseModel):
+    agent_id: str
+    status: str = "ok"
+    orders_received: int = 0
+    stores_matched: int = 0
+    stores_unmatched: int = 0
+    errors_count: int = 0
+    statuses_updated: int = 0
+    error_detail: str = ""
+
+
 EXECUTION_STATUSES = {"planned", "delivered", "partial", "failed", "rescheduled"}
 PAYMENT_METHODS = {"cash", "card", "transfer", "none"}
 PAYMENT_STATUSES = {"pending", "paid", "not_paid"}
@@ -4326,6 +4399,32 @@ def _resolve_api_key(raw_key: str) -> dict | None:
     return None
 
 
+def _resolve_onec_agent_token(raw_token: str) -> dict | None:
+    """Resolve a native 1C agent bearer token without exposing its raw value."""
+    if not raw_token or not raw_token.startswith("sr_agent_"):
+        return None
+    try:
+        conn = get_db()
+        if not conn:
+            return None
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """SELECT id, owner_id, token_hash, status
+               FROM onec_agents
+              WHERE token_hash = %s""",
+            (_hash_api_key(raw_token),),
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not row or row.get("status") == "disconnected":
+            return None
+        return dict(row)
+    except Exception as exc:
+        logger.error("_resolve_onec_agent_token error: %s", exc)
+        return None
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     # Always pass through OPTIONS (CORS pre-flight) and public paths
@@ -4401,6 +4500,15 @@ async def auth_middleware(request: Request, call_next):
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         raw_key = auth_header[7:].strip()
+        agent_row = _resolve_onec_agent_token(raw_key)
+        if agent_row:
+            request.state.username = f"agent:{agent_row['id']}"
+            request.state.user_id = agent_row["owner_id"]
+            request.state.agent_id = agent_row["id"]
+            request.state.is_admin = False
+            # Native agents need only the two v1 operations used for sync.
+            request.state.api_key_scopes = ["orders:read", "orders:write"]
+            return await call_next(request)
         key_row = _resolve_api_key(raw_key)
         if not key_row:
             return _auth_401("Недействительный API-ключ.")
@@ -10849,6 +10957,589 @@ def _record_integration_sync(request: Request, orders_received: int,
         logger.warning("_record_integration_sync error: %s", exc)
 
 
+def _request_base_url(request: Request) -> str:
+    """Build the public URL used by a downloaded agent behind a proxy."""
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
+    forwarded_host = request.headers.get("x-forwarded-host", "").split(",")[0].strip()
+    scheme = forwarded_proto or request.url.scheme
+    host = forwarded_host or request.headers.get("host", "")
+    if host:
+        return f"{scheme}://{host}".rstrip("/")
+    return str(request.base_url).rstrip("/")
+
+
+def _normalize_pairing_code(value: str) -> str:
+    return re.sub(r"\s+", "", str(value or "")).upper()
+
+
+def _iso_or_none(value) -> Optional[str]:
+    return value.isoformat() if value else None
+
+
+def _one_c_agent_public(row: dict) -> dict:
+    """Serialize an agent without its bearer token."""
+    last_heartbeat = row.get("last_heartbeat_at")
+    status = row.get("status") or "idle"
+    if last_heartbeat:
+        age_minutes = (datetime.utcnow() - last_heartbeat).total_seconds() / 60
+        if age_minutes > 10 and status == "active":
+            status = "idle"
+    return {
+        "id": row["id"],
+        "name": row.get("name") or "SmartRoute 1C Agent",
+        "base_name": row.get("base_name") or "1C Infobase",
+        "config_type": row.get("config_type") or "1С:Предприятие 8.3",
+        "v8_version": row.get("v8_version") or "8.3",
+        "hostname": row.get("hostname") or "",
+        "ip_address": row.get("ip_address") or "",
+        "connection_type": row.get("connection_type") or "com",
+        "status": status,
+        "last_heartbeat_at": _iso_or_none(last_heartbeat),
+        "last_sync_at": _iso_or_none(row.get("last_sync_at")),
+        "sync_interval_min": int(row.get("sync_interval_min") or 5),
+        "total_orders_synced": int(row.get("total_orders_synced") or 0),
+        "total_statuses_updated": int(row.get("total_statuses_updated") or 0),
+        "last_error": row.get("last_error"),
+        "created_at": _iso_or_none(row.get("created_at")),
+    }
+
+
+def _require_dashboard_user(request: Request) -> int:
+    """Reject native-agent tokens from browser/dashboard-only endpoints."""
+    if getattr(request.state, "agent_id", None):
+        raise HTTPException(status_code=403, detail="Этот endpoint доступен только из личного кабинета")
+    return get_user_id(request)
+
+
+@app.post("/api/integrations/1c/agent/code")
+def create_one_c_pairing_code(request: Request):
+    """Create a 24-hour one-time code for the current browser user."""
+    uid = _require_dashboard_user(request)
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=503, detail="База данных временно недоступна")
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    code = ""
+    for _ in range(5):
+        candidate = f"SMARTROUTE-{secrets.randbelow(9000) + 1000}-{secrets.randbelow(9000) + 1000}"
+        cur.execute("SELECT 1 FROM onec_pairing_codes WHERE code=%s", (candidate,))
+        if not cur.fetchone():
+            code = candidate
+            break
+    if not code:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=503, detail="Не удалось создать уникальный код. Повторите попытку.")
+    cur.execute(
+        """INSERT INTO onec_pairing_codes (owner_id, code, expires_at)
+           VALUES (%s, %s, NOW() + INTERVAL '24 hours')
+           RETURNING code, created_at, expires_at""",
+        (uid, code),
+    )
+    row = cur.fetchone()
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("1C pairing code generated for owner_id=%s", uid)
+    return {
+        "ok": True,
+        "code": row["code"],
+        "created_at": _iso_or_none(row["created_at"]),
+        "expires_at": _iso_or_none(row["expires_at"]),
+        "instructions": "Введите этот код в окне приложения-агента SmartRoute на компьютере с 1С.",
+    }
+
+
+@app.get("/api/integrations/1c/agent/code/active")
+def get_active_one_c_pairing_code(request: Request):
+    """Return the newest unexpired code for the current browser user."""
+    uid = _require_dashboard_user(request)
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=503, detail="База данных временно недоступна")
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """SELECT code, created_at, expires_at
+           FROM onec_pairing_codes
+          WHERE owner_id=%s AND used_at IS NULL AND expires_at > NOW()
+          ORDER BY created_at DESC LIMIT 1""",
+        (uid,),
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return {"ok": True, "code": None, "expires_at": None}
+    return {
+        "ok": True,
+        "code": row["code"],
+        "created_at": _iso_or_none(row["created_at"]),
+        "expires_at": _iso_or_none(row["expires_at"]),
+    }
+
+
+@app.post("/api/integrations/1c/agent/pair")
+def pair_one_c_agent(body: OneCAgentPairRequest, request: Request):
+    """Pair a native Windows agent using a one-time browser-generated code."""
+    clean_code = _normalize_pairing_code(body.pairing_code)
+    if not clean_code:
+        raise HTTPException(status_code=400, detail="Код привязки обязателен")
+    if len(clean_code) > 128:
+        raise HTTPException(status_code=400, detail="Недопустимый код привязки")
+    if body.connection_type not in ("com", "http"):
+        raise HTTPException(status_code=422, detail="Недопустимый тип подключения")
+
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=503, detail="База данных временно недоступна")
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            """SELECT id, owner_id, expires_at, used_at
+               FROM onec_pairing_codes
+              WHERE code=%s
+              FOR UPDATE""",
+            (clean_code,),
+        )
+        pairing = cur.fetchone()
+        if not pairing:
+            raise HTTPException(status_code=404, detail="Неверный код привязки")
+        if pairing["used_at"] is not None:
+            raise HTTPException(status_code=409, detail="Код привязки уже использован")
+        if pairing["expires_at"] <= datetime.utcnow():
+            raise HTTPException(status_code=410, detail="Срок действия кода привязки истёк")
+
+        owner_id = pairing["owner_id"]
+        agent_id = (body.agent_id or "").strip() or f"agent_{_uuid.uuid4().hex[:16]}"
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", agent_id):
+            raise HTTPException(status_code=422, detail="Недопустимый идентификатор агента")
+        token = f"sr_agent_{secrets.token_urlsafe(32)}"
+        now = datetime.utcnow()
+
+        cur.execute("SELECT owner_id FROM onec_agents WHERE id=%s FOR UPDATE", (agent_id,))
+        existing_agent = cur.fetchone()
+        if existing_agent and existing_agent["owner_id"] != owner_id:
+            raise HTTPException(status_code=409, detail="Этот агент уже привязан к другой организации")
+
+        agent_values = (
+            agent_id,
+            owner_id,
+            _hash_api_key(token),
+            (body.agent_name or "").strip()[:200] or "SmartRoute 1C Windows Agent",
+            (body.base_name or "").strip()[:200] or "1C Infobase",
+            (body.config_type or "").strip()[:200] or "1С:Предприятие 8.3",
+            (body.v8_version or "").strip()[:50] or "8.3",
+            (body.hostname or "").strip()[:255],
+            (request.client.host if request.client else ""),
+            body.connection_type,
+        )
+        if existing_agent:
+            cur.execute(
+                """UPDATE onec_agents
+                   SET token_hash=%s, name=%s, base_name=%s, config_type=%s,
+                       v8_version=%s, hostname=%s, ip_address=%s,
+                       connection_type=%s, status='active',
+                       last_heartbeat_at=%s, last_error=NULL, updated_at=%s
+                 WHERE id=%s""",
+                (
+                    agent_values[2], agent_values[3], agent_values[4], agent_values[5],
+                    agent_values[6], agent_values[7], agent_values[8], agent_values[9],
+                    now, now, agent_id,
+                ),
+            )
+        else:
+            cur.execute(
+                """INSERT INTO onec_agents
+                   (id, owner_id, token_hash, name, base_name, config_type,
+                    v8_version, hostname, ip_address, connection_type,
+                    last_heartbeat_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (*agent_values, now),
+            )
+
+        cur.execute(
+            "UPDATE onec_pairing_codes SET used_at=%s, agent_id=%s WHERE id=%s",
+            (now, agent_id, pairing["id"]),
+        )
+        cur.execute(
+            """SELECT id, config FROM integrations
+               WHERE owner_id=%s AND type='1c'
+               ORDER BY created_at DESC LIMIT 1""",
+            (owner_id,),
+        )
+        integration = cur.fetchone()
+        if integration:
+            config = integration["config"] or {}
+            if isinstance(config, str):
+                try:
+                    config = json.loads(config)
+                except Exception:
+                    config = {}
+            config.update({
+                "agent_id": agent_id,
+                "base_name": agent_values[4],
+                "config_type": agent_values[5],
+            })
+            integration_id = integration["id"]
+            cur.execute(
+                "UPDATE integrations SET config=%s, status='active', last_sync_at=%s WHERE id=%s",
+                (json.dumps(config), now, integration_id),
+            )
+        else:
+            cur.execute(
+                """INSERT INTO integrations (owner_id, type, name, status, config, last_sync_at)
+                   VALUES (%s, '1c', %s, 'active', %s, %s) RETURNING id""",
+                (
+                    owner_id,
+                    f"1С:Предприятие ({agent_values[4]})",
+                    json.dumps({
+                        "agent_id": agent_id,
+                        "base_name": agent_values[4],
+                        "config_type": agent_values[5],
+                    }),
+                    now,
+                ),
+            )
+            integration_id = cur.fetchone()["id"]
+        cur.execute(
+            """INSERT INTO integration_sync_logs
+                (integration_id, started_at, finished_at, status,
+                 orders_received, stores_matched, stores_unmatched, errors_count, error_detail, meta)
+               VALUES (%s,%s,%s,'success',0,0,0,0,%s,%s)""",
+            (
+                integration_id,
+                now,
+                now,
+                f'Успешная привязка Windows-агента для базы "{agent_values[4]}"',
+                json.dumps({"agent_id": agent_id, "event": "paired"}),
+            ),
+        )
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        logger.exception("1C agent pairing failed")
+        raise HTTPException(status_code=500, detail="Не удалось завершить привязку агента")
+    finally:
+        cur.close()
+        conn.close()
+
+    logger.info("1C agent paired: owner_id=%s agent_id=%s", owner_id, agent_id)
+    return {
+        "ok": True,
+        "agent_id": agent_id,
+        "token": token,
+        "organization": "SmartRoute Logistics",
+        "base_url": _request_base_url(request),
+        "sync_interval_min": 5,
+        "endpoints": {
+            "orders_batch": "/api/v1/orders/batch",
+            "orders_query": "/api/v1/orders",
+            "delivery_status": "/api/v1/deliveries/statuses",
+            "heartbeat": "/api/integrations/1c/agent/heartbeat",
+            "sync_log": "/api/integrations/1c/agent/sync-log",
+        },
+        "message": "1С успешно привязана к SmartRoute! Синхронизация активна.",
+    }
+
+
+@app.get("/api/integrations/1c/agent/agents")
+def list_one_c_agents(request: Request):
+    uid = _require_dashboard_user(request)
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=503, detail="База данных временно недоступна")
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """SELECT id, name, base_name, config_type, v8_version, hostname,
+                  ip_address, connection_type, status, last_heartbeat_at,
+                  last_sync_at, sync_interval_min, total_orders_synced,
+                  total_statuses_updated, last_error, created_at
+             FROM onec_agents
+            WHERE owner_id=%s AND status <> 'disconnected'
+            ORDER BY created_at DESC""",
+        (uid,),
+    )
+    agents = [_one_c_agent_public(dict(row)) for row in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return agents
+
+
+def _require_current_agent(request: Request, agent_id: str) -> None:
+    authenticated_agent = getattr(request.state, "agent_id", None)
+    if authenticated_agent != agent_id:
+        raise HTTPException(status_code=403, detail="Агент не имеет доступа к этой записи")
+
+
+@app.post("/api/integrations/1c/agent/heartbeat")
+def one_c_agent_heartbeat(body: OneCAgentHeartbeat, request: Request):
+    _require_current_agent(request, body.agent_id)
+    allowed_statuses = {"active", "syncing", "error", "idle"}
+    status = body.status if body.status in allowed_statuses else "active"
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=503, detail="База данных временно недоступна")
+    cur = conn.cursor()
+    cur.execute(
+        """UPDATE onec_agents
+              SET status=%s, last_error=%s, last_heartbeat_at=NOW(), updated_at=NOW()
+            WHERE id=%s""",
+        (status, body.last_error[:1000] if body.last_error else None, body.agent_id),
+    )
+    if cur.rowcount == 0:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Агент не найден или отключён")
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("1C agent heartbeat: agent_id=%s status=%s", body.agent_id, status)
+    return {"ok": True, "server_time": datetime.utcnow().isoformat() + "Z", "commands": []}
+
+
+@app.post("/api/integrations/1c/agent/sync-log")
+def one_c_agent_sync_log(body: OneCAgentSyncLog, request: Request):
+    _require_current_agent(request, body.agent_id)
+    status = body.status if body.status in ("ok", "success", "partial", "error") else "error"
+    db_status = "success" if status in ("ok", "success") else status
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=503, detail="База данных временно недоступна")
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT owner_id FROM onec_agents WHERE id=%s AND status <> 'disconnected'", (body.agent_id,))
+    agent = cur.fetchone()
+    if not agent:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Агент не найден или отключён")
+    cur.execute(
+        "SELECT id FROM integrations WHERE owner_id=%s AND type='1c' ORDER BY created_at DESC LIMIT 1",
+        (agent["owner_id"],),
+    )
+    integration = cur.fetchone()
+    now = datetime.utcnow()
+    if integration:
+        integration_id = integration["id"]
+    else:
+        cur.execute(
+            """INSERT INTO integrations (owner_id, type, name, status, config)
+               VALUES (%s, '1c', '1С:Предприятие', 'active', %s) RETURNING id""",
+            (agent["owner_id"], json.dumps({"agent_id": body.agent_id})),
+        )
+        integration_id = cur.fetchone()["id"]
+    cur.execute(
+        """INSERT INTO integration_sync_logs
+            (integration_id, started_at, finished_at, status, orders_received,
+             stores_matched, stores_unmatched, errors_count, error_detail, meta)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+           RETURNING id""",
+        (
+            integration_id, now, now, db_status,
+            max(0, body.orders_received), max(0, body.stores_matched),
+            max(0, body.stores_unmatched), max(0, body.errors_count),
+            (body.error_detail or "")[:1000],
+            json.dumps({"agent_id": body.agent_id}),
+        ),
+    )
+    log_id = cur.fetchone()["id"]
+    cur.execute(
+        """UPDATE onec_agents
+              SET status=%s, last_error=%s, last_sync_at=%s,
+                  total_orders_synced=total_orders_synced+%s,
+                  total_statuses_updated=total_statuses_updated+%s,
+                  last_heartbeat_at=NOW(), updated_at=NOW()
+            WHERE id=%s""",
+        (
+            "error" if db_status == "error" else ("syncing" if db_status == "partial" else "active"),
+            (body.error_detail or "")[:1000] if body.errors_count else None,
+            now, max(0, body.orders_received), max(0, body.statuses_updated),
+            body.agent_id,
+        ),
+    )
+    cur.execute(
+        "UPDATE integrations SET last_sync_at=%s, status=%s WHERE id=%s",
+        (now, "error" if db_status == "error" else "active", integration_id),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("1C sync log recorded: agent_id=%s status=%s orders=%s", body.agent_id, db_status, body.orders_received)
+    return {"ok": True, "log_id": log_id}
+
+
+@app.delete("/api/integrations/1c/agent/{agent_id}")
+def disconnect_one_c_agent(agent_id: str, request: Request):
+    uid = _require_dashboard_user(request)
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=503, detail="База данных временно недоступна")
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE onec_agents SET status='disconnected', updated_at=NOW() WHERE id=%s AND owner_id=%s",
+        (agent_id, uid),
+    )
+    if cur.rowcount == 0:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Агент не найден")
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("1C agent disconnected: owner_id=%s agent_id=%s", uid, agent_id)
+    return {"ok": True, "deleted": True}
+
+
+@app.get("/api/integrations/1c/agent/logs")
+def get_one_c_agent_logs(request: Request, limit: int = Query(50, ge=1, le=200)):
+    uid = _require_dashboard_user(request)
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=503, detail="База данных временно недоступна")
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """SELECT l.id, l.integration_id, l.started_at, l.finished_at,
+                  l.status, l.orders_received, l.stores_matched,
+                  l.stores_unmatched, l.errors_count, l.error_detail,
+                  COALESCE(l.meta->>'agent_id', '') AS agent_id
+             FROM integration_sync_logs l
+             JOIN integrations i ON i.id=l.integration_id
+            WHERE i.owner_id=%s AND i.type='1c'
+            ORDER BY l.started_at DESC LIMIT %s""",
+        (uid, limit),
+    )
+    logs = []
+    for row in cur.fetchall():
+        item = dict(row)
+        item["started_at"] = _iso_or_none(item.get("started_at"))
+        item["finished_at"] = _iso_or_none(item.get("finished_at"))
+        logs.append(item)
+    cur.close()
+    conn.close()
+    return logs
+
+
+def _agent_download_config(server_url: str) -> dict:
+    return {
+        "version": "3.2.0",
+        "server_url": server_url,
+        "api_token": "",
+        "agent_id": "",
+        "organization": "SmartRoute Logistics",
+        "onec": {
+            "base_name": "",
+            "connection_string": "",
+            "username": "",
+            "password_encrypted": "",
+            "v8_version": "8.3",
+            "timeout_seconds": 45,
+        },
+        "sync": {
+            "auto_sync": True,
+            "interval_minutes": 5,
+            "sync_period_hours": 24,
+            "batch_size": 100,
+            "sync_routes_to_1c": True,
+            "sync_statuses_to_1c": True,
+        },
+        "stats": {
+            "total_orders_sent": 0,
+            "total_statuses_received": 0,
+            "last_sync_time": None,
+        },
+    }
+
+
+@app.get("/api/integrations/1c/agent/setup.exe")
+def download_one_c_setup(request: Request):
+    """Serve the checked-in Windows installer; the agent lets users edit its URL."""
+    uid = _require_dashboard_user(request)
+    path = os.path.join(_PROJECT_ROOT, "apps", "1c-agent", "SmartRoute_1C_Agent_Setup.exe")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Установочный файл SmartRoute_1C_Agent_Setup.exe не найден")
+    logger.info("1C agent installer downloaded by user_id=%s", uid)
+    with open(path, "rb") as file:
+        content = file.read()
+    return Response(
+        content=content,
+        media_type="application/vnd.microsoft.portable-executable",
+        headers={"Content-Disposition": 'attachment; filename="SmartRoute_1C_Agent_Setup.exe"'},
+    )
+
+
+@app.get("/api/integrations/1c/agent/download")
+def download_one_c_agent_package(request: Request):
+    """Build a ZIP fallback with the native binaries and server-specific config."""
+    uid = _require_dashboard_user(request)
+    agent_dir = os.path.join(_PROJECT_ROOT, "apps", "1c-agent")
+    if not os.path.isdir(agent_dir):
+        raise HTTPException(status_code=404, detail="Файлы агента не найдены")
+    config = json.dumps(_agent_download_config(_request_base_url(request)), ensure_ascii=False, indent=2).encode("utf-8")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name in (
+            "SmartRoute_1C_Agent_Setup.exe",
+            "SmartRoute_Agent.exe",
+            "smartroute.ico",
+            "ИНСТРУКЦИЯ.txt",
+            "CLIENT_GUIDE.md",
+        ):
+            path = os.path.join(agent_dir, name)
+            if os.path.isfile(path):
+                archive.write(path, name)
+        archive.writestr("config.json", config)
+    logger.info("1C agent package downloaded by user_id=%s", uid)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="SmartRoute_1C_Agent.zip"'},
+    )
+
+
+@app.post("/api/integrations/1c/agent/sync")
+def trigger_one_c_sync(request: Request):
+    """Record a user-requested sync check for the connected 1C integration."""
+    uid = _require_dashboard_user(request)
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=503, detail="База данных временно недоступна")
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        "SELECT id FROM integrations WHERE owner_id=%s AND type='1c' ORDER BY created_at DESC LIMIT 1",
+        (uid,),
+    )
+    integration = cur.fetchone()
+    if not integration:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Интеграция 1С ещё не подключена")
+    cur.execute(
+        """SELECT COUNT(*) AS count
+             FROM daily_orders
+            WHERE owner_id=%s AND delivery_date=CURRENT_DATE""",
+        (uid,),
+    )
+    count = int(cur.fetchone()["count"] or 0)
+    cur.execute(
+        """INSERT INTO integration_sync_logs
+            (integration_id, started_at, finished_at, status, orders_received,
+             stores_matched, stores_unmatched, errors_count, error_detail)
+           VALUES (%s,NOW(),NOW(),'success',%s,%s,0,0,'Ручная проверка из кабинета')""",
+        (integration["id"], count, count),
+    )
+    cur.execute(
+        "UPDATE integrations SET last_sync_at=NOW(), status='active' WHERE id=%s",
+        (integration["id"],),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("Manual 1C sync check: user_id=%s integration_id=%s", uid, integration["id"])
+    return {"ok": True, "orders_checked": count}
+
+
 @app.post("/api/v1/integration/ping")
 @app.post("/api/integrations/ping")
 def ping_integration(request: Request):
@@ -12905,12 +13596,16 @@ def v1_bulk_delete_stores(request: Request, body: V1BulkDeleteRequest):
 # v1 — ORDERS
 # ══════════════════════════════════════════════════════════════════════════════
 
+@app.get("/api/v1/deliveries/statuses",
+         summary="Статусы доставок для 1С",
+         tags=["v1-orders"])
 @app.get("/api/v1/orders",
          summary="Заявки на доставку",
          tags=["v1-orders"])
 def v1_get_orders(
     request: Request,
     date: str | None = Query(None, description="YYYY-MM-DD (default: сегодня)"),
+    updated_from: str | None = Query(None, description="ISO timestamp for incremental sync"),
 ):
     """Заявки на доставку за указанную дату.
 
@@ -12921,17 +13616,42 @@ def v1_get_orders(
     target_date = date if date else str(datetime.now().date())
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute(
-        """SELECT o.id, o.store_id, o.store_name_raw, o.address_raw, o.order_number,
-                  o.weight_kg, o.volume_m3, o.amount_rub, o.quantity, o.products, o.notes,
-                  o.delivery_date::text as delivery_date,
-                  s.name as store_name_db, s.address as store_address
-             FROM daily_orders o
-             LEFT JOIN stores s ON s.id = o.store_id
-            WHERE o.owner_id = %s AND o.delivery_date = %s
-            ORDER BY o.id""",
-        (uid, target_date),
-    )
+    orders_query = """
+        SELECT o.id, o.store_id, o.store_name_raw, o.address_raw, o.order_number,
+               o.weight_kg, o.volume_m3, o.amount_rub, o.quantity, o.products, o.notes,
+               o.delivery_date::text as delivery_date,
+               s.name as store_name_db, s.address as store_address,
+               COALESCE(route_update.status, 'planned') AS delivery_status,
+               route_update.delivered_at AS actual_delivery_time,
+               CASE WHEN route_update.session_id IS NOT NULL
+                    THEN CONCAT(route_update.session_id, '-', route_update.route_index)
+                    ELSE NULL END AS route_number
+          FROM daily_orders o
+          LEFT JOIN stores s ON s.id = o.store_id
+          LEFT JOIN LATERAL (
+              SELECT e.status, e.delivered_at, e.updated_at,
+                     a.route_index, a.session_id
+                FROM route_executions e
+                JOIN route_assignments a ON a.id = e.assignment_id
+                JOIN route_sessions rs ON rs.id = a.session_id
+               WHERE e.store_id = o.store_id
+                 AND a.owner_id = o.owner_id
+                 AND rs.date = o.delivery_date
+               ORDER BY e.updated_at DESC NULLS LAST
+               LIMIT 1
+          ) route_update ON TRUE
+         WHERE o.owner_id = %s AND o.delivery_date = %s
+    """
+    order_params = [uid, target_date]
+    if updated_from:
+        try:
+            datetime.fromisoformat(updated_from.replace("Z", "+00:00"))
+        except ValueError:
+            raise _v1_err("VALIDATION_ERROR", "Неверный формат updated_from", 422)
+        orders_query += " AND COALESCE(route_update.updated_at, o.created_at) >= %s"
+        order_params.append(updated_from)
+    orders_query += " ORDER BY o.id"
+    cur.execute(orders_query, order_params)
     orders = [dict(r) for r in cur.fetchall()]
     cur.execute(
         """SELECT COUNT(*) as cnt, COALESCE(SUM(weight_kg),0) as tw,
