@@ -74,7 +74,7 @@ class ConfigManager:
     def __init__(self):
         self.config_path = get_config_path()
         self.data: Dict[str, Any] = {
-            "server_url": "https://smartroute.app",
+            "server_url": "",
             "agent_id": "",
             "api_token": "",
             "is_paired": False,
@@ -159,6 +159,11 @@ class ConfigManager:
                         self.data[k].update(v)
                     else:
                         self.data[k] = v
+                # Older packages shipped a retired Google Run URL. Clear it
+                # instead of silently sending pairing requests to that service.
+                saved_url = str(self.data.get("server_url") or "")
+                if ".run.app" in saved_url or "ais-dev-" in saved_url:
+                    self.data["server_url"] = ""
         except Exception as e:
             logger.error(f"Failed to load config: {e}")
 
@@ -173,7 +178,7 @@ class ConfigManager:
     # Helper properties
     @property
     def server_url(self) -> str:
-        return self.data.get("server_url", "https://smartroute.app").rstrip("/")
+        return self.data.get("server_url", "").rstrip("/")
 
     @server_url.setter
     def server_url(self, val: str):

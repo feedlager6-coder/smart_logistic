@@ -361,7 +361,7 @@
 
       <div class="form-group">
         <label class="form-label">Адрес сервера SmartRoute (API):</label>
-        <input type="text" id="inputServerUrl" class="form-input" value="https://smartroute.app" />
+        <input type="text" id="inputServerUrl" class="form-input" value="" placeholder="https://ваш-сервер.replit.app" />
       </div>
 
       <div class="form-group">
@@ -489,7 +489,7 @@
     // Global Config State
     var CONFIG = {
       version: "3.2.0",
-      server_url: "https://smartroute.app",
+      server_url: "",
       api_token: "",
       agent_id: "",
       organization: "",
@@ -567,6 +567,9 @@
           file.Close();
           var parsed = JSON.parse(txt);
           if (parsed.server_url) CONFIG.server_url = parsed.server_url;
+          if (CONFIG.server_url.indexOf(".run.app") >= 0 || CONFIG.server_url.indexOf("ais-dev-") >= 0) {
+            CONFIG.server_url = "";
+          }
           if (parsed.api_token) CONFIG.api_token = parsed.api_token;
           if (parsed.agent_id) CONFIG.agent_id = parsed.agent_id;
           if (parsed.organization) CONFIG.organization = parsed.organization;
@@ -792,8 +795,12 @@
       });
 
       sendHttpRequest("POST", serverUrl + "/api/integrations/1c/agent/pair", payload, null, function(err, resp, status) {
-        if (err || status >= 400) {
-          var errMsg = err ? err.message : (resp && resp.error ? resp.error : "Ошибка сервера HTTP " + status);
+        if (err || status >= 400 || !resp || !resp.token) {
+          var errMsg = err ? err.message :
+            (resp && (resp.detail || resp.error) ? (resp.detail || resp.error) :
+              (!resp || !resp.token
+                ? "Сервер не вернул токен агента. Проверьте адрес опубликованного SmartRoute API."
+                : "Ошибка сервера HTTP " + status));
           resBox.className = "alert-box alert-error";
           resBox.innerText = "❌ Ошибка привязки: " + errMsg;
           addLog("ERROR", "Ошибка привязки: " + errMsg);
@@ -970,7 +977,15 @@
           }
         }
 
+        if (!/^https?:\/\//i.test(url)) {
+          throw new Error("Адрес сервера должен начинаться с http:// или https://");
+        }
+
         xhr.open(method, url, true);
+        try {
+          if (xhr.setTimeouts) xhr.setTimeouts(10000, 15000, 25000, 25000);
+        } catch(timeoutError) {}
+        try { xhr.timeout = 30000; } catch(timeoutError2) {}
         xhr.setRequestHeader("Content-Type", "application/json; charset=utf-8");
         if (token) {
           xhr.setRequestHeader("Authorization", "Bearer " + token);
@@ -985,9 +1000,18 @@
             if (status >= 200 && status < 300) {
               callback(null, json || text, status);
             } else {
-              callback(new Error(json && json.error ? json.error : "HTTP " + status + ": " + text), json, status);
+              callback(new Error(json && (json.detail || json.error)
+                ? (json.detail || json.error)
+                : "HTTP " + status + ": " + text), json, status);
             }
           }
+        };
+
+        xhr.onerror = function() {
+          callback(new Error("Сетевой запрос не выполнен. Проверьте адрес сервера, интернет и TLS-сертификат."), null, 0);
+        };
+        xhr.ontimeout = function() {
+          callback(new Error("Сервер не ответил за 30 секунд."), null, 0);
         };
 
         xhr.send(body || null);

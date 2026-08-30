@@ -34,7 +34,7 @@ class _HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
 class SmartRouteAPIClient:
     """Client for interacting with SmartRoute REST API."""
 
-    def __init__(self, base_url: str = "https://smartroute.app", api_token: str = ""):
+    def __init__(self, base_url: str = "", api_token: str = ""):
         self.base_url = base_url.rstrip("/")
         self.api_token = api_token
         self.agent_id = ""

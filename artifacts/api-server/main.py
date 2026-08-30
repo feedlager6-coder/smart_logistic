@@ -11249,6 +11249,12 @@ def get_active_one_c_pairing_code(request: Request):
 def pair_one_c_agent(body: OneCAgentPairRequest, request: Request):
     """Pair a native Windows agent using a one-time browser-generated code."""
     clean_code = _normalize_pairing_code(body.pairing_code)
+    logger.info(
+        "1C agent pairing request received: agent=%s version=%s host=%s",
+        (body.agent_name or "")[:120],
+        (body.agent_version or "")[:50],
+        request.client.host if request.client else "",
+    )
     if not clean_code:
         raise HTTPException(status_code=400, detail="Код привязки обязателен")
     if len(clean_code) > 128:
@@ -11636,7 +11642,10 @@ def download_one_c_setup(request: Request):
     return Response(
         content=content,
         media_type="application/vnd.microsoft.portable-executable",
-        headers={"Content-Disposition": 'attachment; filename="SmartRoute_1C_Agent_Setup.exe"'},
+        headers={
+            "Content-Disposition": 'attachment; filename="SmartRoute_1C_Agent_Setup.exe"',
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+        },
     )
 
 
@@ -11653,9 +11662,12 @@ def download_one_c_agent_package(request: Request):
         for name in (
             "SmartRoute_1C_Agent_Setup.exe",
             "SmartRoute_Agent.exe",
+            "SmartRoute_1C_Agent.hta",
             "smartroute.ico",
             "ИНСТРУКЦИЯ.txt",
             "CLIENT_GUIDE.md",
+            "Установка_SmartRoute.bat",
+            "install.vbs",
         ):
             path = os.path.join(agent_dir, name)
             if os.path.isfile(path):

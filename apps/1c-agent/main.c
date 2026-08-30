@@ -47,6 +47,8 @@
 #define IDC_ST_STATUSES     1017
 #define IDC_ST_LASTSYNC     1018
 
+#define DEFAULT_SERVER_URL  L""
+
 static const IID s_IID_NULL = { 0, 0, 0, { 0, 0, 0, 0, 0, 0, 0, 0 } };
 
 // Global Configuration
@@ -168,7 +170,7 @@ void AddLog(const wchar_t *level, const wchar_t *msg) {
 // Config Load & Save
 void LoadConfig() {
     // Defaults
-    wcscpy(g_cfg.server_url, L"https://smartroute.app");
+    wcscpy(g_cfg.server_url, DEFAULT_SERVER_URL);
     g_cfg.api_token[0] = L'\0';
     g_cfg.agent_id[0] = L'\0';
     wcscpy(g_cfg.organization, L"SmartRoute Logistics");
@@ -201,6 +203,13 @@ void LoadConfig() {
                 wchar_t temp[512];
                 JsonExtractString(buf, "server_url", temp, 512);
                 if (temp[0]) wcscpy(g_cfg.server_url, temp);
+                // Do not keep the retired Google Run address from older packages.
+                // The server URL must come from the current deployment or be
+                // entered explicitly by the user.
+                if (wcsstr(g_cfg.server_url, L".run.app") != NULL ||
+                    wcsstr(g_cfg.server_url, L"ais-dev-") != NULL) {
+                    g_cfg.server_url[0] = L'\0';
+                }
                 
                 JsonExtractString(buf, "api_token", temp, 256);
                 if (temp[0]) wcscpy(g_cfg.api_token, temp);
@@ -679,6 +688,9 @@ DWORD WINAPI PairWorkerThread(LPVOID lpParam) {
     wchar_t serverErrMsg[512] = {0};
     if (resp[0]) {
         JsonExtractString(resp, "error", serverErrMsg, 512);
+        if (!serverErrMsg[0]) {
+            JsonExtractString(resp, "detail", serverErrMsg, 512);
+        }
     }
 
     wchar_t errBuf[1024];
@@ -691,7 +703,9 @@ DWORD WINAPI PairWorkerThread(LPVOID lpParam) {
         swprintf(errBuf, 1024, L"Ошибка от сервера (HTTP %d):\n%s", status, serverErrMsg);
         SetWindowTextW(g_hPairStatus, serverErrMsg);
     } else {
-        swprintf(errBuf, 1024, L"Ошибка привязки (HTTP %d). Проверьте код привязки и адрес сервера.", status);
+        swprintf(errBuf, 1024,
+            L"Сервер вернул неожиданный ответ (HTTP %d).\nПроверьте, что указан именно адрес опубликованного SmartRoute API, а не сайт или страницу-заглушку.",
+            status);
         SetWindowTextW(g_hPairStatus, errBuf);
     }
 
@@ -706,9 +720,23 @@ void ActionPair() {
     GetWindowTextW(g_hEdtServer, server, 512);
     GetWindowTextW(g_hEdtCode, code, 128);
 
+    wchar_t *pServer = server;
+    while (*pServer == L' ' || *pServer == L'\t') pServer++;
+
     // Quick trim
     wchar_t *pCode = code;
     while (*pCode == L' ' || *pCode == L'\t') pCode++;
+
+    if (pServer[0] == L'\0') {
+        MessageBoxW(g_hMainWnd,
+            L"Пожалуйста, укажите адрес опубликованного сервера SmartRoute.\n\n"
+            L"Адрес должен начинаться с https:// и вести к вашему рабочему кабинету, "
+            L"а не к странице сайта или dev-preview.",
+            L"SmartRoute 1C Agent",
+            MB_ICONWARNING);
+        SetFocus(g_hEdtServer);
+        return;
+    }
 
     if (pCode[0] == L'\0') {
         MessageBoxW(g_hMainWnd,
@@ -725,9 +753,29 @@ void ActionPair() {
 
     PairThreadParams *params = (PairThreadParams *)malloc(sizeof(PairThreadParams));
     if (params) {
-        wcscpy(params->server, server);
+        wcscpy(params->server, pServer);
         wcscpy(params->code, pCode);
-        CreateThread(NULL, 0, PairWorkerThread, params, 0, NULL);
+        HANDLE thread = CreateThread(NULL, 0, PairWorkerThread, params, 0, NULL);
+        if (thread) {
+            CloseHandle(thread);
+        } else {
+            free(params);
+            SetWindowTextW(g_hPairStatus, L"❌ Не удалось запустить проверку соединения Windows.");
+            SetWindowTextW(g_hBtnPair, L"🔗 Привязать к SmartRoute");
+            EnableWindow(g_hBtnPair, TRUE);
+            MessageBoxW(g_hMainWnd,
+                L"Не удалось запустить поток привязки. Перезапустите приложение и повторите попытку.",
+                L"SmartRoute 1C Agent",
+                MB_ICONERROR);
+        }
+    } else {
+        SetWindowTextW(g_hPairStatus, L"❌ Недостаточно памяти для запуска привязки.");
+        SetWindowTextW(g_hBtnPair, L"🔗 Привязать к SmartRoute");
+        EnableWindow(g_hBtnPair, TRUE);
+        MessageBoxW(g_hMainWnd,
+            L"Не удалось начать привязку: недостаточно памяти Windows.",
+            L"SmartRoute 1C Agent",
+            MB_ICONERROR);
     }
 }
 
@@ -928,7 +976,7 @@ void CreateGUIControls(HWND hWnd) {
 
     HWND hStSrv = CreateWindowW(L"STATIC", L"Адрес сервера SmartRoute (URL):", WS_CHILD | WS_VISIBLE, 10, 75, 400, 20, p1, NULL, hInst, NULL);
     SendMessageW(hStSrv, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
-    g_hEdtServer = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"https://smartroute.app", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 10, 100, 790, 30, p1, (HMENU)IDC_EDT_SERVER, hInst, NULL);
+    g_hEdtServer = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", DEFAULT_SERVER_URL, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 10, 100, 790, 30, p1, (HMENU)IDC_EDT_SERVER, hInst, NULL);
     SendMessageW(g_hEdtServer, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
     HWND hStCode = CreateWindowW(L"STATIC", L"Код привязки (например, SMARTROUTE-7824-9132):", WS_CHILD | WS_VISIBLE, 10, 145, 400, 20, p1, NULL, hInst, NULL);

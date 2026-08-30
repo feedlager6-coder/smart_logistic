@@ -434,6 +434,9 @@ function OneCAgentTab({ onSwitchToManual }: AgentTabProps) {
                 или .ZIP архив
               </button>
             </div>
+            <span className="text-[11px] text-sky-700 leading-tight max-w-[260px]">
+              ZIP-пакет получает адрес текущего сервера автоматически.
+            </span>
           </div>
         </div>
       </div>
@@ -550,7 +553,7 @@ function OneCAgentTab({ onSwitchToManual }: AgentTabProps) {
               {
                 step: "Шаг 1",
                 title: "1. Скачайте и запустите .exe",
-                desc: "Запустите SmartRoute_1C_Agent_Setup.exe, вставьте код привязки SMARTROUTE-... и нажмите «Привязать».",
+                desc: "Укажите адрес опубликованного сервера, вставьте код SMARTROUTE-... и нажмите «Привязать». Не используйте dev-preview или старый Google Run адрес.",
                 icon: <KeyRound className="w-5 h-5 text-sky-600" />,
               },
               {
