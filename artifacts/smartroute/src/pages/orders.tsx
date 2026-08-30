@@ -17,7 +17,7 @@ import {
 import {
   Upload, Package, CheckCircle, XCircle, Loader2, Trash2, ArrowRight,
   AlertTriangle, Weight, Box, Plus, Wand2, History, Eye,
-  Check, ClipboardList, Banknote, CalendarDays, Download,
+  Check, ClipboardList, Banknote, CalendarDays, Download, CheckSquare, Square, ArrowDownToLine,
 } from "lucide-react";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
@@ -123,6 +123,7 @@ interface OrderRecord {
   products: string;
   notes: string;
   delivery_date: string;
+  city: string;
 }
 
 interface OrdersResponse {
@@ -148,6 +149,7 @@ interface EditableRow {
   quantity: number;       // display-only: total units delivered to this point
   products: string;       // display-only: "Молоко×4, Сахар×16"
   notes: string;
+  city: string;
 }
 
 // Unmatched store data extracted from preview (for bulk create + enhanced prefill)
@@ -380,6 +382,15 @@ export function OrdersPage() {
   });
 
   const hasOrders = (savedOrders?.total_count ?? 0) > 0;
+  const cityCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const order of savedOrders?.orders ?? []) {
+      const city = (order.city || "").trim();
+      if (city) counts.set(city, (counts.get(city) ?? 0) + 1);
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  }, [savedOrders]);
+  const hasMultipleCities = cityCounts.length > 1;
 
   // Query: dates that have at least one order (for calendar highlighting)
   const { data: activeDatesData, refetch: refetchActiveDates } = useQuery<{ dates: string[] }>({
@@ -408,6 +419,10 @@ export function OrdersPage() {
   const [comboOpen, setComboOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const [selectedToAdd, setSelectedToAdd] = useState<Set<number>>(new Set());
+  const [selectedOrderIds, setSelectedOrderIds] = useState<Set<number>>(new Set());
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [transferDate, setTransferDate] = useState("");
+  const [transferring, setTransferring] = useState(false);
 
   const saveTimers = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
   const pendingSaves = useRef(0);
@@ -418,6 +433,7 @@ export function OrdersPage() {
   // serverIds stays "" — an unchanged dep — the second effect never re-fires).
   useEffect(() => {
     setRows([]);
+    setSelectedOrderIds(new Set());
   }, [date]);
 
   // Sync server orders → local editable rows when the order id-set OR their
@@ -443,6 +459,7 @@ export function OrdersPage() {
             store_id: o.store_id,
             store_name_db: o.store_name_db,
             store_address: o.store_address,
+            city: o.city ?? "",
           };
         }
         return {
@@ -458,6 +475,7 @@ export function OrdersPage() {
           quantity: o.quantity ?? 0,
           products: o.products ?? "",
           notes: o.notes ?? "",
+          city: o.city ?? "",
         };
       });
     });
@@ -584,6 +602,7 @@ export function OrdersPage() {
           quantity: 0,
           products: "",
           notes: "",
+          city: "",
         }));
       return [...prev, ...placeholders];
     });
@@ -647,6 +666,48 @@ export function OrdersPage() {
     } finally {
       qc.invalidateQueries({ queryKey: ["daily_orders", date] });
       refetchActiveDates();
+    }
+  };
+
+  const toggleOrderSelection = (id: number) => {
+    setSelectedOrderIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleAllOrders = () => {
+    const selectableIds = rows.filter(r => r.id > 0).map(r => r.id);
+    if (selectedOrderIds.size === selectableIds.length) setSelectedOrderIds(new Set());
+    else setSelectedOrderIds(new Set(selectableIds));
+  };
+
+  const handleTransferOrders = async () => {
+    if (!transferDate || selectedOrderIds.size === 0) return;
+    setTransferring(true);
+    try {
+      const res = await fetch("/api/orders/transfer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ order_ids: [...selectedOrderIds], target_date: transferDate }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const detail = data.detail;
+        const message = typeof detail === "object" ? `${detail.message}${detail.conflicts?.length ? `: ${detail.conflicts.join(", ")}` : ""}` : (detail || "Не удалось перенести заявки");
+        throw new Error(message);
+      }
+      await qc.invalidateQueries({ queryKey: ["daily_orders", date] });
+      await qc.invalidateQueries({ queryKey: ["daily_orders", transferDate] });
+      refetchActiveDates();
+      setSelectedOrderIds(new Set());
+      setTransferOpen(false);
+      toast({ title: "Заявки перенесены", description: `${data.moved_count} заявок перенесено на ${format(new Date(`${transferDate}T00:00:00`), "d MMMM", { locale: ru })}` });
+    } catch (e: unknown) {
+      toast({ title: "Не удалось перенести заявки", description: e instanceof Error ? e.message : "Попробуйте ещё раз", variant: "destructive" });
+    } finally {
+      setTransferring(false);
     }
   };
 
@@ -820,6 +881,7 @@ export function OrdersPage() {
           quantity: p.quantity ?? 0,
           products: p.products ?? "",
           notes: p.notes ?? "",
+          city: (p.city ?? "").trim(),
         };
       })
       .filter(Boolean);
@@ -1085,6 +1147,17 @@ export function OrdersPage() {
         </Alert>
       )}
 
+      {hasMultipleCities && hasOrders && phase === "idle" && (
+        <Alert className="border-orange-300 bg-orange-50">
+          <AlertTriangle className="h-4 w-4 text-orange-600" />
+          <AlertDescription className="text-orange-900">
+            <span className="font-semibold">В заявках несколько городов.</span>{" "}
+            {cityCounts.map(([city, count]) => `${city} — ${count}`).join(" · ")}.
+            Проверьте список перед построением маршрута. Выберите заявки ниже и перенесите их на другую дату, если это нужно — автоматически они не удаляются.
+          </AlertDescription>
+        </Alert>
+      )}
+
       {/* ── Daily orders builder (idle phase) ── */}
       {phase === "idle" && (
         <>
@@ -1189,6 +1262,19 @@ export function OrdersPage() {
                 Очистить день
               </Button>
             )}
+            {selectedOrderIds.size > 0 && (
+              <Button
+                variant="outline"
+                className="gap-2 border-orange-300 text-orange-800 hover:bg-orange-50"
+                onClick={() => {
+                  setTransferDate(format(addDays(new Date(`${date}T00:00:00`), 1), "yyyy-MM-dd"));
+                  setTransferOpen(true);
+                }}
+              >
+                <ArrowDownToLine className="w-4 h-4" />
+                Перенести выбранные ({selectedOrderIds.size})
+              </Button>
+            )}
 
             <div className="flex-1" />
 
@@ -1283,6 +1369,13 @@ export function OrdersPage() {
                   <Table>
                     <TableHeader>
                       <TableRow>
+                        <TableHead className="w-[44px]">
+                          <button type="button" onClick={toggleAllOrders} title="Выбрать все заявки" className="flex items-center justify-center">
+                            {selectedOrderIds.size > 0 && selectedOrderIds.size === rows.filter(r => r.id > 0).length
+                              ? <CheckSquare className="w-4 h-4 text-primary" />
+                              : <Square className="w-4 h-4 text-muted-foreground" />}
+                          </button>
+                        </TableHead>
                         <TableHead className="min-w-[220px]">Магазин</TableHead>
                         <TableHead className="min-w-[180px]">Товары</TableHead>
                         <TableHead className="w-[130px]">Вес, кг</TableHead>
@@ -1294,7 +1387,14 @@ export function OrdersPage() {
                     </TableHeader>
                     <TableBody>
                       {rows.map((r) => (
-                        <TableRow key={r.id}>
+                        <TableRow key={r.id} className={selectedOrderIds.has(r.id) ? "bg-orange-50/60" : undefined}>
+                          <TableCell className="align-top">
+                            <button type="button" onClick={() => r.id > 0 && toggleOrderSelection(r.id)} className="flex items-center justify-center">
+                              {selectedOrderIds.has(r.id)
+                                ? <CheckSquare className="w-4 h-4 text-primary" />
+                                : <Square className="w-4 h-4 text-muted-foreground" />}
+                            </button>
+                          </TableCell>
                           <TableCell className="align-top">
                             <div className="font-medium">{r.store_name_db || r.store_name_raw}</div>
                             <div className="text-xs text-muted-foreground">
@@ -1305,6 +1405,11 @@ export function OrdersPage() {
                             {r.store_id === null && (
                               <Badge variant="outline" className="mt-1 text-amber-600 border-amber-300">
                                 нет магазина
+                              </Badge>
+                            )}
+                            {r.city && (
+                              <Badge variant="secondary" className="mt-1 text-xs">
+                                {r.city}
                               </Badge>
                             )}
                           </TableCell>
@@ -1370,6 +1475,37 @@ export function OrdersPage() {
           )}
         </>
       )}
+
+      <Dialog open={transferOpen} onOpenChange={setTransferOpen}>
+        <DialogContent className="sm:max-w-[430px]">
+          <DialogHeader>
+            <DialogTitle>Перенести заявки</DialogTitle>
+            <DialogDescription>
+              Выбрано заявок: {selectedOrderIds.size}. Все данные сохранятся, изменится только дата доставки.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 py-2">
+            <label htmlFor="transfer-date" className="text-sm font-medium">Новая дата доставки</label>
+            <Input
+              id="transfer-date"
+              type="date"
+              value={transferDate}
+              min="2000-01-01"
+              onChange={(e) => setTransferDate(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              Если на этой дате уже есть заявка для того же магазина, перенос будет отменён целиком — без частичных изменений.
+            </p>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setTransferOpen(false)}>Отмена</Button>
+            <Button onClick={handleTransferOrders} disabled={!transferDate || transferring}>
+              {transferring && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+              Перенести
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* ── Loading state (file analysis) ── */}
       {phase === "loading" && (

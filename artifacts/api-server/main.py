@@ -2276,6 +2276,7 @@ def init_db():
     cur.execute("ALTER TABLE daily_orders ADD COLUMN IF NOT EXISTS address_raw TEXT DEFAULT ''")
     cur.execute("ALTER TABLE daily_orders ADD COLUMN IF NOT EXISTS quantity DOUBLE PRECISION DEFAULT 0")
     cur.execute("ALTER TABLE daily_orders ADD COLUMN IF NOT EXISTS products TEXT DEFAULT ''")
+    cur.execute("ALTER TABLE daily_orders ADD COLUMN IF NOT EXISTS city TEXT DEFAULT ''")
     # ── Integrations ───────────────────────────────────────────────────────────
     cur.execute("""
         CREATE TABLE IF NOT EXISTS integrations (
@@ -4681,6 +4682,8 @@ def create_store(request: Request, body: StoreInput, force: bool = Query(False, 
         raise HTTPException(status_code=422, detail="Широта должна быть от -90 до 90")
     if body.lon is not None and not (-180 <= body.lon <= 180):
         raise HTTPException(status_code=422, detail="Долгота должна быть от -180 до 180")
+    if (body.lat is None) != (body.lon is None):
+        raise HTTPException(status_code=422, detail="Укажите одновременно широту и долготу")
 
     raw_address = (body.address or "").strip()
     city = (body.city or "").strip()
@@ -5271,6 +5274,12 @@ async def preview_import(request: Request, file: UploadFile = File(...)):
     c_to      = _detect_col(header_lower, _KWORDS_TO)
     c_phone   = _detect_col(header_lower, _KWORDS_PHONE)
     c_client  = _detect_col(header_lower, _KWORDS_CLIENT)
+    c_lat     = _detect_col(header_lower, ["широта", "lat", "latitude"])
+    c_lon     = _detect_col(header_lower, ["долгота", "lon", "longitude"])
+    c_coords  = _detect_col(header_lower, [
+        "координаты", "координата", "coordinates", "coordinate", "coords",
+        "lat lon", "latitude longitude", "широта долгота",
+    ])
 
     # ── Conflict resolution: no two fields may share the same column index ────
     # When "контрагент" matches both name and client, prefer name (primary key).
@@ -5278,6 +5287,8 @@ async def preview_import(request: Request, file: UploadFile = File(...)):
         c_client = None
     if c_phone is not None and c_phone in (c_name, c_address, c_city):
         c_phone = None
+    if c_coords is not None and c_coords in (c_name, c_address, c_city, c_yandex):
+        c_coords = None
 
     # Count unique points after dedup (name + address) for info display
     seen: set = set()
@@ -5312,7 +5323,10 @@ async def preview_import(request: Request, file: UploadFile = File(...)):
         for dbr in db_rows:
             dn = _normalize_for_dedup(dbr["name"] or "")
             da = _normalize_for_dedup(dbr["address"] or "")
-            store_ref = {"id": dbr["id"], "name": dbr["name"], "address": dbr["address"]}
+            store_ref = {
+                "id": dbr["id"], "name": dbr["name"],
+                "address": dbr["address"], "city": dbr.get("city") or "",
+            }
             if dn:
                 db_by_name_addr[(dn, da)] = store_ref
             if da:
@@ -5403,6 +5417,9 @@ async def preview_import(request: Request, file: UploadFile = File(...)):
             "tw_to":   c_to,
             "phone":   c_phone,
             "client":  c_client,
+            "lat":     c_lat,
+            "lon":     c_lon,
+            "coords":  c_coords,
         },
     }
 
@@ -5438,9 +5455,20 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
         c_phone     = mapping.get("phone")
         c_client    = mapping.get("client")
         default_city = str(mapping.get("default_city") or "").strip()
-        # lat/lon/mapurl always auto-detected (not exposed in mapping UI)
-        c_lat    = _detect_col(header_row, ["широта", "lat", "latitude"])
-        c_lon    = _detect_col(header_row, ["долгота", "lon", "longitude"])
+        # Coordinates can be mapped explicitly. A single pair column wins over
+        # separate columns when selected in the import dialog.
+        c_lat    = mapping.get("lat")
+        c_lon    = mapping.get("lon")
+        c_coords = mapping.get("coords")
+        if c_lat is None:
+            c_lat = _detect_col(header_row, ["широта", "lat", "latitude"])
+        if c_lon is None:
+            c_lon = _detect_col(header_row, ["долгота", "lon", "longitude"])
+        if c_coords is None:
+            c_coords = _detect_col(header_row, [
+                "координаты", "координата", "coordinates", "coordinate", "coords",
+                "lat lon", "latitude longitude", "широта долгота",
+            ])
         c_mapurl = _detect_col(header_row, ["map_url", "ссылка на карт"])
     else:
         default_city = ""
@@ -5450,6 +5478,10 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
         c_city   = _detect_col(header_row, _KWORDS_CITY)
         c_lat    = _detect_col(header_row, ["широта", "lat", "latitude"])
         c_lon    = _detect_col(header_row, ["долгота", "lon", "longitude"])
+        c_coords = _detect_col(header_row, [
+            "координаты", "координата", "coordinates", "coordinate", "coords",
+            "lat lon", "latitude longitude", "широта долгота",
+        ])
         c_mapurl = _detect_col(header_row, ["map_url", "ссылка на карт"])
         c_unload = _detect_col(header_row, _KWORDS_UNLOAD)
         c_from   = _detect_col(header_row, _KWORDS_FROM)
@@ -5546,6 +5578,7 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
 
         raw_lat = _get(row, c_lat)
         raw_lon = _get(row, c_lon)
+        raw_coords = _get(row, c_coords)
         map_url = str(_get(row, c_mapurl, "")).strip() or None
 
         if c_from is None and len(row) > 2 and row[2] and ":" in str(row[2]):
@@ -5562,11 +5595,42 @@ def _import_process_content_sync(content_bytes: bytes, job: dict, mapping: Optio
 
         lat, lon, status = None, None, "not_found"
         coord_source = "not_found"
-        try:
-            pv_lat = float(raw_lat) if raw_lat not in (None, "", "None") else None
-            pv_lon = float(raw_lon) if raw_lon not in (None, "", "None") else None
-        except (ValueError, TypeError):
-            pv_lat = pv_lon = None
+        def _parse_coordinate_pair(value) -> tuple[Optional[float], Optional[float]]:
+            if value in (None, "", "None"):
+                return None, None
+            text = str(value).strip()
+            # Semicolon is common in Russian Excel files where comma is the
+            # decimal separator: 42,9849;47,5046.
+            if ";" in text:
+                parts = [p.strip() for p in text.split(";")]
+            else:
+                parts = [p.strip() for p in re.split(r",\s*", text)]
+            if len(parts) != 2:
+                return None, None
+            try:
+                lat_value = float(parts[0].replace(",", "."))
+                lon_value = float(parts[1].replace(",", "."))
+            except (ValueError, TypeError):
+                return None, None
+            if not (-90 <= lat_value <= 90 and -180 <= lon_value <= 180):
+                return None, None
+            return lat_value, lon_value
+
+        pv_lat = pv_lon = None
+        if c_coords is not None:
+            pv_lat, pv_lon = _parse_coordinate_pair(raw_coords)
+        if pv_lat is None or pv_lon is None:
+            try:
+                pv_lat = (
+                    float(str(raw_lat).strip().replace(",", "."))
+                    if raw_lat not in (None, "", "None") else None
+                )
+                pv_lon = (
+                    float(str(raw_lon).strip().replace(",", "."))
+                    if raw_lon not in (None, "", "None") else None
+                )
+            except (ValueError, TypeError):
+                pv_lat = pv_lon = None
 
         def _geocode_with_tracking(addr: str) -> Optional[tuple]:
             """geocode_address with source tracking into geocode_stats."""
@@ -5863,6 +5927,25 @@ def update_store(id: int, body: StoreUpdate, request: Request):
         fields["time_window_to"] = body.time_window_to
     if body.unload_minutes is not None:
         fields["unload_minutes"] = body.unload_minutes
+
+    # Explicit coordinates always win over address/Yandex re-geocoding.
+    # This also makes editing a store deterministic when both are supplied.
+    if body.lat is not None or body.lon is not None:
+        if body.lat is None or body.lon is None:
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=422, detail="Укажите одновременно широту и долготу")
+        if not (-90 <= body.lat <= 90):
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=422, detail="Широта должна быть от -90 до 90")
+        if not (-180 <= body.lon <= 180):
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=422, detail="Долгота должна быть от -180 до 180")
+        fields["lat"] = body.lat
+        fields["lon"] = body.lon
+        fields["geocode_status"] = "found"
 
     if fields:
         set_clause = ", ".join(f"{k} = %s" for k in fields)
@@ -6492,6 +6575,7 @@ class OrderImportRow(BaseModel):
     quantity: float = 0.0
     products: str = ""
     notes: str = ""
+    city: str = ""
 
 
 class OrderImportRequest(BaseModel):
@@ -6567,7 +6651,7 @@ async def orders_preview(request: Request, file: UploadFile = File(...), mapping
     # Fetch owner's stores for matching
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT id, name, address FROM stores WHERE owner_id = %s", (uid,))
+    cur.execute("SELECT id, name, address, city FROM stores WHERE owner_id = %s", (uid,))
     db_stores = [dict(r) for r in cur.fetchall()]
     cur.close()
     conn.close()
@@ -6671,6 +6755,7 @@ async def orders_preview(request: Request, file: UploadFile = File(...), mapping
         m = _match_store_to_db(pt["name"], pt["address"], db_stores)
         mid = m["id"] if m else None
         mname = m["name"] if m else None
+        city = pt["city"] or (m.get("city", "") if m else "")
         if mid is not None:
             matched_points += 1
         match_by_key[key] = (mid, mname)
@@ -6684,7 +6769,7 @@ async def orders_preview(request: Request, file: UploadFile = File(...), mapping
             "products": _products_str(pt["_products"]),
             "order_number": pt["order_number"][:100],
             "notes": pt["notes"][:500],
-            "city": pt["city"], "yandex_url": pt["yandex_url"],
+            "city": city, "yandex_url": pt["yandex_url"],
             "time_from": pt["time_from"], "time_to": pt["time_to"],
             "unload_minutes": pt["unload_minutes"],
             "order_lines": pt["order_lines"],
@@ -6770,12 +6855,12 @@ def orders_import(request: Request, body: OrderImportRequest):
             cur.execute(
                 """INSERT INTO daily_orders
                    (owner_id, store_id, store_name_raw, address_raw, order_number,
-                    weight_kg, volume_m3, amount_rub, quantity, products, notes,
+                    weight_kg, volume_m3, amount_rub, quantity, products, notes, city,
                     delivery_date)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (uid, store_id, row.store_name_raw, row.address_raw, row.order_number,
                  row.weight_kg, row.volume_m3, row.amount_rub, row.quantity,
-                 row.products, row.notes, body.delivery_date)
+                 row.products, row.notes, row.city.strip()[:120], body.delivery_date)
             )
 
         conn.commit()
@@ -6848,6 +6933,9 @@ def get_orders(request: Request, date: Optional[str] = None):
         """SELECT o.id, o.store_id, o.store_name_raw, o.address_raw, o.order_number,
                   o.weight_kg, o.volume_m3, o.amount_rub, o.quantity, o.products, o.notes,
                   o.delivery_date::text as delivery_date,
+                  COALESCE(NULLIF(o.city, ''), NULLIF(s.city, ''),
+                           CASE WHEN POSITION(',' IN o.address_raw) > 0
+                                THEN split_part(o.address_raw, ',', 1) ELSE '' END, '') as city,
                   s.name as store_name_db, s.address as store_address
              FROM daily_orders o
              LEFT JOIN stores s ON s.id = o.store_id
@@ -7060,6 +7148,80 @@ class ManualOrderBulkRequest(BaseModel):
     store_ids: list[int]
     delivery_date: str  # "YYYY-MM-DD"
 
+
+class TransferOrdersRequest(BaseModel):
+    order_ids: list[int]
+    target_date: str  # "YYYY-MM-DD"
+
+
+@app.post("/api/orders/transfer")
+def transfer_orders(request: Request, body: TransferOrdersRequest):
+    """Move selected orders to another date without silently deleting them."""
+    uid = get_user_id(request)
+    if not body.order_ids:
+        raise HTTPException(status_code=422, detail="Выберите хотя бы одну заявку")
+    if len(body.order_ids) > 2000:
+        raise HTTPException(status_code=422, detail="За один раз можно перенести максимум 2000 заявок")
+    try:
+        datetime.strptime(body.target_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Некорректный формат даты (ожидается YYYY-MM-DD)")
+
+    order_ids = list(dict.fromkeys(body.order_ids))
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            """SELECT id, store_id, store_name_raw, delivery_date::text AS delivery_date
+                 FROM daily_orders
+                WHERE owner_id = %s AND id = ANY(%s)
+                ORDER BY id""",
+            (uid, order_ids),
+        )
+        selected = cur.fetchall()
+        if len(selected) != len(order_ids):
+            raise HTTPException(status_code=404, detail="Одна или несколько заявок не найдены")
+
+        store_ids = [r["store_id"] for r in selected if r["store_id"] is not None]
+        conflicts = []
+        if store_ids:
+            cur.execute(
+                """SELECT o.id, o.store_id, o.store_name_raw
+                     FROM daily_orders o
+                    WHERE o.owner_id = %s AND o.delivery_date = %s
+                      AND o.store_id = ANY(%s) AND o.id <> ALL(%s)
+                    ORDER BY o.id""",
+                (uid, body.target_date, store_ids, order_ids),
+            )
+            conflicts = [dict(r) for r in cur.fetchall()]
+        if conflicts:
+            names = [r["store_name_raw"] for r in conflicts[:5]]
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "На выбранной дате уже есть заявки для некоторых магазинов",
+                    "conflicts": names,
+                },
+            )
+
+        cur.execute(
+            """UPDATE daily_orders
+                  SET delivery_date = %s
+                WHERE owner_id = %s AND id = ANY(%s)""",
+            (body.target_date, uid, order_ids),
+        )
+        moved = cur.rowcount
+        conn.commit()
+        return {"moved_count": moved, "target_date": body.target_date}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
 
 @app.post("/api/orders/manual/bulk", status_code=201)
 def create_manual_orders_bulk(request: Request, body: ManualOrderBulkRequest):

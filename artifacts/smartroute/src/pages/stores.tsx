@@ -83,6 +83,8 @@ export function StoresPage() {
   const [timeFrom, setTimeFrom] = useState("09:00");
   const [timeTo, setTimeTo] = useState("18:00");
   const [unloadMinutes, setUnloadMinutes] = useState("15");
+  const [latitude, setLatitude] = useState("");
+  const [longitude, setLongitude] = useState("");
   const [showSettings, setShowSettings] = useState(false);
 
   // Import — mapping dialog state
@@ -113,6 +115,8 @@ export function StoresPage() {
   const [editTimeFrom, setEditTimeFrom] = useState("09:00");
   const [editTimeTo, setEditTimeTo] = useState("18:00");
   const [editUnload, setEditUnload] = useState("15");
+  const [editLatitude, setEditLatitude] = useState("");
+  const [editLongitude, setEditLongitude] = useState("");
 
   const createStore = useCreateStore();
   const deleteStore = useDeleteStore();
@@ -121,7 +125,10 @@ export function StoresPage() {
 
   const validateForm = (): string | null => {
     if (!name.trim()) return "Введите название магазина";
-    if (!yandexUrl.trim() && !address.trim()) return "Укажите ссылку из Яндекс Карт или адрес";
+    if (!yandexUrl.trim() && !address.trim() && (!latitude.trim() || !longitude.trim())) return "Укажите ссылку из Яндекс Карт, адрес или обе координаты";
+    if ((latitude.trim() && !longitude.trim()) || (!latitude.trim() && longitude.trim())) return "Укажите одновременно широту и долготу";
+    if (latitude.trim() && (Number.isNaN(Number(latitude.replace(",", "."))) || Number(latitude.replace(",", ".")) < -90 || Number(latitude.replace(",", ".")) > 90)) return "Широта должна быть от -90 до 90";
+    if (longitude.trim() && (Number.isNaN(Number(longitude.replace(",", "."))) || Number(longitude.replace(",", ".")) < -180 || Number(longitude.replace(",", ".")) > 180)) return "Долгота должна быть от -180 до 180";
     return null;
   };
 
@@ -135,6 +142,8 @@ export function StoresPage() {
     setTimeFrom("09:00");
     setTimeTo("18:00");
     setUnloadMinutes("15");
+    setLatitude("");
+    setLongitude("");
   };
 
   const handleAddStore = (e: React.FormEvent) => {
@@ -151,6 +160,8 @@ export function StoresPage() {
       city: city.trim() || null,
       phone: phone.trim() || null,
       client: client.trim() || null,
+      lat: latitude.trim() ? Number(latitude.replace(",", ".")) : null,
+      lon: longitude.trim() ? Number(longitude.replace(",", ".")) : null,
       time_window_from: timeFrom,
       time_window_to: timeTo,
       unload_minutes: parseInt(unloadMinutes) || 15,
@@ -164,7 +175,7 @@ export function StoresPage() {
         { data: data as any },
         {
           onSuccess: () => {
-            const source = data.yandex_url ? "из ссылки Яндекс Карт" : "геокодированием адреса";
+            const source = data.lat != null && data.lon != null ? "из указанных координат" : data.yandex_url ? "из ссылки Яндекс Карт" : "геокодированием адреса";
             toast({ title: "Магазин добавлен", description: `Координаты определены ${source}.` });
             queryClient.invalidateQueries({ queryKey: getListStoresQueryKey() });
             resetForm();
@@ -435,6 +446,8 @@ export function StoresPage() {
     setEditTimeFrom(store.time_window_from);
     setEditTimeTo(store.time_window_to);
     setEditUnload(String(store.unload_minutes));
+    setEditLatitude(store.lat != null ? String(store.lat) : "");
+    setEditLongitude(store.lon != null ? String(store.lon) : "");
     setEditOpen(true);
   };
 
@@ -442,6 +455,20 @@ export function StoresPage() {
     if (!editId) return;
     if (!editName.trim()) {
       toast({ title: "Ошибка", description: "Введите название магазина", variant: "destructive" });
+      return;
+    }
+    const editLat = editLatitude.trim() ? Number(editLatitude.replace(",", ".")) : null;
+    const editLon = editLongitude.trim() ? Number(editLongitude.replace(",", ".")) : null;
+    if ((editLat === null) !== (editLon === null)) {
+      toast({ title: "Ошибка", description: "Укажите одновременно широту и долготу", variant: "destructive" });
+      return;
+    }
+    if (editLat !== null && (Number.isNaN(editLat) || editLat < -90 || editLat > 90)) {
+      toast({ title: "Ошибка", description: "Широта должна быть от -90 до 90", variant: "destructive" });
+      return;
+    }
+    if (editLon !== null && (Number.isNaN(editLon) || editLon < -180 || editLon > 180)) {
+      toast({ title: "Ошибка", description: "Долгота должна быть от -180 до 180", variant: "destructive" });
       return;
     }
     updateStore.mutate(
@@ -454,6 +481,8 @@ export function StoresPage() {
           city: editCity.trim(),
           phone: editPhone.trim(),
           client: editClient.trim(),
+          lat: editLat,
+          lon: editLon,
           time_window_from: editTimeFrom,
           time_window_to: editTimeTo,
           unload_minutes: parseInt(editUnload) || 15,
@@ -731,6 +760,30 @@ export function StoresPage() {
                       value={unloadMinutes}
                       onChange={(e) => setUnloadMinutes(e.target.value)}
                     />
+                  </div>
+                  <div className="space-y-2 md:col-span-2">
+                    <Label>Координаты <span className="text-xs font-normal text-muted-foreground">(необязательно, имеют приоритет)</span></Label>
+                    <div className="flex gap-2">
+                      <Input
+                        type="number"
+                        step="any"
+                        min="-90"
+                        max="90"
+                        value={latitude}
+                        onChange={(e) => setLatitude(e.target.value)}
+                        placeholder="Широта, например 42.9849"
+                      />
+                      <Input
+                        type="number"
+                        step="any"
+                        min="-180"
+                        max="180"
+                        value={longitude}
+                        onChange={(e) => setLongitude(e.target.value)}
+                        placeholder="Долгота, например 47.5046"
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground">Если указаны обе координаты, ссылка и геокодирование адреса не используются.</p>
                   </div>
                   <div className="space-y-2">
                     <Label>Временное окно (с — до)</Label>
@@ -1058,6 +1111,14 @@ export function StoresPage() {
                 <Label>Телефон</Label>
                 <Input value={editPhone} onChange={(e) => setEditPhone(e.target.value)} placeholder="+7 928 000-00-00" />
               </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Координаты <span className="text-xs font-normal text-muted-foreground">(необязательно, имеют приоритет)</span></Label>
+              <div className="flex gap-2">
+                <Input type="number" step="any" min="-90" max="90" value={editLatitude} onChange={(e) => setEditLatitude(e.target.value)} placeholder="Широта" />
+                <Input type="number" step="any" min="-180" max="180" value={editLongitude} onChange={(e) => setEditLongitude(e.target.value)} placeholder="Долгота" />
+              </div>
+              <p className="text-xs text-muted-foreground">Укажите обе величины, чтобы сохранить ручное положение точки.</p>
             </div>
             <div className="space-y-2">
               <Label>Клиент</Label>

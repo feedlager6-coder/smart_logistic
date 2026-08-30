@@ -22,6 +22,9 @@ interface MappingState {
   tw_to: number | null;
   phone: number | null;
   client: number | null;
+  lat: number | null;
+  lon: number | null;
+  coords: number | null;
 }
 
 interface MatchEntry {
@@ -193,6 +196,7 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
   const [mapping, setMapping] = useState<MappingState>({
     name: null, address: null, city: null, yandex: null,
     unload: null, tw_from: null, tw_to: null, phone: null, client: null,
+    lat: null, lon: null, coords: null,
   });
   const [defaultCity, setDefaultCity] = useState<string>(() => {
     try { return localStorage.getItem(LS_CITY_KEY) ?? ""; } catch { return ""; }
@@ -244,7 +248,15 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
   }, [file]);
 
   const setField = (key: keyof MappingState, val: number | null) => {
-    setMapping((prev) => ({ ...prev, [key]: val }));
+    setMapping((prev) => {
+      if (key === "coords" && val !== null) {
+        return { ...prev, coords: val, lat: null, lon: null };
+      }
+      if ((key === "lat" || key === "lon") && val !== null) {
+        return { ...prev, [key]: val, coords: null };
+      }
+      return { ...prev, [key]: val };
+    });
     if (key === "city") setShowCityWarning(false);
   };
 
@@ -515,6 +527,40 @@ export function ImportMappingDialog({ file, onClose, onImportStarted }: Props) {
                   </div>
                 );
               })}
+            </div>
+
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 dark:border-emerald-900 dark:bg-emerald-950/30 p-3 space-y-3">
+              <div>
+                <Label className="text-xs font-semibold uppercase tracking-wide text-emerald-800 dark:text-emerald-200">
+                  Координаты (необязательно)
+                </Label>
+                <p className="text-[11px] text-emerald-700 dark:text-emerald-300 mt-1">
+                  Укажите пару в одной колонке или выберите отдельные широту и долготу. Явные координаты важнее ссылки и геокодирования.
+                </p>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                {([
+                  ["coords", "Пара координат"],
+                  ["lat", "Широта"],
+                  ["lon", "Долгота"],
+                ] as const).map(([key, label]) => (
+                  <div key={key} className="space-y-1">
+                    <Label className="text-xs font-medium text-muted-foreground">{label}</Label>
+                    <ColSelect
+                      value={mapping[key]}
+                      columns={preview.columns}
+                      onChange={(v) => {
+                        setField(key, v);
+                      }}
+                    />
+                  </div>
+                ))}
+              </div>
+              {mapping.coords !== null && (mapping.lat !== null || mapping.lon !== null) && (
+                <p className="text-[11px] text-amber-700">
+                  Выбрана колонка с парой — отдельные колонки будут проигнорированы.
+                </p>
+              )}
             </div>
 
             {/* Default city input */}

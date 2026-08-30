@@ -91,7 +91,7 @@ export function RoutePage() {
     total_count: number;
     total_weight_kg: number;
     total_volume_m3: number;
-    orders: Array<{ store_id: number | null; store_name_raw: string; weight_kg: number; volume_m3: number }>;
+    orders: Array<{ store_id: number | null; store_name_raw: string; weight_kg: number; volume_m3: number; city?: string }>;
   }>({
     queryKey: ["daily_orders", todayDate],
     queryFn: async () => {
@@ -159,6 +159,15 @@ export function RoutePage() {
       }
     }
     return map;
+  }, [todayOrders]);
+
+  const orderCities = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const order of todayOrders?.orders ?? []) {
+      const city = (order.city ?? "").trim();
+      if (city) counts.set(city, (counts.get(city) ?? 0) + 1);
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]);
   }, [todayOrders]);
 
   // Persist depot to localStorage on change
@@ -410,6 +419,17 @@ export function RoutePage() {
             </p>
             <a href={`/orders?date=${todayDate}`} className={`text-xs underline shrink-0 ${isOverCapacity ? "text-amber-600" : "text-blue-600"}`}>изменить</a>
           </div>
+          {orderCities.length > 1 && (
+            <div className="flex items-start gap-3 rounded-lg border border-orange-300 bg-orange-50 px-4 py-2.5">
+              <AlertTriangle className="w-4 h-4 text-orange-600 shrink-0 mt-0.5" />
+              <p className="text-sm text-orange-900 flex-1">
+                <span className="font-semibold">Заявки из нескольких городов:</span>{" "}
+                {orderCities.map(([city, count]) => `${city} — ${count}`).join(" · ")}.
+                Проверьте выбранные магазины перед запуском маршрута.
+              </p>
+              <a href={`/orders?date=${todayDate}`} className="text-xs underline shrink-0 text-orange-700">проверить</a>
+            </div>
+          )}
           {isOverCapacity && (
             <div className="flex items-start gap-3 rounded-lg border border-red-300 bg-red-50 px-4 py-2.5">
               <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
