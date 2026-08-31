@@ -15,11 +15,13 @@ set "TARGET_DIR=%LOCALAPPDATA%\SmartRouteAgent"
 
 if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%" > nul 2>&1
 
-:: Копирование файлов
-if exist "%SOURCE_DIR%core" (
-    xcopy /y /q "%SOURCE_DIR%core\*.*" "%TARGET_DIR%\" > nul 2>&1
+:: Копирование файлов. Конфигурация пользователя не перезаписывается.
+for %%F in (SmartRoute_Agent.exe SmartRoute_1C_Agent_Setup.exe SmartRoute_1C_Agent.hta smartroute.ico ИНСТРУКЦИЯ.txt CLIENT_GUIDE.md install.vbs) do (
+    if exist "%SOURCE_DIR%%%F" copy /y "%SOURCE_DIR%%%F" "%TARGET_DIR%\%%F" > nul 2>&1
 )
-xcopy /y /q "%SOURCE_DIR%*.*" "%TARGET_DIR%\" > nul 2>&1
+if not exist "%TARGET_DIR%\config.json" (
+    copy /y "%SOURCE_DIR%config.json" "%TARGET_DIR%\config.json" > nul 2>&1
+)
 
 echo  [2/3] Создание ярлыка с иконкой на Рабочем столе...
 

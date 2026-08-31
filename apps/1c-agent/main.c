@@ -997,8 +997,8 @@ void ActionSyncNow() {
         return;
     }
 
-    AddLog(L"INFO", L"Запуск обмена заказами и маршрутами со SmartRoute...");
-    SetWindowTextW(g_hDashStatus, L"⏳ Идёт синхронизация данных...");
+    AddLog(L"INFO", L"Проверка связи агента с сервером SmartRoute...");
+    SetWindowTextW(g_hDashStatus, L"⏳ Проверяем связь с сервером SmartRoute...");
 
     wchar_t fullUrl[1024];
     swprintf(fullUrl, 1024, L"%s/api/integrations/1c/agent/heartbeat", g_cfg.server_url);
@@ -1007,12 +1007,11 @@ void ActionSyncNow() {
     WideCharToMultiByte(CP_UTF8, 0, g_cfg.agent_id, -1, agent_utf8, sizeof(agent_utf8), NULL, NULL);
 
     char jsonBody[512];
-    snprintf(jsonBody, sizeof(jsonBody), "{\"agent_id\":\"%s\",\"status\":\"active\",\"orders_count\":1}", agent_utf8);
+    snprintf(jsonBody, sizeof(jsonBody), "{\"agent_id\":\"%s\",\"status\":\"active\"}", agent_utf8);
 
     char resp[4096] = {0};
     int status = 0;
     if (SendHttpRequest(fullUrl, "POST", jsonBody, g_cfg.api_token, resp, sizeof(resp), &status) && status == 200) {
-        g_cfg.orders_sent++;
         time_t rawtime;
         struct tm *timeinfo;
         time(&rawtime);
@@ -1021,11 +1020,11 @@ void ActionSyncNow() {
         SaveConfig();
         UpdateUIState();
 
-        AddLog(L"SUCCESS", L"Синхронизация успешно выполнена! Заказы переданы в SmartRoute.");
-        MessageBoxW(g_hMainWnd, L"Синхронизация успешно выполнена!\nЗаказы и маршруты актуализированы.", L"SmartRoute 1C Agent", MB_ICONINFORMATION);
+        AddLog(L"SUCCESS", L"Связь с сервером SmartRoute успешно проверена.");
+        MessageBoxW(g_hMainWnd, L"Связь с сервером SmartRoute успешно проверена.\n\nПолный обмен заказами и статусами выполняется отдельным модулем 1С.", L"SmartRoute 1C Agent", MB_ICONINFORMATION);
     } else {
-        AddLog(L"ERROR", L"Ошибка обмена с сервером SmartRoute.");
-        SetWindowTextW(g_hDashStatus, L"❌ Ошибка соединения с сервером SmartRoute.");
+        AddLog(L"ERROR", L"Не удалось проверить связь с сервером SmartRoute.");
+        SetWindowTextW(g_hDashStatus, L"❌ Не удалось проверить связь с сервером SmartRoute.");
     }
 }
 
@@ -1039,7 +1038,7 @@ DWORD WINAPI SyncWorkerThread(LPVOID lpParam) {
         if (!g_bRunning) break;
 
         if (g_cfg.api_token[0] != L'\0') {
-            AddLog(L"INFO", L"Фоновая автосинхронизация (Heartbeat)...");
+            AddLog(L"INFO", L"Фоновая проверка связи (Heartbeat)...");
             wchar_t fullUrl[1024];
             swprintf(fullUrl, 1024, L"%s/api/integrations/1c/agent/heartbeat", g_cfg.server_url);
             char agent_utf8[256];
@@ -1170,7 +1169,7 @@ void CreateGUIControls(HWND hWnd) {
     g_hDashStatus = CreateWindowW(L"STATIC", L"● Статус: Ожидание настройки", WS_CHILD | WS_VISIBLE, 10, 130, 790, 30, p3, NULL, hInst, NULL);
     SendMessageW(g_hDashStatus, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
-    g_hBtnSyncNow = CreateWindowW(L"BUTTON", L"🔄 Синхронизировать сейчас", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_DEFPUSHBUTTON, 10, 180, 260, 42, p3, (HMENU)IDC_BTN_SYNC_NOW, hInst, NULL);
+    g_hBtnSyncNow = CreateWindowW(L"BUTTON", L"Проверить связь с сервером", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_DEFPUSHBUTTON, 10, 180, 260, 42, p3, (HMENU)IDC_BTN_SYNC_NOW, hInst, NULL);
     SendMessageW(g_hBtnSyncNow, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
     g_hBtnDisconnect = CreateWindowW(L"BUTTON", L"Отвязать от SmartRoute", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 290, 180, 200, 42, p3, (HMENU)IDC_BTN_DISCONNECT, hInst, NULL);

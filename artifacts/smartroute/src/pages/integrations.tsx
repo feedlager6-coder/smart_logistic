@@ -268,8 +268,8 @@ function OneCAgentTab({ onSwitchToManual }: AgentTabProps) {
       await loadAgents();
       await loadLogs();
       toast({
-        title: "Синхронизация выполнена",
-        description: "Данные из 1С успешно обновлены в SmartRoute.",
+        title: "Связь проверена",
+        description: "Агент 1С доступен в SmartRoute. Полный обмен данными выполняется отдельным модулем 1С.",
       });
     } catch (e: any) {
       toast({
@@ -409,8 +409,8 @@ function OneCAgentTab({ onSwitchToManual }: AgentTabProps) {
               Windows-приложение SmartRoute Agent для 1С
             </h2>
             <p className="text-sm md:text-base text-gray-700 leading-relaxed">
-              Скачайте приложение‑агент для Windows. Запустите его на компьютере, где установлена 1С.
-              Приложение автоматически подключит вашу 1С к SmartRoute и будет синхронизировать заказы и статусы доставки.
+              Скачайте приложение‑агент для Windows и запустите его на компьютере, где установлена 1С.
+              Агент привязывает компьютер к SmartRoute, проверяет подключение к COMConnector 1С и показывает состояние соединения.
             </p>
           </div>
 
@@ -423,20 +423,24 @@ function OneCAgentTab({ onSwitchToManual }: AgentTabProps) {
               <Download className="w-5 h-5" />
               Скачать установщик (.exe)
             </Button>
-            <div className="flex items-center justify-between gap-2 px-1">
-              <span className="text-xs text-sky-800 font-semibold flex items-center gap-1">
-                <CheckCircle2 className="w-3.5 h-3.5 text-sky-600" /> 100% Native 64-bit EXE
-              </span>
+            <div className="rounded-xl border border-sky-200 bg-white/70 p-3 space-y-2">
+              <div className="text-xs text-sky-900 font-bold flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-sky-600" /> Рекомендуется: native EXE
+              </div>
+              <p className="text-[11px] text-sky-800 leading-relaxed">
+                Установщик создаёт ярлыки и запускает приложение. Адрес сервера вводится один раз в окне агента.
+              </p>
               <button
                 onClick={handleDownloadAgent}
-                className="text-xs text-sky-700 hover:underline cursor-pointer font-medium"
+                className="text-xs text-sky-700 hover:underline cursor-pointer font-semibold"
               >
-                или .ZIP архив
+                Скачать ZIP для ручной установки
               </button>
+              <p className="text-[11px] text-sky-700 leading-relaxed">
+                ZIP нужен, если EXE блокируется политикой Windows или требуется portable/резервный вариант.
+                В архиве уже есть адрес текущего сервера и инструкция.
+              </p>
             </div>
-            <span className="text-[11px] text-sky-700 leading-tight max-w-[260px]">
-              ZIP-пакет получает адрес текущего сервера автоматически.
-            </span>
           </div>
         </div>
       </div>
@@ -565,7 +569,7 @@ function OneCAgentTab({ onSwitchToManual }: AgentTabProps) {
               {
                 step: "Шаг 3",
                 title: "3. Готово к работе",
-                desc: "Синхронизация работает автоматически в фоне каждые 5 минут, отправляя заказы и обновляя статусы.",
+                 desc: "После успешной проверки агент остаётся доступен в кабинете и отправляет heartbeat. Обмен данными 1С настраивается отдельным интеграционным модулем.",
                 icon: <CheckCircle2 className="w-5 h-5 text-emerald-600" />,
               },
             ].map((s, idx) => (
@@ -682,7 +686,7 @@ function OneCAgentTab({ onSwitchToManual }: AgentTabProps) {
                         ) : (
                           <RefreshCw className="w-3.5 h-3.5 text-sky-600" />
                         )}
-                        Синхронизировать сейчас
+                         Проверить состояние агента
                       </Button>
 
                       <Button
@@ -700,7 +704,7 @@ function OneCAgentTab({ onSwitchToManual }: AgentTabProps) {
                   {/* Counters bar */}
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-4 pt-4 border-t border-border/60">
                     <div className="bg-muted/30 rounded-lg p-2.5">
-                      <div className="text-xs text-muted-foreground">Передано заказов в SmartRoute</div>
+                       <div className="text-xs text-muted-foreground">Заказов в журналах интеграции</div>
                       <div className="text-lg font-bold text-sky-700">{agent.total_orders_synced}</div>
                     </div>
                     <div className="bg-muted/30 rounded-lg p-2.5">
@@ -745,8 +749,8 @@ function OneCAgentTab({ onSwitchToManual }: AgentTabProps) {
           </CardHeader>
           <CardContent className="text-xs text-muted-foreground space-y-2">
             <p>• <strong>Локальное соединение:</strong> Агент подключается к 1С на самом компьютере через официальный COMConnector или локальные HTTP-сервисы.</p>
-            <p>• <strong>Защита паролей:</strong> Ваши учётные данные 1С никогда не отправляются на сервер SmartRoute и хранятся локально на вашем ПК в зашифрованном виде.</p>
-            <p>• <strong>Безопасный канал HTTPS:</strong> Передача заказов осуществляется по зашифрованному протоколу TLS/HTTPS с Bearer-авторизацией.</p>
+            <p>• <strong>Защита паролей:</strong> Пароль 1С не отправляется на сервер SmartRoute. Не передавайте файл локальной конфигурации агента третьим лицам.</p>
+            <p>• <strong>Безопасный канал HTTPS:</strong> Служебные запросы агента передаются по TLS/HTTPS с Bearer-авторизацией.</p>
           </CardContent>
         </Card>
 

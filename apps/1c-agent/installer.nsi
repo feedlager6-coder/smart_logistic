@@ -46,7 +46,10 @@ Section "MainSection" SEC01
 
   File "SmartRoute_Agent.exe"
   File "smartroute.ico"
+  ; Never overwrite a user's token and settings during an update/reinstall.
+  SetOverwrite off
   File "config.json"
+  SetOverwrite ifnewer
   File "ИНСТРУКЦИЯ.txt"
 
   ; Create Desktop Shortcut

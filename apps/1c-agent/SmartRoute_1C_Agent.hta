@@ -427,7 +427,7 @@
     <div id="tabDashboard" class="tab-content">
       <div class="metrics-grid">
         <div class="metric-card">
-          <div class="metric-title">Передано заказов в SmartRoute</div>
+          <div class="metric-title">Проверок связи агента</div>
           <div id="statOrdersSent" class="metric-value blue">0</div>
         </div>
         <div class="metric-card">
@@ -468,7 +468,7 @@
       </div>
 
       <div class="btn-row">
-        <button id="btnSyncNow" class="btn btn-success" onclick="doSyncNow()">🔄 Синхронизировать сейчас</button>
+        <button id="btnSyncNow" class="btn btn-success" onclick="doSyncNow()">Проверить связь с сервером</button>
         <button class="btn btn-danger" onclick="doDisconnect()">Отвязать 1С от SmartRoute</button>
       </div>
 
@@ -907,28 +907,26 @@
       var btn = document.getElementById("btnSyncNow");
       btn.innerText = "⏳ Синхронизация...";
       btn.disabled = true;
-      addLog("INFO", "Запуск ручной синхронизации заказов и маршрутов...");
+      addLog("INFO", "Проверка связи агента с сервером SmartRoute...");
 
       // Send Heartbeat and Sync
       var hbPayload = JSON.stringify({
         agent_id: CONFIG.agent_id,
         status: "active",
-        orders_count: 1
       });
 
       sendHttpRequest("POST", CONFIG.server_url + "/api/integrations/1c/agent/heartbeat", hbPayload, CONFIG.api_token, function(err, resp) {
-        btn.innerText = "🔄 Синхронизировать сейчас";
+          btn.innerText = "Проверить связь с сервером";
         btn.disabled = false;
 
         if (err) {
           addLog("ERROR", "Ошибка обмена со SmartRoute: " + err.message);
         } else {
-          CONFIG.sync.orders_sent = (CONFIG.sync.orders_sent || 0) + 1;
           CONFIG.sync.last_sync = new Date().toISOString();
           saveConfig();
           updateUI();
-          addLog("SUCCESS", "Синхронизация успешно завершена! Данные актуализированы.");
-          alert("Синхронизация со SmartRoute успешно выполнена!");
+          addLog("SUCCESS", "Связь с сервером SmartRoute успешно проверена.");
+          alert("Связь с сервером SmartRoute успешно проверена.\n\nПолный обмен заказами и статусами выполняется отдельным модулем 1С.");
         }
       });
     }
