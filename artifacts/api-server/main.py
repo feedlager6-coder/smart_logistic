@@ -11250,9 +11250,8 @@ def pair_one_c_agent(body: OneCAgentPairRequest, request: Request):
     """Pair a native Windows agent using a one-time browser-generated code."""
     clean_code = _normalize_pairing_code(body.pairing_code)
     logger.info(
-        "1C agent pairing request received: agent=%s version=%s host=%s",
+        "1C agent pairing request received: agent=%s host=%s",
         (body.agent_name or "")[:120],
-        (body.agent_version or "")[:50],
         request.client.host if request.client else "",
     )
     if not clean_code:
