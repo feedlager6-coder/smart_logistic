@@ -49,3 +49,4 @@
 - [Workspace typecheck order](workspace-typecheck-order.md) — run `pnpm run typecheck:libs` before an artifact typecheck so project-reference declarations exist.
 - [Nullable boolean migrations](nullable-boolean-migrations.md) — backfill NULL before enforcing boolean activity flags; SQL `flag=TRUE` excludes NULL rows.
 - [Imported workspace dependencies](imported-workspace-deps.md) — imported monorepos may need a frozen workspace install after language-package setup before workflows can start.
+- [GitHub push authentication](github-push-auth.md) — HTTPS push accepts PAT via a temporary Basic Auth header; Bearer was rejected in this environment.
