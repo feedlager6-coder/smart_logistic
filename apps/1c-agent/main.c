@@ -46,6 +46,7 @@
 #define IDC_ST_ORDERS       1016
 #define IDC_ST_STATUSES     1017
 #define IDC_ST_LASTSYNC     1018
+#define IDC_BTN_REFRESH_BASES 1019
 
 #define DEFAULT_SERVER_URL  L""
 
@@ -481,67 +482,186 @@ BOOL SendHttpRequest(const wchar_t *fullUrl, const char *method, const char *jso
     return FALSE;
 }
 
-// 1C Base Scanner: Reads %APPDATA%\1C\1CEStart\ibases.v8i
-void Populate1CBases(HWND hCmb) {
-    SendMessageW(hCmb, CB_RESETCONTENT, 0, 0);
-    SendMessageW(hCmb, CB_ADDSTRING, 0, (LPARAM)L"— Выберите базу 1С из списка на этом ПК —");
+static wchar_t *TrimWideText(wchar_t *value) {
+    wchar_t *start = value;
+    while (*start == L' ' || *start == L'\t' || *start == L'\r' || *start == L'\n') {
+        start++;
+    }
+    wchar_t *end = start + wcslen(start);
+    while (end > start && (end[-1] == L' ' || end[-1] == L'\t' || end[-1] == L'\r' || end[-1] == L'\n')) {
+        *--end = L'\0';
+    }
+    return start;
+}
 
-    wchar_t appData[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, appData))) {
-        wchar_t paths[3][MAX_PATH];
-        swprintf(paths[0], MAX_PATH, L"%s\\1C\\1CEStart\\ibases.v8i", appData);
-        swprintf(paths[1], MAX_PATH, L"%s\\1C\\1Cv82\\ibases.v8i", appData);
-        swprintf(paths[2], MAX_PATH, L"%s\\1C\\1Cv8\\ibases.v8i", appData);
+static BOOL ReadTextFileForBases(const wchar_t *path, wchar_t **outText) {
+    *outText = NULL;
+    FILE *f = _wfopen(path, L"rb");
+    if (!f) return FALSE;
 
-        for (int p = 0; p < 3; p++) {
-            FILE *f = _wfopen(paths[p], L"rt, ccs=UTF-8");
-            if (!f) f = _wfopen(paths[p], L"rt, ccs=UNICODE");
-            if (!f) f = _wfopen(paths[p], L"rt");
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return FALSE;
+    }
+    long fileSize = ftell(f);
+    if (fileSize <= 0 || fileSize > 4 * 1024 * 1024) {
+        fclose(f);
+        return FALSE;
+    }
+    rewind(f);
 
-            if (f) {
-                wchar_t line[1024];
-                wchar_t curName[256] = {0};
-                wchar_t curConn[512] = {0};
+    unsigned char *bytes = (unsigned char *)malloc((size_t)fileSize);
+    if (!bytes) {
+        fclose(f);
+        return FALSE;
+    }
+    size_t bytesRead = fread(bytes, 1, (size_t)fileSize, f);
+    fclose(f);
+    if (bytesRead != (size_t)fileSize) {
+        free(bytes);
+        return FALSE;
+    }
 
-                while (fgetws(line, 1024, f)) {
-                    // Trim newline
-                    int len = (int)wcslen(line);
-                    while (len > 0 && (line[len-1] == L'\r' || line[len-1] == L'\n' || line[len-1] == L' ')) {
-                        line[--len] = L'\0';
-                    }
+    size_t offset = 0;
+    BOOL isUtf16 = FALSE;
+    BOOL isBigEndian = FALSE;
+    if (bytesRead >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE) {
+        offset = 2;
+        isUtf16 = TRUE;
+    } else if (bytesRead >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF) {
+        offset = 2;
+        isUtf16 = TRUE;
+        isBigEndian = TRUE;
+    } else if (bytesRead >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) {
+        offset = 3;
+    }
 
-                    if (line[0] == L'[' && line[len-1] == L']') {
-                        if (curName[0] && curConn[0]) {
-                            wchar_t itemText[1024];
-                            swprintf(itemText, 1024, L"%s (%s)", curName, (wcsstr(curConn, L"Srvr=") ? L"Сервер 1С" : L"Файловая"));
-                            int idx = (int)SendMessageW(hCmb, CB_ADDSTRING, 0, (LPARAM)itemText);
-                            if (wcscmp(curName, g_cfg.base_name) == 0) {
-                                SendMessageW(hCmb, CB_SETCURSEL, idx, 0);
-                            }
-                        }
-                        wcsncpy(curName, line + 1, len - 2);
-                        curName[len - 2] = L'\0';
-                        curConn[0] = L'\0';
-                    } else if (wcsncmp(line, L"Connect=", 8) == 0) {
-                        wcscpy(curConn, line + 8);
-                    }
-                }
-                if (curName[0] && curConn[0]) {
-                    wchar_t itemText[1024];
-                    swprintf(itemText, 1024, L"%s (%s)", curName, (wcsstr(curConn, L"Srvr=") ? L"Сервер 1С" : L"Файловая"));
-                    int idx = (int)SendMessageW(hCmb, CB_ADDSTRING, 0, (LPARAM)itemText);
-                    if (wcscmp(curName, g_cfg.base_name) == 0) {
-                        SendMessageW(hCmb, CB_SETCURSEL, idx, 0);
-                    }
-                }
-                fclose(f);
-                break;
+    wchar_t *text = NULL;
+    if (isUtf16) {
+        size_t wcharCount = (bytesRead - offset) / 2;
+        text = (wchar_t *)malloc((wcharCount + 1) * sizeof(wchar_t));
+        if (text) {
+            for (size_t i = 0; i < wcharCount; i++) {
+                unsigned char first = bytes[offset + i * 2];
+                unsigned char second = bytes[offset + i * 2 + 1];
+                text[i] = isBigEndian
+                    ? (wchar_t)(((unsigned int)first << 8) | second)
+                    : (wchar_t)(((unsigned int)second << 8) | first);
+            }
+            text[wcharCount] = L'\0';
+        }
+    } else {
+        int byteCount = (int)(bytesRead - offset);
+        int wideCount = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (LPCCH)(bytes + offset), byteCount, NULL, 0);
+        UINT codePage = CP_UTF8;
+        if (wideCount <= 0) {
+            codePage = CP_ACP;
+            wideCount = MultiByteToWideChar(codePage, 0, (LPCCH)(bytes + offset), byteCount, NULL, 0);
+        }
+        if (wideCount > 0) {
+            text = (wchar_t *)malloc((wideCount + 1) * sizeof(wchar_t));
+            if (text) {
+                MultiByteToWideChar(codePage, 0, (LPCCH)(bytes + offset), byteCount, text, wideCount);
+                text[wideCount] = L'\0';
             }
         }
     }
-    if (SendMessageW(hCmb, CB_GETCURSEL, 0, 0) == CB_ERR) {
-        SendMessageW(hCmb, CB_SETCURSEL, 0, 0);
+
+    free(bytes);
+    *outText = text;
+    return text != NULL;
+}
+
+static int AddBaseToCombo(HWND hCmb, const wchar_t *name, const wchar_t *connect, int *selectedIndex) {
+    wchar_t itemText[1024];
+    swprintf(itemText, 1024, L"%s (%s)", name, (wcsstr(connect, L"Srvr=") ? L"Сервер 1С" : L"Файловая"));
+    int idx = (int)SendMessageW(hCmb, CB_ADDSTRING, 0, (LPARAM)itemText);
+    if (idx != CB_ERR && selectedIndex && wcscmp(name, g_cfg.base_name) == 0) {
+        *selectedIndex = idx;
     }
+    return idx == CB_ERR ? 0 : 1;
+}
+
+static int ParseIBasesText(HWND hCmb, const wchar_t *text, int *selectedIndex) {
+    int count = 0;
+    wchar_t currentName[256] = {0};
+    wchar_t currentConnect[512] = {0};
+    const wchar_t *cursor = text;
+
+    while (cursor && *cursor) {
+        const wchar_t *lineEnd = wcschr(cursor, L'\n');
+        size_t lineLength = lineEnd ? (size_t)(lineEnd - cursor) : wcslen(cursor);
+        wchar_t line[1024];
+        if (lineLength >= sizeof(line) / sizeof(line[0])) {
+            lineLength = sizeof(line) / sizeof(line[0]) - 1;
+        }
+        wcsncpy(line, cursor, lineLength);
+        line[lineLength] = L'\0';
+        wchar_t *trimmed = TrimWideText(line);
+
+        size_t trimmedLength = wcslen(trimmed);
+        if (trimmedLength >= 2 && trimmed[0] == L'[' && trimmed[trimmedLength - 1] == L']') {
+            if (currentName[0] && currentConnect[0]) {
+                count += AddBaseToCombo(hCmb, currentName, currentConnect, selectedIndex);
+            }
+            size_t nameLength = trimmedLength - 2;
+            if (nameLength >= sizeof(currentName) / sizeof(currentName[0])) {
+                nameLength = sizeof(currentName) / sizeof(currentName[0]) - 1;
+            }
+            wcsncpy(currentName, trimmed + 1, nameLength);
+            currentName[nameLength] = L'\0';
+            currentConnect[0] = L'\0';
+        } else if (_wcsnicmp(trimmed, L"Connect=", 8) == 0) {
+            wcsncpy(currentConnect, TrimWideText(trimmed + 8), sizeof(currentConnect) / sizeof(currentConnect[0]) - 1);
+            currentConnect[sizeof(currentConnect) / sizeof(currentConnect[0]) - 1] = L'\0';
+        }
+
+        cursor = lineEnd ? lineEnd + 1 : NULL;
+    }
+
+    if (currentName[0] && currentConnect[0]) {
+        count += AddBaseToCombo(hCmb, currentName, currentConnect, selectedIndex);
+    }
+    return count;
+}
+
+// 1C Base Scanner: Reads all standard ibases.v8i locations, including UTF-16 files.
+void Populate1CBases(HWND hCmb) {
+    SendMessageW(hCmb, CB_RESETCONTENT, 0, 0);
+    SendMessageW(hCmb, CB_ADDSTRING, 0, (LPARAM)L"— Выберите базу 1С из списка на этом ПК —");
+    int selectedIndex = 0;
+    int baseCount = 0;
+
+    wchar_t paths[6][MAX_PATH];
+    int pathCount = 0;
+    wchar_t appData[MAX_PATH];
+    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, appData))) {
+        swprintf(paths[pathCount++], MAX_PATH, L"%s\\1C\\1CEStart\\ibases.v8i", appData);
+        swprintf(paths[pathCount++], MAX_PATH, L"%s\\1C\\1Cv82\\ibases.v8i", appData);
+        swprintf(paths[pathCount++], MAX_PATH, L"%s\\1C\\1Cv8\\ibases.v8i", appData);
+    }
+    wchar_t localAppData[MAX_PATH];
+    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localAppData))) {
+        swprintf(paths[pathCount++], MAX_PATH, L"%s\\1C\\1CEStart\\ibases.v8i", localAppData);
+        swprintf(paths[pathCount++], MAX_PATH, L"%s\\1C\\1Cv8\\ibases.v8i", localAppData);
+        swprintf(paths[pathCount++], MAX_PATH, L"%s\\1C\\1Cv82\\ibases.v8i", localAppData);
+    }
+
+    for (int p = 0; p < pathCount; p++) {
+        wchar_t *text = NULL;
+        if (ReadTextFileForBases(paths[p], &text)) {
+            baseCount += ParseIBasesText(hCmb, text, &selectedIndex);
+            free(text);
+        }
+    }
+
+    if (baseCount == 0) {
+        SendMessageW(hCmb, CB_SETITEMDATA, 0, (LPARAM)-1);
+        SendMessageW(hCmb, CB_DELETESTRING, 0, 0);
+        SendMessageW(hCmb, CB_INSERTSTRING, 0, (LPARAM)L"— Базы 1С не найдены автоматически —");
+        selectedIndex = 0;
+    }
+    SendMessageW(hCmb, CB_SETCURSEL, selectedIndex, 0);
 }
 
 // Update UI Text & Metrics
@@ -791,11 +911,6 @@ void ActionTest1C() {
         return;
     }
 
-    wcscpy(g_cfg.connection_string, connStr);
-    wcscpy(g_cfg.username, user);
-    wcscpy(g_cfg.password, pwd);
-    SaveConfig();
-
     SetWindowTextW(g_hOneCStatus, L"⏳ Проверка соединения через 1С COMConnector...");
     AddLog(L"INFO", L"Тестирование подключения к 1С:Предприятие...");
 
@@ -840,6 +955,10 @@ void ActionTest1C() {
                     pDisp->lpVtbl->Release(pDisp);
                     CoUninitialize();
 
+                    wcscpy(g_cfg.connection_string, connStr);
+                    wcscpy(g_cfg.username, user);
+                    wcscpy(g_cfg.password, pwd);
+                    SaveConfig();
                     SetWindowTextW(g_hOneCStatus, L"✅ УСПЕШНО! Подключение к базе 1С установлено.");
                     AddLog(L"SUCCESS", L"Подключение к 1С:Предприятие 8.3 успешно подтверждено!");
                     MessageBoxW(g_hMainWnd, L"Соединение с базой 1С успешно проверено и сохранено!\nПерейдите к Шагу 3 для запуска синхронизации.", L"SmartRoute 1C Agent", MB_ICONINFORMATION);
@@ -854,13 +973,18 @@ void ActionTest1C() {
     }
     CoUninitialize();
 
-    // If COM failed or not registered, but user configured parameters, save and show clear status
-    SetWindowTextW(g_hOneCStatus, L"✅ Параметры базы 1С сохранены (Direct Automation).");
-    AddLog(L"INFO", L"Параметры базы 1С сохранены.");
-    MessageBoxW(g_hMainWnd, L"Параметры базы 1С успешно сохранены!\nПерейдите к Шагу 3 для синхронизации.", L"SmartRoute 1C Agent", MB_ICONINFORMATION);
-    TabCtrl_SetCurSel(g_hTab, 2);
-    ShowWindow(g_tabPanels[1], SW_HIDE);
-    ShowWindow(g_tabPanels[2], SW_SHOW);
+    wchar_t errBuf[768];
+    swprintf(errBuf, 768,
+        L"❌ Не удалось подключиться к базе 1С через COMConnector.\n\n"
+        L"Параметры не сохранены. Убедитесь, что:\n"
+        L"1. Платформа 1С установлена на этом компьютере.\n"
+        L"2. Разрядность агента совпадает с разрядностью COMConnector.\n"
+        L"3. Строка подключения, логин и пароль указаны верно.\n\n"
+        L"Код ошибки COM: 0x%08lX",
+        (unsigned long)hr);
+    SetWindowTextW(g_hOneCStatus, L"❌ Подключение к 1С не установлено. Исправьте параметры и повторите проверку.");
+    AddLog(L"ERROR", L"COMConnector не смог подключиться к базе 1С.");
+    MessageBoxW(g_hMainWnd, errBuf, L"Ошибка подключения к 1С", MB_ICONERROR);
 }
 
 // Action 3: Sync Now
@@ -945,19 +1069,19 @@ void CreateGUIControls(HWND hWnd) {
     HINSTANCE hInst = GetModuleHandle(NULL);
 
     // Create Tab Control
-    g_hTab = CreateWindowExW(0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+    g_hTab = CreateWindowExW(0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_MULTILINE,
         15, 65, 850, 560, hWnd, (HMENU)IDC_TAB, hInst, NULL);
     SendMessageW(g_hTab, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
     TCITEMW tie;
     tie.mask = TCIF_TEXT;
-    tie.pszText = L"1️⃣ Шаг 1: Привязка";
+    tie.pszText = L"1. Привязка";
     TabCtrl_InsertItem(g_hTab, 0, &tie);
-    tie.pszText = L"2️⃣ Шаг 2: База 1С";
+    tie.pszText = L"2. База 1С";
     TabCtrl_InsertItem(g_hTab, 1, &tie);
-    tie.pszText = L"3️⃣ Шаг 3: Синхронизация";
+    tie.pszText = L"3. Синхронизация";
     TabCtrl_InsertItem(g_hTab, 2, &tie);
-    tie.pszText = L"📋 Журнал событий";
+    tie.pszText = L"4. Журнал";
     TabCtrl_InsertItem(g_hTab, 3, &tie);
 
     // Container panels for each tab
@@ -997,28 +1121,30 @@ void CreateGUIControls(HWND hWnd) {
 
     HWND hStBases = CreateWindowW(L"STATIC", L"Выберите базу 1С (найдено в списке баз на этом ПК):", WS_CHILD | WS_VISIBLE, 10, 45, 450, 20, p2, NULL, hInst, NULL);
     SendMessageW(hStBases, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
-    g_hCmbBases = CreateWindowW(WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 10, 70, 790, 200, p2, (HMENU)IDC_CMB_BASES, hInst, NULL);
+    g_hCmbBases = CreateWindowW(WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 10, 70, 600, 200, p2, (HMENU)IDC_CMB_BASES, hInst, NULL);
     SendMessageW(g_hCmbBases, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    HWND hBtnRefreshBases = CreateWindowW(L"BUTTON", L"Обновить список", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 625, 70, 175, 30, p2, (HMENU)IDC_BTN_REFRESH_BASES, hInst, NULL);
+    SendMessageW(hBtnRefreshBases, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
-    HWND hStConn = CreateWindowW(L"STATIC", L"Строка подключения к 1С:", WS_CHILD | WS_VISIBLE, 10, 110, 400, 20, p2, NULL, hInst, NULL);
+    HWND hStConn = CreateWindowW(L"STATIC", L"Строка подключения к 1С:", WS_CHILD | WS_VISIBLE, 10, 115, 400, 20, p2, NULL, hInst, NULL);
     SendMessageW(hStConn, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
-    g_hEdtConnStr = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 10, 135, 790, 30, p2, (HMENU)IDC_EDT_CONNSTR, hInst, NULL);
+    g_hEdtConnStr = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 10, 140, 790, 30, p2, (HMENU)IDC_EDT_CONNSTR, hInst, NULL);
     SendMessageW(g_hEdtConnStr, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-    HWND hStUser = CreateWindowW(L"STATIC", L"Пользователь 1С (Логин):", WS_CHILD | WS_VISIBLE, 10, 180, 250, 20, p2, NULL, hInst, NULL);
+    HWND hStUser = CreateWindowW(L"STATIC", L"Пользователь 1С (Логин):", WS_CHILD | WS_VISIBLE, 10, 185, 250, 20, p2, NULL, hInst, NULL);
     SendMessageW(hStUser, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
-    g_hEdtUser = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 10, 205, 385, 30, p2, (HMENU)IDC_EDT_USER, hInst, NULL);
+    g_hEdtUser = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 10, 210, 385, 30, p2, (HMENU)IDC_EDT_USER, hInst, NULL);
     SendMessageW(g_hEdtUser, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-    HWND hStPwd = CreateWindowW(L"STATIC", L"Пароль 1С (если есть):", WS_CHILD | WS_VISIBLE, 415, 180, 250, 20, p2, NULL, hInst, NULL);
+    HWND hStPwd = CreateWindowW(L"STATIC", L"Пароль 1С (если есть):", WS_CHILD | WS_VISIBLE, 415, 185, 250, 20, p2, NULL, hInst, NULL);
     SendMessageW(hStPwd, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
-    g_hEdtPwd = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD, 415, 205, 385, 30, p2, (HMENU)IDC_EDT_PWD, hInst, NULL);
+    g_hEdtPwd = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD, 415, 210, 385, 30, p2, (HMENU)IDC_EDT_PWD, hInst, NULL);
     SendMessageW(g_hEdtPwd, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-    g_hBtnTest1C = CreateWindowW(L"BUTTON", L"🔌 Проверить и сохранить подключение 1С", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_DEFPUSHBUTTON, 10, 255, 350, 40, p2, (HMENU)IDC_BTN_TEST_1C, hInst, NULL);
+    g_hBtnTest1C = CreateWindowW(L"BUTTON", L"Проверить и сохранить подключение 1С", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_DEFPUSHBUTTON, 10, 260, 350, 40, p2, (HMENU)IDC_BTN_TEST_1C, hInst, NULL);
     SendMessageW(g_hBtnTest1C, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
-    g_hOneCStatus = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 10, 305, 790, 40, p2, NULL, hInst, NULL);
+    g_hOneCStatus = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 10, 310, 790, 40, p2, NULL, hInst, NULL);
     SendMessageW(g_hOneCStatus, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
     // ---------------- TAB 3: SYNC DASHBOARD ----------------
@@ -1091,6 +1217,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             ActionPair();
         } else if (id == IDC_BTN_TEST_1C) {
             ActionTest1C();
+        } else if (id == IDC_BTN_REFRESH_BASES) {
+            Populate1CBases(g_hCmbBases);
+            SetWindowTextW(g_hOneCStatus, L"Список баз 1С обновлён. Выберите базу или укажите строку подключения вручную.");
         } else if (id == IDC_BTN_SYNC_NOW) {
             ActionSyncNow();
         } else if (id == IDC_BTN_DISCONNECT) {

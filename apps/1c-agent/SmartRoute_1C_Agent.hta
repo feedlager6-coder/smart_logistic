@@ -98,9 +98,12 @@
       margin-bottom: 16px;
       border-bottom: 2px solid #e2e8f0;
       padding-bottom: 2px;
+      flex-wrap: wrap;
     }
     .tab-btn {
-      padding: 10px 18px;
+      flex: 1 1 170px;
+      min-width: 0;
+      padding: 10px 12px;
       background: #e2e8f0;
       color: #475569;
       border: none;
@@ -346,10 +349,10 @@
   <div class="container">
     <!-- Tab Navigation -->
     <div class="tab-bar">
-      <button class="tab-btn active" onclick="switchTab('tabPairing', this)">1️⃣ Шаг 1: Привязка</button>
-      <button class="tab-btn" onclick="switchTab('tabOneC', this)">2️⃣ Шаг 2: База 1С</button>
-      <button class="tab-btn" onclick="switchTab('tabDashboard', this)">3️⃣ Шаг 3: Синхронизация</button>
-      <button class="tab-btn" onclick="switchTab('tabLogs', this)">📋 Журнал</button>
+      <button class="tab-btn active" onclick="switchTab('tabPairing', this)">1. Привязка</button>
+      <button class="tab-btn" onclick="switchTab('tabOneC', this)">2. База 1С</button>
+      <button class="tab-btn" onclick="switchTab('tabDashboard', this)">3. Синхронизация</button>
+      <button class="tab-btn" onclick="switchTab('tabLogs', this)">4. Журнал</button>
     </div>
 
     <!-- TAB 1: PAIRING WIZARD -->
@@ -389,6 +392,7 @@
         <select id="select1CBases" class="form-select" onchange="onSelect1CBase()">
           <option value="">— Загрузка списка баз 1С... —</option>
         </select>
+        <button class="btn btn-secondary" style="margin-top:8px;" onclick="detect1CBases()">Обновить список баз</button>
       </div>
 
       <div class="form-group">
@@ -641,9 +645,12 @@
         basePaths.push(appData + "\\1C\\1CEStart\\ibases.v8i");
         basePaths.push(appData + "\\1C\\1Cv82\\ibases.v8i");
         basePaths.push(appData + "\\1C\\1Cv8\\ibases.v8i");
+        var localAppData = g_shell.ExpandEnvironmentStrings("%LOCALAPPDATA%");
+        basePaths.push(localAppData + "\\1C\\1CEStart\\ibases.v8i");
+        basePaths.push(localAppData + "\\1C\\1Cv8\\ibases.v8i");
+        basePaths.push(localAppData + "\\1C\\1Cv82\\ibases.v8i");
       }
 
-      var found = false;
       for (var i = 0; i < basePaths.length; i++) {
         var path = basePaths[i];
         if (g_fso && g_fso.FileExists(path)) {
@@ -652,8 +659,6 @@
             var content = file.ReadAll();
             file.Close();
             parseIbasesFile(content);
-            found = true;
-            break;
           } catch(e){}
         }
       }
@@ -691,7 +696,7 @@
         var line = lines[i].replace(/^\s+|\s+$/g, '');
         if (line.indexOf("[") === 0 && line.indexOf("]") > 0) {
           if (currentName && currentConnect) {
-            g_detectedBases.push({ name: currentName, connect: currentConnect });
+            addDetectedBase(currentName, currentConnect);
           }
           currentName = line.substring(1, line.indexOf("]"));
           currentConnect = null;
@@ -700,8 +705,15 @@
         }
       }
       if (currentName && currentConnect) {
-        g_detectedBases.push({ name: currentName, connect: currentConnect });
+        addDetectedBase(currentName, currentConnect);
       }
+    }
+
+    function addDetectedBase(name, connect) {
+      for (var i = 0; i < g_detectedBases.length; i++) {
+        if (g_detectedBases[i].name === name && g_detectedBases[i].connect === connect) return;
+      }
+      g_detectedBases.push({ name: name, connect: connect });
     }
 
     function onSelect1CBase() {
@@ -835,11 +847,6 @@
         return;
       }
 
-      CONFIG.onec.connection_string = connStr;
-      CONFIG.onec.username = user;
-      CONFIG.onec.password = pwd;
-      saveConfig();
-
       resBox.style.display = "block";
       resBox.className = "alert-box";
       resBox.innerText = "⏳ Проверка подключения к 1С через COMConnector...";
@@ -874,6 +881,10 @@
 
         resBox.className = "alert-box alert-success";
         resBox.innerText = "✅ УСПЕШНО!\nПодключение к 1С установлено. Конфигурация: " + metaName;
+        CONFIG.onec.connection_string = connStr;
+        CONFIG.onec.username = user;
+        CONFIG.onec.password = pwd;
+        saveConfig();
         addLog("SUCCESS", "Подключение к 1С успешно! " + metaName);
         alert("Соединение с 1С успешно проверено и сохранено!\nПерейдите к Шагу 3 для запуска синхронизации.");
         switchTabByName("tabDashboard");
